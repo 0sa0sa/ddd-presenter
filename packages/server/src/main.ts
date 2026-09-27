@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
+import { assistantFromEnv } from "./ai.ts";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db.ts";
 
@@ -8,7 +9,8 @@ const port = Number(process.env.PORT ?? process.env.DDD_PORT ?? 4870);
 const dbPath = process.env.DDD_DB ?? join(import.meta.dir, "../data/ddd.sqlite");
 if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 const db = openDatabase(dbPath);
-const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1" });
+const assistant = assistantFromEnv();
+const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1", assistant });
 
 // Serve the built web app (packages/web/dist) when present; the Vite dev server proxies /api otherwise.
 const dist = join(import.meta.dir, "../../web/dist");
@@ -30,4 +32,4 @@ try {
   }
   throw e;
 }
-console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath})`);
+console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath}; AI: ${assistant ? assistant.model : "off - set ANTHROPIC_API_KEY to enable"})`);

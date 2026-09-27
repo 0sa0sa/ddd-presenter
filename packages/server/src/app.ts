@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { emptyBoard, normalizeBoard, ruleUsage, validateModelText } from "@ddd/core";
+import { boardGhosts, emptyBoard, normalizeBoard, proposeLocally, ruleUsage, STICKY_KINDS, validateModelText, type BoardGhost, type ProposalKind, type StickyKind } from "@ddd/core";
+import type { ModelAssistant } from "./ai.ts";
 import { computePlan, generatePython, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
 import { strToU8, zipSync } from "fflate";
 import { Hono, type Context } from "hono";
@@ -18,6 +19,8 @@ const MAX_MODEL_BYTES = 1_000_000;
 export interface AppOptions {
   /** Set the Secure flag on cookies (production over HTTPS). */
   secureCookies?: boolean;
+  /** LLM used for assistance when a workspace enables AI; undefined = local suggestions only. */
+  assistant?: ModelAssistant;
 }
 
 export function createApp(db: Database, options: AppOptions = {}) {
@@ -210,8 +213,19 @@ export function createApp(db: Database, options: AppOptions = {}) {
   app.get("/api/workspaces/:wsId", (c) => {
     const wsId = c.req.param("wsId");
     const role = roleIn(wsId, c.get("user").id);
-    const ws = db.query("SELECT id, name, created_at FROM workspaces WHERE id = ?").get(wsId);
-    return c.json({ workspace: ws, role });
+    const ws = db.query("SELECT id, name, created_at, ai_enabled FROM workspaces WHERE id = ?").get(wsId) as { ai_enabled: number } & Record<string, unknown>;
+    return c.json({ workspace: { ...ws, ai_enabled: !!ws.ai_enabled }, role, ai_available: !!options.assistant, ai_model: options.assistant?.model ?? null });
+  });
+
+  app.patch("/api/workspaces/:wsId/settings", async (c) => {
+    const wsId = c.req.param("wsId");
+    const actor = c.get("user");
+    requireRole(roleIn(wsId, actor.id), "owner");
+    const { ai_enabled } = await body<{ ai_enabled?: boolean }>(c);
+    if (typeof ai_enabled !== "boolean") fail(400, "ai_enabled must be true or false");
+    db.query("UPDATE workspaces SET ai_enabled = ? WHERE id = ?").run(ai_enabled ? 1 : 0, wsId);
+    audit(wsId, actor.id, ai_enabled ? "ai.enable" : "ai.disable", wsId);
+    return c.json({ ok: true, ai_enabled });
   });
 
   app.get("/api/workspaces/:wsId/members", (c) => {
@@ -512,6 +526,112 @@ export function createApp(db: Database, options: AppOptions = {}) {
       now(),
     );
     return c.json({ ok: true });
+  });
+
+  // -- AI assistance ---------------------------------------------------------------
+
+  const aiFor = (workspaceId: string): ModelAssistant | undefined => {
+    const row = db.query("SELECT ai_enabled FROM workspaces WHERE id = ?").get(workspaceId) as { ai_enabled: number } | null;
+    return row?.ai_enabled ? options.assistant : undefined;
+  };
+
+  const errorCount = (yaml: string) => validateModelText(yaml).diagnostics.filter((d) => d.severity === "error").length;
+
+  app.get("/api/projects/:projectId/assist", (c) => {
+    const { project } = loadProject(c);
+    const row = db.query("SELECT ai_enabled FROM workspaces WHERE id = ?").get(project.workspace_id) as { ai_enabled: number };
+    return c.json({ available: !!options.assistant, enabled: !!row.ai_enabled, active: !!aiFor(project.workspace_id), model: options.assistant?.model ?? null });
+  });
+
+  /** Ghost text from the LLM. Suggestions that break the YAML or add validation errors are dropped. */
+  app.post("/api/projects/:projectId/assist/inline", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const ai = aiFor(project.workspace_id);
+    if (!ai) fail(403, "AI assistance is not enabled for this workspace");
+    const { yaml, offset } = await body<{ yaml?: string; offset?: number }>(c);
+    if (typeof yaml !== "string" || typeof offset !== "number" || offset < 0 || offset > yaml.length) fail(400, "yaml and offset are required");
+    checkModelSize(yaml!);
+    let text: string | undefined;
+    try {
+      text = await ai!.inline({ yaml: yaml!, offset: offset! });
+    } catch (e) {
+      console.error("assist.inline failed:", (e as Error).message);
+      return c.json({ suggestion: null, error: "AI の応答を取得できませんでした" });
+    }
+    if (!text || !text.trim()) return c.json({ suggestion: null });
+    const next = yaml!.slice(0, offset) + text + yaml!.slice(offset);
+    if (errorCount(next) > errorCount(yaml!)) return c.json({ suggestion: null, dropped: true });
+    return c.json({ suggestion: { text, label: "AI の提案", source: "llm" } });
+  });
+
+  /** Proposal for an aggregate (or the whole context): LLM when enabled, local rules otherwise. */
+  app.post("/api/projects/:projectId/assist/propose", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const b = await body<{ yaml?: string; context?: string; aggregate?: string; kind?: string; instruction?: string }>(c);
+    if (typeof b.yaml !== "string" || typeof b.context !== "string" || typeof b.kind !== "string") fail(400, "yaml, context and kind are required");
+    checkModelSize(b.yaml!);
+    const ai = aiFor(project.workspace_id);
+    if (!ai) {
+      if (b.kind === "custom" || !b.aggregate) fail(403, "Free-form proposals need AI to be enabled for this workspace");
+      const p = proposeLocally(b.yaml!, b.context!, b.aggregate!, b.kind as ProposalKind);
+      if (!p) return c.json({ proposal: null, message: "モデルの構造から提案できることはありません" });
+      return c.json({ proposal: p, diagnostics: validateModelText(p.yaml).diagnostics });
+    }
+    const req = { yaml: b.yaml!, context: b.context!, aggregate: b.aggregate, kind: b.kind!, instruction: typeof b.instruction === "string" ? b.instruction.slice(0, 2000) : undefined };
+    try {
+      let p = await ai.propose(req);
+      if (!p) return c.json({ proposal: null, message: "AI が提案を返しませんでした" });
+      let v = validateModelText(p.yaml);
+      if (!v.ok) {
+        // One repair round with the validator's errors.
+        const errors = v.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.line ? `line ${d.line}: ` : ""}${d.element ? `${d.element}: ` : ""}${d.message}`);
+        const repaired = await ai.propose({ ...req, repair: { yaml: p.yaml, errors } });
+        if (repaired) {
+          p = repaired;
+          v = validateModelText(p.yaml);
+        }
+      }
+      return c.json({ proposal: { ...p, source: "llm" }, diagnostics: v.diagnostics });
+    } catch (e) {
+      console.error("assist.propose failed:", (e as Error).message);
+      return c.json({ proposal: null, message: "AI の応答を取得できませんでした" });
+    }
+  });
+
+  /** Ghost stickies for the discovery board: structural predictions plus LLM ideas when enabled. */
+  app.post("/api/projects/:projectId/assist/board", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const raw = await body<{ board?: unknown; instruction?: string; llm?: boolean }>(c);
+    const board = normalizeBoard(raw.board);
+    if (!board) fail(400, "board is invalid");
+    const ghosts: BoardGhost[] = boardGhosts(board!);
+    const ai = aiFor(project.workspace_id);
+    if (ai && raw.llm) {
+      try {
+        const suggestions = await ai.board({ board: board!, instruction: typeof raw.instruction === "string" ? raw.instruction.slice(0, 500) : undefined });
+        suggestions.forEach((s, i) => {
+          const near = board!.items.find((it) => it.id === s.near_item_id);
+          if (!near || !(s.kind in STICKY_KINDS) || !s.text.trim()) return;
+          const meta = STICKY_KINDS[s.kind as StickyKind];
+          const gap = 40;
+          const pos =
+            s.placement === "left" ? { x: near.x - meta.w - gap, y: near.y } : s.placement === "above" ? { x: near.x, y: near.y - meta.h - gap } : s.placement === "below" ? { x: near.x, y: near.y + near.h + gap } : { x: near.x + near.w + gap, y: near.y };
+          const id = `ghost-llm-${i}-${near.id}`;
+          ghosts.push({
+            id,
+            kind: s.kind as StickyKind,
+            text: s.text.slice(0, 200),
+            ...pos,
+            connect: s.connect === "from_near" ? { from: near.id, to: id } : s.connect === "to_near" ? { from: id, to: near.id } : undefined,
+            reason: s.reason.slice(0, 300),
+            source: "llm",
+          });
+        });
+      } catch (e) {
+        console.error("assist.board failed:", (e as Error).message);
+      }
+    }
+    return c.json({ ghosts, ai: !!ai });
   });
 
   // -- discovery board (EventStorming canvas) -----------------------------------

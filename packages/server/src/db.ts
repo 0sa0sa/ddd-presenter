@@ -67,6 +67,8 @@ const MIGRATIONS: string[] = [
      updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
      updated_at TEXT NOT NULL
    );`,
+  // AI assistance is off until a workspace owner turns it on (FR-035: tenants can disable AI entirely).
+  `ALTER TABLE workspaces ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {
