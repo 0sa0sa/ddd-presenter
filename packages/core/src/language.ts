@@ -3,10 +3,10 @@
  * Pure and browser-safe; used by the Web editor and by the Language Server (VS Code).
  */
 import { applyEdits, type EditResult } from "./edit.ts";
-import type { AggregateIR, ContextIR, EntityIR, FactoryIR, ModelIR, OperationIR, StateGuardIR, StepIR, UseCaseIR, ValueObjectIR } from "./ir.ts";
+import { RELATIONSHIP_PATTERNS, type AggregateIR, type ContextIR, type EntityIR, type FactoryIR, type ModelIR, type OperationIR, type PolicyIR, type StateGuardIR, type StepIR, type UseCaseIR, type ValueObjectIR } from "./ir.ts";
 import { parseModel, type ParseResult } from "./parse.ts";
 import { PRIMITIVES, resolveType, typeToString, type Type } from "./types.ts";
-import { analyzeModel, type Analysis } from "./validate.ts";
+import { analyzeModel, parseEventRef, type Analysis } from "./validate.ts";
 import type { Path } from "./diagnostics.ts";
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,9 @@ export type CompletionKind =
   | "operation"
   | "factory"
   | "keyword"
-  | "value";
+  | "value"
+  | "context"
+  | "useCase";
 
 export interface CompletionItem {
   label: string;
@@ -91,6 +93,9 @@ type Container =
   | "exprMap:args"
   | "extension"
   | "useCase"
+  | "policy"
+  | "exprMap:policyArgs"
+  | "relationship"
   | "step"
   | "step:load"
   | "step:create"
@@ -119,7 +124,7 @@ type Container =
   | "unknown";
 
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
-  root: { generation: "generation", contexts: "context" },
+  root: { generation: "generation", contexts: "context", relationships: "relationship" },
   context: {
     glossary: "glossary",
     errors: "error",
@@ -128,6 +133,7 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
     aggregates: "aggregate",
     extension_points: "extension",
     use_cases: "useCase",
+    policies: "policy",
   },
   error: { details: "field" },
   valueObject: { fields: "field", invariants: "invariant", normalize: "normalize" },
@@ -148,6 +154,7 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   emission: { fields: "eventField" },
   extension: { parameters: "parameter" },
   useCase: { input: "field", steps: "step", scenarios: "scenario:useCase" },
+  policy: { args: "exprMap:policyArgs" },
   step: { load: "step:load", create: "step:create", invoke: "step:invoke", if: "step:if" },
   "step:create": { args: "exprMap:args" },
   "step:invoke": { args: "exprMap:args" },
@@ -187,6 +194,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("description", "説明"),
     K("generation", "生成設定（パッケージ名・出力先）"),
     K("contexts", "Bounded context の一覧"),
+    K("relationships", "コンテキストマップ（コンテキスト間の関係とイベント契約）"),
   ],
   generation: [K("package", "生成するPythonパッケージ名（snake_case）"), K("src_dir", "ソースの出力先（既定 src）"), K("tests_dir", "テストの出力先（既定 tests）")],
   context: [
@@ -199,6 +207,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("aggregates", "一貫性の境界。Rootを通して変更する"),
     K("extension_points", "顧客コードで実装する拡張点"),
     K("use_cases", "アクターの操作に対応する手順"),
+    K("policies", "イベントが起きたら Use case を実行する自動の反応"),
   ],
   glossary: [K("term", "用語"), K("definition", "定義")],
   error: [K("name", "例外クラス名（PascalCase）"), K("code", "機械可読コード（snake_case, 一意）"), K("message", "利用者に見せるメッセージ"), K("description", "説明"), K("details", "内部診断用の追加情報")],
@@ -260,6 +269,20 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("retry", "再試行されうる処理か"),
     K("steps", "手順（load / create / invoke / save / publish / if / fail / return）"),
     K("scenarios", "Given-When-Then（テストになる）"),
+  ],
+  policy: [
+    K("name", "ポリシー名（snake_case）"),
+    K("description", "業務上の意味（〜されたら〜する）"),
+    K("when", "きっかけのイベント: 同じコンテキストなら Event、別のコンテキストなら Context.Event"),
+    K("run", "実行するこのコンテキストの Use case"),
+    K("args", "Use case の入力: event.<フィールド>・clock.now・ids.new・値"),
+  ],
+  relationship: [
+    K("upstream", "上流（イベントを公開する側）のコンテキスト"),
+    K("downstream", "下流（イベントを受けて反応する側）のコンテキスト"),
+    K("pattern", "関係の種類（customer_supplier / conformist / anticorruption_layer など。既定 customer_supplier）"),
+    K("events", "イベント契約: 下流が受け取ってよい上流のイベント"),
+    K("description", "説明"),
   ],
   step: [
     K("load", "Repositoryから読み込む: { aggregate, by, as, not_found }"),
@@ -379,6 +402,7 @@ interface Scope {
   operation?: OperationIR;
   factory?: FactoryIR;
   useCase?: UseCaseIR;
+  policy?: PolicyIR;
 }
 
 const indentOf = (line: string) => /^ */.exec(line)![0].length;
@@ -423,6 +447,7 @@ function resolveScope(s: Snapshot): Scope {
       for (const f of ag.factories) if (inside(s, f.path)) scope.factory = f;
     }
     for (const uc of ctx.useCases) if (inside(s, uc.path)) scope.useCase = uc;
+    for (const p of ctx.policies) if (inside(s, p.path)) scope.policy = p;
   }
   return scope;
 }
@@ -501,6 +526,13 @@ function classify(s: Snapshot): Position {
       ? [...ancestorKeys(s.lines, s.lineIdx, base + dash), lineKey]
       : ancestorKeys(s.lines, s.lineIdx, base + 1);
     if (bracket.ch === "[") {
+      // `- { key: [item` — a list inside a single flow mapping (e.g. a relationship's events).
+      const keyBefore = /([A-Za-z_]\w*)\s*:\s*$/.exec(prefix.slice(0, bracket.index));
+      const outer = openBracket(prefix.slice(0, bracket.index));
+      if (keyBefore && outer?.ch === "{" && !openBracket(prefix.slice(0, outer.index))) {
+        const mapChain = lineKey && prefix.slice(0, outer.index).trimEnd().endsWith(":") ? [...ancestorKeys(s.lines, s.lineIdx, base + dash), lineKey] : ancestorKeys(s.lines, s.lineIdx, base + 1);
+        return { kind: "value", container: containerOf(mapChain), chain: mapChain, key: keyBefore[1]!, partial, from, valueStart: s.lineStart + bracket.index + 1 + inner.length - last.length, flow: true, listItem: true };
+      }
       const key = ownerChain[ownerChain.length - 1] ?? "";
       const chain = ownerChain.slice(0, -1);
       return { kind: "value", container: containerOf(chain), chain, key, partial, from, valueStart: s.lineStart + bracket.index + 1 + inner.length - last.length, flow: true, listItem: true };
@@ -528,7 +560,7 @@ function classify(s: Snapshot): Position {
     return { kind: "value", container: containerOf(chain), chain, key: lineKey, partial, from, valueStart, flow: false, listItem: false };
   }
   if (/^\s*(-\s+)?[A-Za-z_]*$/.test(prefix)) {
-    if (dash && /^\s*-\s+[a-z_]*$/.test(prefix)) {
+    if (dash && /^\s*-\s+[A-Za-z_]*$/.test(prefix)) {
       // `- xyz` can be a new mapping item (key) or a scalar list item (value); decide by the owning collection.
       const ownerChain = ancestorKeys(s.lines, s.lineIdx, base + 1);
       const owner = containerOf(ownerChain);
@@ -655,6 +687,10 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
   const vars = (): CompletionItem[] =>
     scope.useCase ? [...bindingsBefore(scope.useCase.steps, s)].map(([v, a]) => ({ label: v, kind: "variable" as const, detail: a })) : [];
 
+  if (c === "relationship") return relationshipCompletions(s, pos);
+  if (c === "policy" && key === "when" && ctx) return policyEventCompletions(s, ctx, pos);
+  if (c === "policy" && key === "run") return (ctx?.useCases ?? []).map((u) => ({ label: u.name, kind: "useCase" as const, detail: u.command, documentation: u.description }));
+  if (c === "exprMap:policyArgs") return policyArgCompletions(s, scope, pos);
   if (c.startsWith("data:")) return dataCompletions(s, scope, pos);
   if (key === "type" && c === "givenAggregate") return aggregates();
   if (key === "type" || key === "returns") return typeCompletions(ctx, scope);
@@ -701,6 +737,116 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     return [...new Set([...params, ...fields])].map((n) => ({ label: n, kind: params.includes(n) ? ("parameter" as const) : ("field" as const) }));
   }
   return [];
+}
+
+const PATTERN_DOCS: Record<string, string> = {
+  customer_supplier: "上流（供給側）が下流（顧客）の要望を聞いてイベント契約を提供する",
+  conformist: "下流が上流のモデルを翻訳せずにそのまま受け入れる",
+  anticorruption_layer: "下流が翻訳層を置き、上流のモデルが入り込むのを防ぐ（生成物: extensions の translators.py）",
+  open_host_service: "上流が誰でも使える公開の連携口を提供する",
+  published_language: "文書化された共有の形（イベントの形）で連携する",
+  shared_kernel: "2つのコンテキストがモデルの一部を共有し、合意して変更する",
+  partnership: "2つのチームが協調して一緒に変更・リリースする",
+  separate_ways: "連携しない（イベント契約は持てない）",
+};
+
+function contextByName(s: Snapshot, name: string | undefined): ContextIR | undefined {
+  return s.model?.contexts.find((c) => c.name === name);
+}
+
+/** Upstream of the relationship under the cursor (flow map on the line, or the nearest `upstream:` above). */
+function relationshipUpstream(s: Snapshot): string | undefined {
+  const line = s.lines[s.lineIdx] ?? "";
+  return /[{,]\s*upstream\s*:\s*([A-Za-z_]\w*)/.exec(line)?.[1] ?? siblingValueAbove(s, "upstream");
+}
+
+function eventItems(s: Snapshot, ctx: ContextIR, qualify: boolean, rank: number, detailSuffix = ""): CompletionItem[] {
+  const info = s.analysis?.contexts.get(ctx.name)?.events;
+  return [...(info?.values() ?? [])].map((e) => ({
+    label: qualify ? `${ctx.name}.${e.name}` : e.name,
+    kind: "event" as const,
+    detail: `(${e.fields.map((f) => f.name).join(", ")})${detailSuffix}`,
+    documentation: `発生元: ${ctx.name} › ${e.sources.map((x) => `${x.aggregate}.${x.member}`).join(", ")}`,
+    sortRank: rank,
+  }));
+}
+
+function relationshipCompletions(s: Snapshot, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
+  const contexts = s.model?.contexts ?? [];
+  if (pos.key === "upstream" || pos.key === "downstream") return contexts.map((c) => ({ label: c.name, kind: "context" as const, detail: "Bounded context", documentation: c.description }));
+  if (pos.key === "pattern") return RELATIONSHIP_PATTERNS.map((p, i) => ({ label: p, kind: "value" as const, detail: PATTERN_DOCS[p], sortRank: i }));
+  if (pos.key === "events") {
+    const up = contextByName(s, relationshipUpstream(s));
+    return up ? eventItems(s, up, false, 1) : [];
+  }
+  return [];
+}
+
+/** `when:` of a policy: this context's events, then other contexts' events as Context.Event (contract events first). */
+function policyEventCompletions(s: Snapshot, ctx: ContextIR, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
+  const before = s.text.slice(pos.valueStart, pos.from);
+  const qualified = /([A-Za-z_]\w*)\s*\.\s*$/.exec(before);
+  if (qualified) {
+    const other = contextByName(s, qualified[1]);
+    return other ? eventItems(s, other, false, 1) : [];
+  }
+  const items = eventItems(s, ctx, false, 0);
+  for (const other of s.model?.contexts ?? []) {
+    if (other === ctx) continue;
+    const rel = s.model!.relationships.find((r) => r.upstream === other.name && r.downstream === ctx.name);
+    for (const item of eventItems(s, other, true, 2)) {
+      const name = item.label.slice(other.name.length + 1);
+      const inContract = !!rel?.events.includes(name);
+      items.push({ ...item, sortRank: inContract ? 1 : 2, detail: `${item.detail} — ${inContract ? `契約: ${rel!.pattern}` : "関係（relationships）への追加が必要"}` });
+    }
+  }
+  return items;
+}
+
+/** The event a policy consumes, with the context that defines its payload types. */
+function policyEvent(s: Snapshot, ctx: ContextIR | undefined, policy: PolicyIR | undefined) {
+  if (!ctx || !policy) return undefined;
+  const ref = parseEventRef(policy.when);
+  const evCtx = ref && contextByName(s, ref.context ?? ctx.name);
+  const info = evCtx && s.analysis?.contexts.get(evCtx.name)?.events.get(ref!.name);
+  return info && evCtx ? { ctx: evCtx, info } : undefined;
+}
+
+/** Type of `event.a.b` inside a policy's args. */
+function eventPathType(s: Snapshot, ev: NonNullable<ReturnType<typeof policyEvent>>, segs: string[]): { owner: string; fields: Map<string, Type> } | undefined {
+  let fields = new Map(ev.info.fields.map((f) => [f.name, f.type]));
+  let owner = ev.info.name;
+  for (const seg of segs) {
+    const t = fields.get(seg);
+    const b = t && unwrap(t);
+    if (!b || (b.k !== "vo" && b.k !== "entity")) return undefined;
+    owner = b.name;
+    fields = s.analysis?.contexts.get(ev.ctx.name)?.fieldTypes.get(b.name) ?? new Map();
+  }
+  return { owner, fields };
+}
+
+function policyArgCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
+  const ctx = scope.context;
+  const ev = policyEvent(s, ctx, scope.policy);
+  const before = s.text.slice(pos.valueStart, pos.from);
+  if (/\bclock\s*\.\s*$/.test(before)) return [{ label: "now", kind: "port", detail: "DateTime — 現在時刻" }];
+  if (/\bids\s*\.\s*$/.test(before)) return [{ label: "new", kind: "port", detail: "UUID — 新しいID" }];
+  const path = /\bevent((?:\s*\.\s*[A-Za-z_]\w*)*)\s*\.\s*$/.exec(before);
+  if (path) {
+    if (!ev) return [];
+    const target = eventPathType(s, ev, path[1]!.split(".").map((x) => x.trim()).filter(Boolean));
+    return [...(target?.fields ?? [])].map(([n, t]) => ({ label: n, kind: "field" as const, detail: `${typeToString(t)} — ${target!.owner}` }));
+  }
+  const items: CompletionItem[] = [];
+  const uc = ctx?.useCases.find((u) => u.name === scope.policy?.run);
+  const input = uc && fieldTypesOf(s, uc.command).get(pos.key);
+  const b = input && unwrap(input);
+  if (b?.k === "enum") for (const v of ctx?.enums.find((e) => e.name === b.name)?.values ?? []) items.push({ label: v, kind: "enumValue", detail: b.name, sortRank: 0 });
+  if (ev) items.push({ label: "event", kind: "variable", detail: `${ev.ctx.name}.${ev.info.name}`, insertText: "event.", sortRank: 1 });
+  items.push({ label: "clock", kind: "port", detail: "clock.now → DateTime", insertText: "clock.now", sortRank: 3 }, { label: "ids", kind: "port", detail: "ids.new → UUID", insertText: "ids.new", sortRank: 3 });
+  items.push(...KEYWORDS.filter((k) => ["null", "true", "false"].includes(k.label)));
+  return items;
 }
 
 /** Value of a sibling key in the same mapping (flow map on the line, or nearby block lines). */
@@ -880,6 +1026,11 @@ function keyCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind
     }
     return params.map((p) => ({ label: p.name, kind: "parameter" as const, detail: p.type }));
   }
+  if (pos.container === "exprMap:policyArgs") {
+    const uc = scope.context?.useCases.find((u) => u.name === scope.policy?.run);
+    const present = new Set(siblingKeys(s, pos));
+    return (uc?.input ?? []).filter((f) => !present.has(f.name)).map((f, i) => ({ label: f.name, kind: "field" as const, detail: `${f.type}${f.required ? "" : "（省略可）"}`, insertText: `${f.name}: `, sortRank: i }));
+  }
   const keys = KEYS[pos.container] ?? [];
   // Hide keys already present in the same mapping.
   const present = new Set(siblingKeys(s, pos));
@@ -940,7 +1091,10 @@ type SymbolRef =
   | { kind: "operation"; ctx: ContextIR; aggregate: AggregateIR; op: OperationIR | FactoryIR }
   | { kind: "extension"; ctx: ContextIR; name: string }
   | { kind: "function"; name: string }
-  | { kind: "port"; name: string };
+  | { kind: "port"; name: string }
+  | { kind: "context"; ctx: ContextIR }
+  | { kind: "useCase"; ctx: ContextIR; useCase: UseCaseIR }
+  | { kind: "pattern"; name: string };
 
 function wordAt(text: string, offset: number): { from: number; to: number; word: string } | undefined {
   let from = offset;
@@ -971,8 +1125,53 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
     if (doc) return { ref: { kind: "key", key: w.word, doc }, ...w };
     return undefined;
   }
+  if (pos.kind === "value" && pos.container === "relationship") {
+    if (pos.key === "upstream" || pos.key === "downstream") {
+      const c = contextByName(s, w.word);
+      return c ? { ref: { kind: "context", ctx: c }, ...w } : undefined;
+    }
+    if (pos.key === "pattern" && PATTERN_DOCS[w.word]) return { ref: { kind: "pattern", name: w.word }, ...w };
+    if (pos.key === "events") {
+      const up = contextByName(s, relationshipUpstream(s));
+      if (up && s.analysis?.contexts.get(up.name)?.events.has(w.word)) return { ref: { kind: "type", ctx: up, name: w.word }, ...w };
+    }
+    return undefined;
+  }
   if (pos.kind !== "value" || !ctx) return undefined;
   const name = w.word;
+  if (pos.container === "policy" && pos.key === "when") {
+    const scalar = text.slice(pos.valueStart, text.indexOf("\n", pos.valueStart) === -1 ? text.length : text.indexOf("\n", pos.valueStart)).replace(/\s#.*$/, "");
+    const ref = parseEventRef(scalar);
+    if (!ref) return undefined;
+    const isContextPart = !!ref.context && text.slice(w.to).trimStart().startsWith(".");
+    if (isContextPart) {
+      const c = contextByName(s, name);
+      return c ? { ref: { kind: "context", ctx: c }, ...w } : undefined;
+    }
+    const evCtx = contextByName(s, ref.context ?? ctx.name);
+    if (evCtx && s.analysis?.contexts.get(evCtx.name)?.events.has(name)) return { ref: { kind: "type", ctx: evCtx, name }, ...w };
+    return undefined;
+  }
+  if (pos.container === "policy" && pos.key === "run") {
+    const uc = ctx.useCases.find((u) => u.name === name);
+    return uc ? { ref: { kind: "useCase", ctx, useCase: uc }, ...w } : undefined;
+  }
+  if (pos.container === "exprMap:policyArgs") {
+    const before = text.slice(pos.valueStart, w.from);
+    if (name === "clock" || name === "ids") return { ref: { kind: "port", name }, ...w };
+    if (/\b(clock|ids)\s*\.\s*$/.test(before)) return { ref: { kind: "port", name: `${/\b(clock|ids)\s*\.\s*$/.exec(before)![1]}.${name}` }, ...w };
+    const ev = policyEvent(s, ctx, scope.policy);
+    if (!ev) return undefined;
+    if (name === "event" && !/\.\s*$/.test(before)) return { ref: { kind: "type", ctx: ev.ctx, name: ev.info.name }, ...w };
+    const path = /\bevent((?:\s*\.\s*[A-Za-z_]\w*)*)\s*\.\s*$/.exec(before);
+    if (path) {
+      const target = eventPathType(s, ev, path[1]!.split(".").map((x) => x.trim()).filter(Boolean));
+      const t = target?.fields.get(name);
+      if (target && t) return { ref: { kind: "field", ctx: ev.ctx, owner: target.owner, name, type: t }, ...w };
+    }
+    for (const en of ctx.enums) if (en.values.includes(name)) return { ref: { kind: "enumValue", ctx, enumName: en.name, value: name }, ...w };
+    return undefined;
+  }
   const isType = (n: string) =>
     ctx.errors.some((e) => e.name === n) ||
     ctx.enums.some((e) => e.name === n) ||
@@ -1157,7 +1356,24 @@ function describe(ref: SymbolRef, s: { analysis?: Analysis; model?: ModelIR }): 
     case "function":
       return { markdown: FUNCTIONS.find((f) => f.label === ref.name)!.detail + "\n\n" + FUNCTIONS.find((f) => f.label === ref.name)!.documentation };
     case "port":
-      return { markdown: ref.name.startsWith("clock") ? "`clock.now` — 現在時刻（Use case の手順でのみ使える）" : "`ids.new` — 新しいID（Use case の手順でのみ使える）" };
+      return { markdown: ref.name.startsWith("clock") ? "`clock.now` — 現在時刻（Use case の手順とポリシーの args で使える）" : "`ids.new` — 新しいID（Use case の手順とポリシーの args で使える）" };
+    case "context": {
+      const c = ref.ctx;
+      const rels = (s.model?.relationships ?? []).filter((r) => r.upstream === c.name || r.downstream === c.name);
+      return {
+        markdown: `**${c.name}** — Bounded context${c.description ? `\n\n${c.description}` : ""}\n\n集約: ${c.aggregates.map((a) => `\`${a.name}\``).join(", ") || "—"}\n\nポリシー: ${c.policies.map((p) => `\`${p.name}\``).join(", ") || "—"}${rels.length ? `\n\n関係: ${rels.map((r) => `${r.upstream} → ${r.downstream}（${r.pattern}）`).join(", ")}` : ""}`,
+        path: [...c.path, "name"],
+      };
+    }
+    case "useCase": {
+      const u = ref.useCase;
+      return {
+        markdown: `**${u.name}** — Use case（${ref.ctx.name}）${u.description ? `\n\n${u.description}` : ""}\n\n入力（${u.command}）: ${u.input.map((f) => `\`${f.name}\`: ${f.type}${f.required ? "" : "?"}`).join(", ") || "なし"}`,
+        path: [...u.path, "name"],
+      };
+    }
+    case "pattern":
+      return { markdown: `\`${ref.name}\` — ${PATTERN_DOCS[ref.name]}` };
   }
 }
 

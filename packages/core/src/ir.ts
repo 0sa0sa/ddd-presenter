@@ -12,6 +12,8 @@ export interface ModelIR {
   description?: string;
   generation: GenerationSettings;
   contexts: ContextIR[];
+  /** Context map: how bounded contexts depend on each other (top level, between contexts). */
+  relationships: RelationshipIR[];
 }
 
 export interface GenerationSettings {
@@ -35,6 +37,8 @@ export interface ContextIR extends Located {
   aggregates: AggregateIR[];
   extensionPoints: ExtensionPointIR[];
   useCases: UseCaseIR[];
+  /** Reactions to domain events: when an event happens, run a use case of this context. */
+  policies: PolicyIR[];
 }
 
 export interface GlossaryEntryIR {
@@ -179,6 +183,38 @@ export interface UseCaseIR extends Located {
   retry: boolean;
   steps: StepIR[];
   scenarios: UseCaseScenarioIR[];
+}
+
+export interface PolicyIR extends Located {
+  name: string;
+  description?: string;
+  /** Consumed event: `Event` (this context) or `Context.Event` (another context, through a relationship). */
+  when: string;
+  /** Use case of this context that the policy runs. */
+  run: string;
+  /** Use case input name → expression (`event.<field>`, `clock.now`, `ids.new`, literals, enum values). */
+  args: Record<string, string>;
+}
+
+export const RELATIONSHIP_PATTERNS = [
+  "customer_supplier",
+  "conformist",
+  "anticorruption_layer",
+  "open_host_service",
+  "published_language",
+  "shared_kernel",
+  "partnership",
+  "separate_ways",
+] as const;
+export type RelationshipPattern = (typeof RELATIONSHIP_PATTERNS)[number];
+
+export interface RelationshipIR extends Located {
+  upstream: string;
+  downstream: string;
+  pattern: RelationshipPattern;
+  /** Event contract: upstream events the downstream may consume. */
+  events: string[];
+  description?: string;
 }
 
 export type StepIR =

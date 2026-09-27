@@ -28,6 +28,13 @@ export class Layout {
   get useCases(): string {
     return `${this.base}.application.use_cases`;
   }
+  get policies(): string {
+    return `${this.base}.application.policies`;
+  }
+  /** Events module of any context of the model (upstream events are imported from here). */
+  eventsOf(context: string): string {
+    return `${this.pkg}.generated.${toSnake(context)}.domain.events`;
+  }
   get testing(): string {
     return `${this.base}.testing`;
   }

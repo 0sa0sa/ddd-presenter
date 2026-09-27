@@ -21,9 +21,11 @@ contexts:
     aggregates: [...]
     extension_points: [...]
     use_cases: [...]
+    policies: [...]                 # イベント → Use case の反応（§8）
+relationships: [...]                # コンテキストマップ（§9）
 ```
 
-命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。
+命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。
 
 ## 2. 型
 
@@ -190,3 +192,66 @@ scenarios:
 ```
 
 `then` が空のシナリオはエラー（期待結果が曖昧なものを成功扱いしない）。値はフィールドの型で検査される（UUID形式、タイムゾーン付き日時、Enum値など）。
+
+## 8. ポリシー（イベント → Use case）
+
+「〜されたら〜する」という自動の反応。イベントが起きたら、**そのコンテキストの** Use case を実行する。
+
+```yaml
+contexts:
+  - name: Staffing
+    policies:
+      - name: register_staff_on_acceptance        # snake_case
+        description: 招待が受諾されたらスタッフとして登録する
+        when: CleaningStaff.InvitationAccepted     # 同じコンテキストのイベントは裸の名前、別のコンテキストは Context.Event
+        run: register_staff                        # このコンテキストの Use case
+        args: { invitation_id: event.id, joined_at: event.at }
+```
+
+`args` は Use case の入力名 → 値。書けるもの:
+
+| 値 | 例 | 備考 |
+|---|---|---|
+| イベントのフィールド | `event.id`、`event.email.value` | Value Object のフィールドはたどれる。省略可能なフィールドは省略可能な入力にだけ渡せる |
+| 時計・ID | `clock.now`、`ids.new` | 生成されるハンドラが Clock / IdGenerator を受け取る |
+| 値 | `"text"`、`1`、`true`、`pending`（入力が Enum のとき） | |
+
+検査:
+
+- `when` のイベント・コンテキスト、`run` の Use case が存在するか（候補つき）。
+- 別のコンテキストのイベントを受けるには、`relationships` に `upstream: <イベントのコンテキスト>`、`downstream: <ポリシーのコンテキスト>` の関係があり、その `events` にイベントが載っていること（FR-002）。ないときは追加する YAML をヒントに出す。
+- `args` が Use case の必須入力をすべて埋め、存在しない入力・イベントのフィールドを指さず、型が合うこと。
+- コンテキストをまたいで渡せるのは値（String / Integer / UUID / DateTime …）だけ。上流の Value Object・Enum はそのまま渡せない（`event.email.value` のようにフィールドを選ぶ）。
+- ポリシーの連鎖がループになる（Use case が、自分を起動したイベントを直接または他のポリシー経由で再び公開する）と警告。
+
+生成物（ポリシーがあるコンテキストだけ）:
+
+- `application/policies.py` — ポリシーごとのハンドラ `<Name>Policy`（`handle(event)` がイベントのフィールドから Command を作って Use case を実行する）、Use case に求める最小の Protocol `<UseCase>Runner`、イベント型 → ハンドラの対応 `subscriptions(...)`。イベントバスへの登録に使う。プロセス内なら `_runtime.dispatch(subscriptions(...), events)` で配送できる。
+- 下流は上流が生成したイベントクラスをそのまま import する（published language）。
+- `tests/generated/test_<context>_policies.py` — ポリシーごとに、Use case の代わりに入力を記録するテストダブルで対応付けを確かめる。`subscriptions()` 経由の配送も確かめる。
+
+## 9. コンテキストマップ（relationships）
+
+トップレベルに、コンテキスト同士の関係とイベント契約を書く。
+
+```yaml
+relationships:
+  - upstream: CleaningStaff          # イベントを公開する側
+    downstream: Staffing             # 受けて反応する側
+    pattern: customer_supplier       # 既定 customer_supplier
+    events: [InvitationAccepted]     # 下流が受け取ってよい上流のイベント（イベント契約）
+    description: 招待の受諾をきっかけに Staffing がスタッフを登録する
+```
+
+| pattern | 意味 |
+|---|---|
+| `customer_supplier` | 上流が下流の要望を聞いてイベント契約を提供する |
+| `conformist` | 下流が上流のモデルを翻訳せずに受け入れる |
+| `anticorruption_layer` | 下流が翻訳層を置く。生成物: `policies.py` の `<Upstream>Translator` Protocol と、初回だけ作る `extensions/<context>/translators.py`（顧客所有）。ハンドラは args から作った Command を翻訳層に渡し、返った Command で Use case を実行する |
+| `open_host_service` | 上流が公開の連携口を提供する |
+| `published_language` | 文書化された共有の形で連携する |
+| `shared_kernel` | モデルの一部を共有し、合意して変更する |
+| `partnership` | 2つのチームが協調して変更・リリースする |
+| `separate_ways` | 連携しない。`events` を書くとエラー |
+
+検査: コンテキストとイベントが存在するか、自分自身への関係、同じ上流・下流の組の重複、`separate_ways` にイベント契約。契約に載っているのにどのポリシーも受けていないイベントは情報として示す。生成される各コンテキストの README には、ポリシーの一覧と Mermaid のコンテキストマップが入る。

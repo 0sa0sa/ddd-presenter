@@ -4,6 +4,7 @@ import { portsFile, resolveReturn, useCasesFile } from "./python/application.ts"
 import { contextReadme } from "./python/docs.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, paramTypes, rulesFile, valueObjectsFile } from "./python/domain.ts";
 import { assemble, header, Layout, ModuleImports } from "./python/layout.ts";
+import { policiesFile, policyTestFile, translatorScaffolds } from "./python/policies.ts";
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
@@ -99,6 +100,16 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     for (const uc of ca.ir.useCases) {
       const t = useCaseTestFile(L, uc);
       if (t) gen(t.path, t.content);
+    }
+    const policies = policiesFile(L);
+    if (policies) gen(policies.path, policies.content);
+    const policyTests = policyTestFile(L, analysis);
+    if (policyTests) gen(policyTests.path, policyTests.content);
+    const translators = translatorScaffolds(L);
+    if (translators) {
+      scaffold(`${src}/${pkg}/extensions/__init__.py`, `"""Customer-owned code. The generator never overwrites files in this package."""\n`);
+      scaffold(`${src}/${pkg}/extensions/${L.ctxModule}/__init__.py`, "");
+      scaffold(translators.path, translators.content);
     }
     if (ca.ir.extensionPoints.length) {
       scaffold(`${src}/${pkg}/extensions/__init__.py`, `"""Customer-owned code. The generator never overwrites files in this package."""\n`);

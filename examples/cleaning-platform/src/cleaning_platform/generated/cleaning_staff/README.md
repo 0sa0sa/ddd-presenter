@@ -54,3 +54,14 @@
 - Actor: 清掃会社の管理者
 - Transaction: required
 - Scenarios: `open_invitation_is_revoked`, `closed_invitation_is_left_untouched`
+
+## Context map
+
+```mermaid
+flowchart LR
+  CleaningStaff -->|"customer_supplier: InvitationAccepted"| Staffing
+```
+
+| Upstream | Downstream | Pattern | Events | Consumed by |
+|---|---|---|---|---|
+| CleaningStaff | Staffing | customer_supplier | InvitationAccepted | `Staffing.register_staff_on_acceptance` |

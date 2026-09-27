@@ -4,7 +4,7 @@
  */
 export const RUNTIME_PY = `from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
@@ -101,6 +101,20 @@ class AggregateRoot(Entity):
 
 class DomainEvent(DomainModel):
     """Something that happened in the domain. Immutable payload."""
+
+
+EventHandler = Callable[[DomainEvent], None]
+"""Reacts to a domain event, e.g. a generated policy (see \`subscriptions()\` in application/policies.py)."""
+
+
+def dispatch(subscriptions: Mapping[type[DomainEvent], Sequence[EventHandler]], events: Iterable[DomainEvent]) -> None:
+    """Minimal in-process event bus: runs the handlers subscribed to each event's exact type, in order.
+
+    Production buses (outbox, message broker) call the same handlers; this helper is for tests and simple apps.
+    """
+    for event in events:
+        for handler in subscriptions.get(type(event), ()):
+            handler(event)
 
 
 A = TypeVar("A", bound=AggregateRoot)

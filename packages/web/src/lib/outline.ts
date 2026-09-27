@@ -18,7 +18,8 @@ export type Kind =
   | "factory"
   | "operation"
   | "scenario"
-  | "extension";
+  | "extension"
+  | "policy";
 
 export const KIND_LABEL: Record<Kind, string> = {
   context: "Bounded context",
@@ -35,6 +36,7 @@ export const KIND_LABEL: Record<Kind, string> = {
   operation: "Operation",
   scenario: "Scenario",
   extension: "Extension point",
+  policy: "Policy",
 };
 
 /** Glyphs pair with colors so kinds never depend on color alone. */
@@ -53,6 +55,7 @@ export const KIND_GLYPH: Record<Kind, string> = {
   operation: "ƒ",
   scenario: "✓",
   extension: "⎘",
+  policy: "↯",
 };
 
 export interface OutlineNode {
@@ -120,6 +123,7 @@ export function buildOutline(model: ModelIR, diagnostics: readonly Diagnostic[] 
       ...ctx.errors.map((e) => node("error", e.name, c, e.path)),
       ...ctx.extensionPoints.map((x) => node("extension", x.name, c, x.path)),
       ...ctx.useCases.map((u) => node("useCase", u.name, c, u.path, u.scenarios.map((s) => node("scenario", s.name, c, s.path, [], u.name)))),
+      ...ctx.policies.map((p) => node("policy", p.name, c, p.path)),
     ]);
   });
 }

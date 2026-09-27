@@ -351,3 +351,82 @@ contexts:
             then:
               returns: false
               emits: []
+
+  - name: Staffing
+    description: 招待を受諾した人をスタッフとして登録する（CleaningStaff の下流）
+    glossary:
+      - term: スタッフ
+        definition: 清掃の仕事を割り当てられる人。招待の受諾をきっかけに登録される。
+
+    aggregates:
+      - name: StaffMember
+        description: 登録済みのスタッフ
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: invitation_id, type: UUID }
+          - { name: joined_at, type: DateTime }
+        factories:
+          - name: register
+            description: 受諾された招待からスタッフを登録する
+            parameters:
+              - { name: id, type: UUID }
+              - { name: invitation_id, type: UUID }
+              - { name: joined_at, type: DateTime }
+            fields:
+              id: id
+              invitation_id: invitation_id
+              joined_at: joined_at
+            emits:
+              - name: StaffRegistered
+                fields: [id, invitation_id]
+
+    use_cases:
+      - name: register_staff
+        actor: システム（ポリシー）
+        description: 招待を受諾した人をスタッフとして登録する
+        command: RegisterStaff
+        transaction: required
+        input:
+          - { name: invitation_id, type: UUID }
+          - { name: joined_at, type: DateTime }
+        steps:
+          - create:
+              aggregate: StaffMember
+              factory: register
+              as: staff
+              args: { id: ids.new, invitation_id: invitation_id, joined_at: joined_at }
+          - save: staff
+          - publish_after_commit: StaffRegistered
+          - return: staff.id
+        scenarios:
+          - name: accepted_invitation_registers_staff
+            given:
+              ids: ["00000000-0000-0000-0000-0000000000bb"]
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001", joined_at: "2026-01-02T10:00:00+00:00" }
+            then:
+              returns: "00000000-0000-0000-0000-0000000000bb"
+              state:
+                - aggregate: StaffMember
+                  id: "00000000-0000-0000-0000-0000000000bb"
+                  fields: { invitation_id: "00000000-0000-0000-0000-000000000001", joined_at: "2026-01-02T10:00:00+00:00" }
+              emits:
+                - event: StaffRegistered
+                  fields: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+
+    # 別のコンテキストのイベントは when: Context.Event で受ける（relationships のイベント契約が必要）
+    policies:
+      - name: register_staff_on_acceptance
+        description: 招待が受諾されたらスタッフとして登録する
+        when: CleaningStaff.InvitationAccepted
+        run: register_staff
+        args: { invitation_id: event.id, joined_at: event.at }
+
+# コンテキストマップ: Staffing は CleaningStaff のイベント契約（events）に挙げたイベントだけを受け取れる
+relationships:
+  - upstream: CleaningStaff
+    downstream: Staffing
+    pattern: customer_supplier
+    events: [InvitationAccepted]
+    description: 招待の受諾をきっかけに Staffing がスタッフを登録する

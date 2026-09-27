@@ -11,7 +11,8 @@ const model = r.model!;
 describe("outline", () => {
   test("lists contexts, aggregates with members, and use cases", () => {
     const tree = buildOutline(model);
-    expect(tree.map((n) => n.name)).toEqual(["CleaningStaff"]);
+    expect(tree.map((n) => n.name)).toEqual(["CleaningStaff", "Staffing"]);
+    expect(tree[1]!.children.map((n) => `${n.kind}:${n.name}`)).toContain("policy:register_staff_on_acceptance");
     const kinds = tree[0]!.children.map((n) => `${n.kind}:${n.name}`);
     expect(kinds).toContain("aggregate:CleaningStaffInvitation");
     expect(kinds).toContain("event:InvitationAccepted");
@@ -40,11 +41,11 @@ describe("outline", () => {
 describe("diagram graph", () => {
   test("nodes for aggregates, events, value objects and use cases with typed edges", () => {
     const { nodes, edges } = buildGraph(model, r.analysis);
-    expect(nodes.filter((n) => n.kind === "aggregate").map((n) => n.name)).toEqual(["CleaningStaffInvitation"]);
-    expect(nodes.filter((n) => n.kind === "event").map((n) => n.name).sort()).toEqual(["InvitationAccepted", "InvitationIssued", "InvitationRevoked"]);
+    expect(nodes.filter((n) => n.kind === "aggregate").map((n) => n.name)).toEqual(["CleaningStaffInvitation", "StaffMember"]);
+    expect(nodes.filter((n) => n.kind === "event").map((n) => n.name).sort()).toEqual(["InvitationAccepted", "InvitationIssued", "InvitationRevoked", "StaffRegistered"]);
     expect(edges.find((e) => e.kind === "uses" && e.source.endsWith("accept_invitation"))?.label).toBe("load, accept");
     expect(edges.find((e) => e.kind === "holds")?.label).toBe("email");
-    expect(edges.filter((e) => e.kind === "emits").map((e) => e.label).sort()).toEqual(["accept", "issue", "revoke"]);
+    expect(edges.filter((e) => e.kind === "emits").map((e) => e.label).sort()).toEqual(["accept", "issue", "register", "revoke"]);
   });
 
   test("stored positions override the automatic layout", () => {

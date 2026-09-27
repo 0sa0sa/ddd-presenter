@@ -83,7 +83,7 @@ describe("plan", () => {
   });
 
   test("model changes: stale files and removed symbols are reported, never deleted silently", () => {
-    const text = MODEL.slice(0, MODEL.indexOf("      - name: revoke_invitation"));
+    const text = MODEL.slice(0, MODEL.indexOf("      - name: revoke_invitation")) + MODEL.slice(MODEL.indexOf("\n  - name: Staffing") + 1);
     const next = generate(text);
     const d = disk();
     const plan = computePlan(next, out.manifest, (p) => d.get(p));
@@ -118,6 +118,7 @@ describe("expression emission", () => {
     aggregates: [],
     extensionPoints: [],
     useCases: [],
+    policies: [],
     path: [],
   };
   const env = makeEnv(ctx, {
@@ -149,6 +150,7 @@ describe("expression emission", () => {
 const VENV = join(EXAMPLE, ".venv/bin/python");
 
 const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.ddd.yaml"), "utf8");
+const CONTEXT_MAP = readFileSync(join(import.meta.dir, "fixtures/context-map.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -159,6 +161,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
   test.each([
     ["the sample model", MODEL],
     ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
+    ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -226,5 +229,54 @@ contexts:
   test("a type from another context cannot be referenced directly", () => {
     const r = validateModelText(TWO.replace("{ name: order_id, type: UUID }", "{ name: order, type: Order }"));
     expect(r.diagnostics.find((d) => d.severity === "error")?.code).toBe("unknown-type");
+  });
+});
+
+describe("policies and the context map", () => {
+  const out = generate(CONTEXT_MAP);
+  const file = (p: string) => out.files.find((f) => f.path === p);
+
+  test("a context with policies gets policies.py, generated tests and (for an anticorruption layer) a translator scaffold", () => {
+    expect(file("src/context_map/generated/staffing/application/policies.py")?.ownership).toBe("generated");
+    expect(file("tests/generated/test_staffing_policies.py")?.ownership).toBe("generated");
+    expect(file("src/context_map/generated/hiring/application/policies.py")).toBeUndefined();
+    expect(file("src/context_map/extensions/payroll/translators.py")?.ownership).toBe("scaffold");
+    expect(out.manifest.scaffold).toContain("src/context_map/extensions/payroll/translators.py");
+    expect(out.manifest.files.map((f) => f.path)).toContain("src/context_map/generated/payroll/application/policies.py");
+  });
+
+  test("the downstream imports the upstream's event class (published language) and maps event fields into the command", () => {
+    const py = file("src/context_map/generated/staffing/application/policies.py")!.content;
+    expect(py).toContain("from context_map.generated.hiring.domain import events as hiring_events");
+    expect(py).toContain("event_type = hiring_events.CandidateAccepted");
+    expect(py).toMatch(/RegisterStaff\(\s*candidate_id=event\.id,\s*email=event\.email\.value,\s*joined_at=event\.at,\s*source=Source\.HIRING,?\s*\)/);
+    expect(py).toContain("hiring_events.CandidateAccepted: (register_accepted_candidate,),");
+    expect(py).toContain("StaffRegistered: (welcome_registered_staff,),");
+  });
+
+  test("an anticorruption layer routes the command through the translator seam", () => {
+    const py = file("src/context_map/generated/payroll/application/policies.py")!.content;
+    expect(py).toContain("class StaffingTranslator(Protocol):");
+    expect(py).toContain("command = self._translator.open_account_for_new_staff(event, command)");
+    expect(file("src/context_map/extensions/payroll/translators.py")!.content).toContain("_conforms_staffing: StaffingTranslator = FromStaffing()");
+  });
+
+  test("the context README lists the policies and draws the context map", () => {
+    const md = file("src/context_map/generated/staffing/README.md")!.content;
+    expect(md).toContain("## Policies");
+    expect(md).toContain("| `register_accepted_candidate` (`RegisterAcceptedCandidatePolicy`) — Accepted candidates join the staff | Hiring.CandidateAccepted | `register_staff` |");
+    expect(md).toContain('  Hiring -->|"customer_supplier: CandidateAccepted"| Staffing');
+    expect(md).toContain("| Hiring | Staffing | customer_supplier | CandidateAccepted | `Staffing.register_accepted_candidate` |");
+    expect(md).toContain('  Staffing -->|"anticorruption_layer: StaffRegistered"| Payroll');
+  });
+
+  test("removing every policy leaves the old files as stale instead of deleting them", () => {
+    const withoutPayrollPolicy = CONTEXT_MAP.replace(/    policies:\n      - name: open_account_for_new_staff[\s\S]*?opened_at: clock.now \}\n/, "").replace(/  - upstream: Staffing[\s\S]*$/, "");
+    const next = generate(withoutPayrollPolicy);
+    const disk = new Map(out.files.map((f) => [f.path, f.content]));
+    const plan = computePlan(next, out.manifest, (p) => disk.get(p));
+    expect(plan.stale.map((s) => s.path)).toEqual(["src/context_map/generated/payroll/application/policies.py", "tests/generated/test_payroll_policies.py"]);
+    // The customer-owned translator is not a generated file, so it is never reported or removed.
+    expect(plan.entries.find((e) => e.path.endsWith("payroll/translators.py"))).toBeUndefined();
   });
 });

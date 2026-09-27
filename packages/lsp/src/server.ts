@@ -35,6 +35,8 @@ const KIND: Record<CompletionKind, CompletionItemKind> = {
   factory: CompletionItemKind.Constructor,
   keyword: CompletionItemKind.Keyword,
   value: CompletionItemKind.Value,
+  context: CompletionItemKind.Module,
+  useCase: CompletionItemKind.Function,
 };
 
 const connection = createConnection(ProposedFeatures.all);

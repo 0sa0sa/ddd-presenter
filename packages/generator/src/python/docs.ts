@@ -1,6 +1,7 @@
 import { ruleUsage, type Analysis } from "@ddd/core";
 import type { PyFile } from "./domain.ts";
 import type { Layout } from "./layout.ts";
+import { policyClass } from "./policies.ts";
 import { pascal } from "./support.ts";
 
 const esc = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
@@ -46,6 +47,31 @@ export function contextReadme(L: Layout, analysis: Analysis): PyFile {
     if (uc.actor) out.push(`- Actor: ${uc.actor}`);
     out.push(`- Transaction: ${uc.transaction}`);
     out.push(`- Scenarios: ${uc.scenarios.map((s) => `\`${s.name}\``).join(", ") || "none"}`, "");
+  }
+  if (ctx.policies.length) {
+    out.push("## Policies", "", "| Policy | When | Runs | Args |", "|---|---|---|---|");
+    for (const p of ctx.policies) {
+      const info = L.ca.policies.get(p.name);
+      const when = info ? (info.crossContext ? `${info.event.context}.${info.event.name}` : info.event.name) : p.when;
+      const args = Object.entries(p.args).map(([k, v]) => `${k}=\`${esc(v)}\``).join(", ") || "—";
+      out.push(`| \`${p.name}\` (\`${policyClass(p)}\`)${p.description ? ` — ${esc(p.description)}` : ""} | ${when} | \`${p.run}\` | ${args} |`);
+    }
+    out.push("", "Wire the handlers into an event bus with `subscriptions()` in `application/policies.py`.", "");
+  }
+  const rels = L.model.relationships.filter((r) => r.upstream === ctx.name || r.downstream === ctx.name);
+  if (rels.length) {
+    out.push("## Context map", "", "```mermaid", "flowchart LR");
+    for (const r of rels) {
+      const label = [r.pattern, r.events.join(", ")].filter(Boolean).join(": ");
+      out.push(`  ${r.upstream} -->|"${label.replace(/"/g, "'")}"| ${r.downstream}`);
+    }
+    out.push("```", "", "| Upstream | Downstream | Pattern | Events | Consumed by |", "|---|---|---|---|---|");
+    for (const r of rels) {
+      const down = analysis.contexts.get(r.downstream);
+      const consumers = down ? [...down.policies.entries()].filter(([, i]) => i.event.context === r.upstream && r.events.includes(i.event.name)).map(([n]) => `${r.downstream}.${n}`) : [];
+      out.push(`| ${r.upstream} | ${r.downstream} | ${r.pattern} | ${r.events.join(", ") || "—"} | ${consumers.map((x) => `\`${x}\``).join(", ") || "—"} |`);
+    }
+    out.push("");
   }
   return { path: `${L.model.generation.srcDir}/${L.base.replace(/\./g, "/")}/README.md`, content: out.join("\n").trimEnd() + "\n" };
 }

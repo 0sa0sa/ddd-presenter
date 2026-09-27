@@ -19,7 +19,8 @@
         "tests_dir": { "type": "string" }
       }
     },
-    "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } }
+    "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } },
+    "relationships": { "type": "array", "items": { "$ref": "#/$defs/relationship" } }
   },
   "$defs": {
     "pascal": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
@@ -410,7 +411,45 @@
               "scenarios": { "type": "array", "items": { "$ref": "#/$defs/useCaseScenario" } }
             }
           }
+        },
+        "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } }
+      }
+    },
+    "policy": {
+      "description": "When an event happens, run a use case of this context.",
+      "type": "object",
+      "required": ["name", "when", "run"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "description": { "type": "string" },
+        "when": {
+          "description": "Consumed event: Event (same context) or Context.Event (another context; needs a relationship whose events list it).",
+          "type": "string",
+          "pattern": "^([A-Z][A-Za-z0-9]*\\.)?[A-Z][A-Za-z0-9]*$"
+        },
+        "run": { "$ref": "#/$defs/snake" },
+        "args": {
+          "description": "Use case input name → event.<field>, clock.now, ids.new or a literal.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/expression" }
         }
+      }
+    },
+    "relationship": {
+      "description": "Context map entry: the downstream context depends on the upstream context.",
+      "type": "object",
+      "required": ["upstream", "downstream"],
+      "additionalProperties": false,
+      "properties": {
+        "upstream": { "$ref": "#/$defs/pascal" },
+        "downstream": { "$ref": "#/$defs/pascal" },
+        "pattern": {
+          "enum": ["customer_supplier", "conformist", "anticorruption_layer", "open_host_service", "published_language", "shared_kernel", "partnership", "separate_ways"],
+          "default": "customer_supplier"
+        },
+        "events": { "description": "Event contract: upstream events the downstream consumes.", "type": "array", "items": { "$ref": "#/$defs/pascal" } },
+        "description": { "type": "string" }
       }
     }
   }
