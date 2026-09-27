@@ -12,17 +12,45 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: "same-origin",
-  });
+/** Status 0 = the request never reached a DDD Presenter server (network down, server stopped, wrong app on the port). */
+export const OFFLINE_MESSAGE =
+  "サーバーに接続できません。APIサーバー（bun run dev:server または bun run start）が起動しているか確認してください。";
+
+export async function request<T>(method: string, path: string, body?: unknown, fetchImpl: typeof fetch = fetch): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetchImpl(path, {
+      method,
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: "same-origin",
+    });
+  } catch {
+    throw new ApiError(0, OFFLINE_MESSAGE, {});
+  }
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-  if (!res.ok) throw new ApiError(res.status, String(data.error ?? res.statusText), data);
+  let data: Record<string, unknown> = {};
+  if (text) {
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      // A proxy error page or another application answered instead of the API.
+      throw new ApiError(0, res.status >= 500 ? OFFLINE_MESSAGE : `APIではない応答を受け取りました（HTTP ${res.status}）。別のアプリが同じポートを使っていないか確認してください。`, {});
+    }
+  }
+  if (!res.ok) {
+    // Our API always answers errors with { error }. A bare 5xx comes from a proxy whose backend is down (e.g. Vite → 502).
+    if (data.error === undefined && res.status >= 500) throw new ApiError(0, OFFLINE_MESSAGE, {});
+    throw new ApiError(res.status, String(data.error ?? res.statusText), data);
+  }
   return data as T;
+}
+
+/** Human-readable message for any error thrown by the API client or UI code. */
+export function describeError(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return `予期しないエラー: ${e.message}`;
+  return `予期しないエラー: ${String(e)}`;
 }
 
 export interface Me {
@@ -77,6 +105,11 @@ export interface Preview {
 }
 
 export const api = {
+  health: async () => {
+    const r = await request<{ service?: string }>("GET", "/api/health");
+    if (r.service !== "ddd-presenter") throw new ApiError(0, "接続先がDDD Presenterのサーバーではありません。ポート設定（PORT / DDD_PORT）を確認してください。", {});
+    return r;
+  },
   users: () => request<{ users: { username: string }[] }>("GET", "/api/users"),
   login: (username: string) => request<{ user: Me["user"] }>("POST", "/api/login", { username }),
   logout: () => request("POST", "/api/logout"),

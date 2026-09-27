@@ -54,12 +54,13 @@ cd ../.. && bun run verify:example   # diff --check → pytest → mypy --strict
 ### Web
 
 ```sh
-# 開発: API（:8787）と Vite（:5173）を別々に起動する
+# 開発: API（:4870）と Vite（:5173）を別々に起動する
+# ポートを変える場合は PORT=4900 bun run dev:server と DDD_PORT=4900 bun run dev:web
 bun run dev:server
 bun run dev:web          # http://localhost:5173
 
 # ビルドして1プロセスで配信
-bun run build:web && bun run start   # http://localhost:8787
+bun run build:web && bun run start   # http://localhost:4870
 ```
 
 ログインは開発用の簡易方式（ユーザー名のみ。docs/09 の決定）。初回ログインでアカウントと個人ワークスペースを作る。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。

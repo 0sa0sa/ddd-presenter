@@ -3,7 +3,8 @@ import { join, normalize } from "node:path";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db.ts";
 
-const port = Number(process.env.PORT ?? 8787);
+/** Default port; 8787 is commonly taken by other local dev servers. Override with PORT or DDD_PORT. */
+const port = Number(process.env.PORT ?? process.env.DDD_PORT ?? 4870);
 const dbPath = process.env.DDD_DB ?? join(import.meta.dir, "../data/ddd.sqlite");
 if (dbPath !== ":memory:") {
   const dir = join(dbPath, "..");
@@ -22,5 +23,14 @@ app.get("*", async (c) => {
   return new Response(Bun.file(join(dist, "index.html")), { headers: { "content-type": "text/html; charset=utf-8" } });
 });
 
+try {
+  Bun.serve({ port, fetch: app.fetch });
+} catch (e) {
+  const code = (e as { code?: string }).code;
+  if (code === "EADDRINUSE") {
+    console.error(`ポート ${port} は別のプロセスが使用中です。PORT=<空いている番号> bun run dev:server で起動し、Web側は DDD_PORT=<同じ番号> bun run dev:web で指定してください。`);
+    process.exit(1);
+  }
+  throw e;
+}
 console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath})`);
-export default { port, fetch: app.fetch };

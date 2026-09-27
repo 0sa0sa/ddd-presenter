@@ -276,3 +276,10 @@ describe("layout", () => {
     expect((await s.json("GET", `/api/projects/${project}/model`)).body.version).toBe(1);
   });
 });
+
+describe("health", () => {
+  test("is public and identifies the service", async () => {
+    const res = await app.request("/api/health");
+    expect(await res.json()).toEqual({ service: "ddd-presenter", ok: true });
+  });
+});

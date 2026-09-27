@@ -139,6 +139,9 @@ export function createApp(db: Database, options: AppOptions = {}) {
   // auth (development login: username only, by decision in docs/09)
   // ---------------------------------------------------------------------------
 
+  // Lets the Web client verify it is talking to a DDD Presenter server (not another app on the same port).
+  app.get("/api/health", (c) => c.json({ service: "ddd-presenter", ok: true }));
+
   app.get("/api/users", (c) => c.json({ users: db.query("SELECT username FROM users ORDER BY username").all() }));
 
   app.post("/api/login", async (c) => {

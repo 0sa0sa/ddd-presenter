@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type Me } from "./api.ts";
+import { api, ApiError, describeError, type Me } from "./api.ts";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { HomePage } from "./pages/HomePage.tsx";
 import { WorkspacePage } from "./pages/WorkspacePage.tsx";
@@ -28,12 +28,20 @@ export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
 
+  const [connectionError, setConnectionError] = useState<string>();
+
   const refreshMe = useCallback(async () => {
     try {
+      await api.health();
       setMe(await api.me());
+      setConnectionError(undefined);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setMe(null);
-      else throw e;
+      if (e instanceof ApiError && e.status === 401) {
+        setMe(null);
+        setConnectionError(undefined);
+      } else {
+        setConnectionError(describeError(e));
+      }
     }
   }, []);
 
@@ -44,11 +52,30 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, [refreshMe]);
 
+  if (connectionError && !me) {
+    return (
+      <main className="page">
+        <h1>DDD Presenter に接続できません</h1>
+        <p className="error-banner" role="alert">
+          {connectionError}
+        </p>
+        <div>
+          <button className="primary" onClick={() => void refreshMe()}>
+            再接続する
+          </button>
+        </div>
+      </main>
+    );
+  }
   if (me === undefined) return <div className="page muted">読み込み中…</div>;
   if (me === null) return <LoginPage onLogin={refreshMe} />;
 
   const logout = async () => {
-    await api.logout();
+    try {
+      await api.logout();
+    } catch {
+      // Even if the server is unreachable, leave the signed-in view; the session expires on its own.
+    }
     setMe(null);
   };
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, ApiError } from "../api.ts";
+import { api, describeError } from "../api.ts";
 
 export function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState("");
@@ -7,7 +7,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState<string>();
 
   useEffect(() => {
-    api.users().then((r) => setUsers(r.users.map((u) => u.username)), () => setUsers([]));
+    api.users().then((r) => setUsers(r.users.map((u) => u.username)), (e) => setError(describeError(e)));
   }, []);
 
   const login = async (name: string) => {
@@ -16,7 +16,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       await api.login(name);
       onLogin();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "サーバーに接続できません。`bun run dev:server` が起動しているか確認してください。");
+      setError(describeError(e));
     }
   };
 

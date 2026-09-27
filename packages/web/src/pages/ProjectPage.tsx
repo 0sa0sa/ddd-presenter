@@ -1,6 +1,6 @@
 import { applyEdits, parseModel, ruleUsage, unifiedDiff, validateModelText, type Diagnostic, type EditOp, type ModelIR, type Path } from "@ddd/core";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, type Me, type Role } from "../api.ts";
+import { api, ApiError, describeError, type Me, type Role } from "../api.ts";
 import { href, navigate } from "../App.tsx";
 import { DiagramView } from "../components/DiagramView.tsx";
 import { DiffView } from "../components/DiffView.tsx";
@@ -56,7 +56,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         setText(m.yaml);
         setPositions(l.positions);
       },
-      (e) => setLoadError(e instanceof ApiError && e.status === 404 ? "このプロジェクトは存在しないか、閲覧権限がありません。" : String(e)),
+      (e) => setLoadError(e instanceof ApiError && e.status === 404 ? "このプロジェクトは存在しないか、閲覧権限がありません。" : describeError(e)),
     );
   }, [id]);
 
@@ -121,7 +121,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         if (e instanceof ApiError && e.status === 409) {
           setConflict({ theirs: String(e.body.yaml), version: Number(e.body.current_version) });
           setStatus("ほかの人が先に保存しました");
-        } else setStatus(e instanceof ApiError ? e.message : "保存できませんでした");
+        } else setStatus(`保存できませんでした: ${describeError(e)}`);
       }
     },
     [saved, canEdit, id, text, message],
@@ -150,7 +150,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
     const next = { ...positions, [nodeId]: p };
     setPositions(next);
     clearTimeout(layoutTimer.current);
-    layoutTimer.current = setTimeout(() => void api.saveLayout(id, next), 400);
+    layoutTimer.current = setTimeout(() => api.saveLayout(id, next).catch((e) => setStatus(`図の配置を保存できませんでした: ${describeError(e)}`)), 400);
   };
 
   if (loadError) {

@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, type Me } from "../api.ts";
+import { api, describeError, type Me } from "../api.ts";
 import { href, navigate } from "../App.tsx";
 import { TopBar } from "../components/TopBar.tsx";
 
 export function HomePage({ me, onLogout, onChanged }: { me: Me; onLogout: () => void; onChanged: () => void }) {
   const [name, setName] = useState("");
+  const [error, setError] = useState<string>();
 
   // A single workspace is the common case: on a fresh visit (no route in the URL) go straight to it.
   useEffect(() => {
@@ -14,10 +15,14 @@ export function HomePage({ me, onLogout, onChanged }: { me: Me; onLogout: () => 
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    const { id } = await api.createWorkspace(name.trim());
-    setName("");
-    onChanged();
-    navigate({ page: "workspace", ws: id });
+    try {
+      const { id } = await api.createWorkspace(name.trim());
+      setName("");
+      onChanged();
+      navigate({ page: "workspace", ws: id });
+    } catch (err) {
+      setError(describeError(err));
+    }
   };
 
   return (
@@ -25,6 +30,11 @@ export function HomePage({ me, onLogout, onChanged }: { me: Me; onLogout: () => 
       <TopBar me={me} onLogout={onLogout} />
       <main className="page">
         <h1>ワークスペース</h1>
+        {error && (
+          <p className="error-banner" role="alert">
+            {error}
+          </p>
+        )}
         <div className="panel">
           <ul className="list">
             {me.workspaces.map((w) => (

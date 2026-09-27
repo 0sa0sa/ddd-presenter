@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, type Preview } from "../api.ts";
+import type { Diagnostic } from "@ddd/core";
+import { api, ApiError, describeError, type Preview } from "../api.ts";
 import { DiffView } from "./DiffView.tsx";
 
 const ACTION_LABEL: Record<string, string> = {
@@ -13,29 +14,78 @@ const ACTION_LABEL: Record<string, string> = {
 
 export function PreviewView({ projectId, version, dirty }: { projectId: string; version: number; dirty: boolean }) {
   const [preview, setPreview] = useState<Preview>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<{ message: string; offline: boolean; diagnostics: Diagnostic[] }>();
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string>();
   const [mode, setMode] = useState<"diff" | "file">("diff");
   const [showUnchanged, setShowUnchanged] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     setError(undefined);
+    setLoading(true);
     api.preview(projectId, version).then(
       (p) => {
+        if (cancelled) return;
+        setLoading(false);
         setPreview(p);
         const first = p.plan.find((e) => e.action === "update" || e.action === "stale") ?? p.plan.find((e) => e.path.endsWith("aggregates.py"));
         setSelected(first?.path);
         setMode(first?.diff ? "diff" : "file");
       },
-      (e) => setError(e instanceof ApiError ? e.message : String(e)),
+      (e) => {
+        if (cancelled) return;
+        setLoading(false);
+        setPreview(undefined);
+        const diagnostics = e instanceof ApiError && Array.isArray(e.body.diagnostics) ? (e.body.diagnostics as Diagnostic[]) : [];
+        const errors = diagnostics.filter((d) => d.severity === "error");
+        setError({
+          message: errors.length ? `v${version} のモデルにエラーがあるため、コードを生成できません。` : describeError(e),
+          offline: e instanceof ApiError && e.status === 0,
+          diagnostics: errors,
+        });
+      },
     );
-  }, [projectId, version]);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, version, attempt]);
 
   if (error) {
     return (
       <div className="view">
-        <p className="error-banner">{error}</p>
-        <p className="muted">プレビューは保存済みのバージョン v{version} から作ります。</p>
+        <p className="error-banner" role="alert">
+          {error.message}
+        </p>
+        {error.diagnostics.length > 0 && (
+          <div className="panel">
+            <div className="panel-head">
+              <h2>v{version} のモデルにあるエラー</h2>
+            </div>
+            <ul className="list small">
+              {error.diagnostics.map((d, i) => (
+                <li key={i}>
+                  <span className="sev sev-error">✕ {d.line ? `${d.line}行` : ""}</span>
+                  <span>
+                    {d.element && <strong>{d.element}: </strong>}
+                    {d.message}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <p className="muted">
+          プレビューは保存済みのバージョン v{version} から作ります。
+          {error.diagnostics.length > 0 && " エラーを直して保存すると表示できます。"}
+          {dirty && " 未保存の変更はプレビューに含まれません。"}
+        </p>
+        <div>
+          <button onClick={() => setAttempt((n) => n + 1)} disabled={loading}>
+            {loading ? "再試行しています…" : error.offline ? "再接続する" : "もう一度読み込む"}
+          </button>
+        </div>
       </div>
     );
   }

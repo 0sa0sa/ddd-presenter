@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { api, ApiError, type AuditEntry, type Me, type Member, type ProjectSummary, type Role } from "../api.ts";
+import { api, ApiError, describeError, type AuditEntry, type Me, type Member, type ProjectSummary, type Role } from "../api.ts";
 import { href, navigate } from "../App.tsx";
 import { TopBar } from "../components/TopBar.tsx";
 
@@ -32,7 +32,7 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
         setName(r.workspace.name);
         setRole(r.role);
       },
-      (e) => setError(e instanceof ApiError && e.status === 404 ? "このワークスペースは存在しないか、参加していません。" : String(e)),
+      (e) => setError(e instanceof ApiError && e.status === 404 ? "このワークスペースは存在しないか、参加していません。" : describeError(e)),
     );
   }, [ws]);
 
@@ -87,7 +87,7 @@ function Projects({ ws, role }: { ws: string; role: Role }) {
   const [name, setName] = useState("");
   const [template, setTemplate] = useState<"sample" | "empty">("sample");
   const [error, setError] = useState<string>();
-  const load = useCallback(() => api.projects(ws).then((r) => setProjects(r.projects)), [ws]);
+  const load = useCallback(() => api.projects(ws).then((r) => setProjects(r.projects), (e) => setError(describeError(e))), [ws]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -99,7 +99,7 @@ function Projects({ ws, role }: { ws: string; role: Role }) {
       const { id } = await api.createProject(ws, { name: name.trim(), template });
       navigate({ page: "project", id });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(describeError(err));
     }
   };
 
@@ -110,13 +110,17 @@ function Projects({ ws, role }: { ws: string; role: Role }) {
       const { id } = await api.createProject(ws, { name: file.name.replace(/\.(ddd\.)?ya?ml$/, ""), yaml });
       navigate({ page: "project", id });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(describeError(err));
     }
   };
 
   const remove = async (p: ProjectSummary) => {
     if (!confirm(`「${p.name}」を削除します。モデルの全バージョンと図の配置も消え、元に戻せません。先にエクスポートしておくことをおすすめします。`)) return;
-    await api.deleteProject(p.id);
+    try {
+      await api.deleteProject(p.id);
+    } catch (e) {
+      setError(describeError(e));
+    }
     void load();
   };
 
@@ -194,7 +198,7 @@ function Members({ ws, role, me, onChanged }: { ws: string; role: Role; me: Me; 
   const [username, setUsername] = useState("");
   const [newRole, setNewRole] = useState<Role>("editor");
   const [error, setError] = useState<string>();
-  const load = useCallback(() => api.members(ws).then((r) => setMembers(r.members)), [ws]);
+  const load = useCallback(() => api.members(ws).then((r) => setMembers(r.members), (e) => setError(describeError(e))), [ws]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -206,7 +210,7 @@ function Members({ ws, role, me, onChanged }: { ws: string; role: Role; me: Me; 
       await load();
       onChanged();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(describeError(e));
     }
   };
 
@@ -279,9 +283,11 @@ function Members({ ws, role, me, onChanged }: { ws: string; role: Role; me: Me; 
 
 function Audit({ ws }: { ws: string }) {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [error, setError] = useState<string>();
   useEffect(() => {
-    api.audit(ws).then((r) => setEntries(r.entries));
+    api.audit(ws).then((r) => setEntries(r.entries), (e) => setError(describeError(e)));
   }, [ws]);
+  if (error) return <p className="error-banner" role="alert">{error}</p>;
   return (
     <div className="panel">
       <table className="table">
