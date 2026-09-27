@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { boardToModel, checkExpression, makeEnv, sampleBoard, T, validateModelText, type ContextIR, type Type } from "@ddd/core";
+import { boardToModel, checkExpression, makeEnv, proposeLocally, sampleBoard, T, validateModelText, type ContextIR, type Type } from "@ddd/core";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -160,6 +160,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the sample model", MODEL],
     ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
     ["a model reflected from the discovery board", FROM_BOARD],
+    ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-gen-"));
     try {
