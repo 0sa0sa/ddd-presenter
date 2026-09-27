@@ -9,3 +9,4 @@ export * from "./usage.ts";
 export * from "./edit.ts";
 export * from "./diff.ts";
 export * from "./language.ts";
+export * from "./discovery.ts";
