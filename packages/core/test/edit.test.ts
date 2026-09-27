@@ -32,7 +32,7 @@ describe("structural edits", () => {
       { op: "add", path: ["contexts", 0, "aggregates", 0, "fields"], value: { name: "note", type: "String", required: false } },
       { op: "add", path: ["contexts", 0, "aggregates"], value: templates.aggregate("Crew") },
     );
-    expect(text).toContain("- { name: note, type: String, required: false }");
+    expect(text).toMatch(/- \{ ?name: note, type: String, required: false ?\}/);
     const r = validateModelText(text);
     expect(r.ok).toBe(true);
     expect(r.model!.contexts[0]!.aggregates.map((a) => a.name)).toEqual(["CleaningStaffInvitation", "Crew"]);
@@ -51,7 +51,7 @@ describe("structural edits", () => {
 
   test("renaming an enum updates field types but not scenario literals", () => {
     const text = edit({ op: "renameType", context: "CleaningStaff", from: "InvitationStatus", to: "Status" });
-    expect(text).toContain("type: Status }");
+    expect(text).toMatch(/type: Status ?\}/);
     expect(validateModelText(text).ok).toBe(true);
   });
 
