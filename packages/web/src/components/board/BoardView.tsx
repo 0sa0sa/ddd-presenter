@@ -24,6 +24,9 @@ import { ItemPanel } from "./ItemPanel.tsx";
 import { nodeTypes, STICKY_GLYPH, type FrameData, type StickyData } from "./nodes.tsx";
 import { ReflectDialog } from "./ReflectDialog.tsx";
 
+const NO_HIGHLIGHT: string[] = [];
+const clearHighlight = (prev: string[]) => (prev.length ? NO_HIGHLIGHT : prev);
+
 const PALETTE: StickyKind[] = ["event", "command", "actor", "policy", "aggregate", "rule", "read_model", "external_system", "hotspot", "note"];
 
 interface Props {
@@ -51,8 +54,8 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
   const [conflict, setConflict] = useState<{ version: number; board: Board }>();
   const [tool, setTool] = useState<Tool>("event");
   const [editingId, setEditingId] = useState<string>();
-  const [selected, setSelected] = useState<string[]>([]);
-  const [highlight, setHighlight] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string[]>(NO_HIGHLIGHT);
+  const [highlight, setHighlight] = useState<string[]>(NO_HIGHLIGHT);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [reflecting, setReflecting] = useState(false);
@@ -413,10 +416,13 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
             onConnect={(c) => canEdit && c.source && c.target && commit(addConnector(boardRef.current!, c.source, c.target))}
             onNodeDoubleClick={(_, n) => canEdit && setEditingId(n.id)}
             onSelectionChange={({ nodes: ns }) => {
-              setSelected(ns.map((n) => n.id));
-              if (ns.length) setHighlight([]);
+              // Only store real changes: React Flow reports selection on every node update, and
+              // setting a fresh array each time would re-derive the nodes and loop forever.
+              const ids = ns.map((n) => n.id);
+              setSelected((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids));
+              if (ns.length) setHighlight(clearHighlight);
             }}
-            onPaneClick={() => setHighlight([])}
+            onPaneClick={() => setHighlight(clearHighlight)}
             deleteKeyCode={null}
             selectionOnDrag
             panOnDrag={[1, 2]}
