@@ -283,3 +283,45 @@ describe("health", () => {
     expect(await res.json()).toEqual({ service: "ddd-presenter", ok: true });
   });
 });
+
+describe("discovery board", () => {
+  const board = (text: string) => ({ version: 1, frames: [], connectors: [], items: [{ id: "e1", kind: "event", text, x: 10, y: 20, w: 160, h: 100 }] });
+
+  test("starts empty, saves with optimistic concurrency and normalizes input", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    const first = await s.json("GET", `/api/projects/${project}/board`);
+    expect(first.body).toMatchObject({ version: 0, board: { items: [], frames: [], connectors: [] } });
+    const saved = await s.json("PUT", `/api/projects/${project}/board`, { base_version: 0, board: { ...board("招待が送られた"), junk: 1, items: [...board("招待が送られた").items, { id: "x", kind: "bogus" }] } });
+    expect(saved.body.version).toBe(1);
+    expect(saved.body.board.items).toHaveLength(1);
+    const conflict = await s.json("PUT", `/api/projects/${project}/board`, { base_version: 0, board: board("上書き") });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.current_version).toBe(1);
+    expect(conflict.body.board.items[0].text).toBe("招待が送られた");
+    const again = await s.json("GET", `/api/projects/${project}/board`);
+    expect(again.body.updated_by).toBe("alice");
+    // Saving the board never touches the model.
+    expect((await s.json("GET", `/api/projects/${project}/model`)).body.version).toBe(1);
+  });
+
+  test("viewers can read but not write; other tenants get 404", async () => {
+    const owner = await login("owner");
+    const viewer = await login("viewer");
+    const stranger = await login("stranger");
+    const ws = await workspaceOf(owner);
+    await owner.json("POST", `/api/workspaces/${ws}/members`, { username: "viewer", role: "viewer" });
+    const project = await newProject(owner, ws);
+    expect((await viewer.call("GET", `/api/projects/${project}/board`)).status).toBe(200);
+    expect((await viewer.call("PUT", `/api/projects/${project}/board`, { base_version: 0, board: board("x") })).status).toBe(403);
+    expect((await stranger.call("GET", `/api/projects/${project}/board`)).status).toBe(404);
+    expect((await stranger.call("PUT", `/api/projects/${project}/board`, { base_version: 0, board: board("x") })).status).toBe(404);
+  });
+
+  test("rejects invalid and oversized boards", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    expect((await s.call("PUT", `/api/projects/${project}/board`, { base_version: 0, board: "nope" })).status).toBe(400);
+    expect((await s.call("PUT", `/api/projects/${project}/board`, { base_version: 0, board: board("x".repeat(2_100_000)) })).status).toBe(413);
+  });
+});

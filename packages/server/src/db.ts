@@ -59,6 +59,14 @@ const MIGRATIONS: string[] = [
      at TEXT NOT NULL
    );
    CREATE INDEX audit_by_workspace ON audit_log(workspace_id, id);`,
+  // Discovery board (EventStorming). Stored apart from the model; optimistic concurrency via version.
+  `CREATE TABLE boards (
+     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+     version INTEGER NOT NULL,
+     json TEXT NOT NULL,
+     updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+     updated_at TEXT NOT NULL
+   );`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

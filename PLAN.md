@@ -18,6 +18,6 @@
 - [x] L2 web: CodeMirrorに補完・ホバー・Ctrl/Cmd+クリックで定義へ・F2で名前変更
 - [x] L3 lsp + vscode: Language Server（stdio）と VS Code 拡張（*.ddd.yaml）。JSON-RPCの結合テスト
 - [x] D1 core: ディスカバリーボードの型、整理の補助（ヒューリスティック診断・集約候補・コンテキスト連携）、モデル骨格の生成
-- [ ] D2 server: ボードの保存API（楽観排他・プロジェクト単位・モデルとは別保存）
+- [x] D2 server: ボードの保存API（楽観排他・プロジェクト単位・モデルとは別保存）
 - [ ] D3 web: Miro風の自由キャンバス（付箋・フレーム・矢印・パン/ズーム・複数選択・Undo）、補助パネル、モデルへの反映（差分確認つき）
 - [ ] D4 docs/README、ブラウザでの動作確認

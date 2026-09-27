@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { ruleUsage, validateModelText } from "@ddd/core";
+import { emptyBoard, normalizeBoard, ruleUsage, validateModelText } from "@ddd/core";
 import { computePlan, generatePython, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
 import { strToU8, zipSync } from "fflate";
 import { Hono, type Context } from "hono";
@@ -512,6 +512,50 @@ export function createApp(db: Database, options: AppOptions = {}) {
       now(),
     );
     return c.json({ ok: true });
+  });
+
+  // -- discovery board (EventStorming canvas) -----------------------------------
+
+  const MAX_BOARD_BYTES = 2_000_000;
+
+  app.get("/api/projects/:projectId/board", (c) => {
+    const { project, role } = loadProject(c);
+    const row = db
+      .query("SELECT b.version, b.json, b.updated_at, u.username AS updated_by FROM boards b LEFT JOIN users u ON u.id = b.updated_by WHERE b.project_id = ?")
+      .get(project.id) as { version: number; json: string; updated_at: string; updated_by: string | null } | null;
+    return c.json({ version: row?.version ?? 0, board: row ? JSON.parse(row.json) : emptyBoard(), updated_at: row?.updated_at ?? null, updated_by: row?.updated_by ?? null, role });
+  });
+
+  app.put("/api/projects/:projectId/board", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const raw = await c.req.text();
+    if (raw.length > MAX_BOARD_BYTES) fail(413, "The board is larger than 2 MB");
+    let b: { board?: unknown; base_version?: unknown };
+    try {
+      b = JSON.parse(raw);
+    } catch {
+      return fail(400, "Request body must be JSON");
+    }
+    if (typeof b.base_version !== "number") fail(400, "base_version is required");
+    const board = normalizeBoard(b.board);
+    if (!board) fail(400, "board is invalid");
+    if (board!.items.length > 3000) fail(413, "A board can hold up to 3000 stickies");
+    const json = JSON.stringify(board);
+    let version = 0;
+    db.transaction(() => {
+      const row = db.query("SELECT version, json FROM boards WHERE project_id = ?").get(project.id) as { version: number; json: string } | null;
+      const current = row?.version ?? 0;
+      if (current !== b.base_version) fail(409, "The board was changed by someone else", { current_version: current, board: row ? JSON.parse(row.json) : emptyBoard() });
+      if (row && row.json === json) {
+        version = current;
+        return;
+      }
+      version = current + 1;
+      db.query(
+        "INSERT INTO boards (project_id, version, json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET version = excluded.version, json = excluded.json, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+      ).run(project.id, version, json, c.get("user").id, now());
+    })();
+    return c.json({ version, board });
   });
 
   return app;
