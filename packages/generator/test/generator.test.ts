@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkExpression, makeEnv, T, validateModelText, type ContextIR, type Type } from "@ddd/core";
+import { boardToModel, checkExpression, makeEnv, sampleBoard, T, validateModelText, type ContextIR, type Type } from "@ddd/core";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -149,11 +149,17 @@ describe("expression emission", () => {
 const VENV = join(EXAMPLE, ".venv/bin/python");
 
 const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.ddd.yaml"), "utf8");
+/** The model a team gets by reflecting the sample discovery board into an empty project. */
+const FROM_BOARD = boardToModel(
+  sampleBoard(),
+  "schema_version: 1\nproject: staff\ngeneration:\n  package: staff_from_board\n\ncontexts:\n  - name: Core\n    errors: []\n    aggregates: []\n    use_cases: []\n",
+).yaml!;
 
 describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
   test.each([
     ["the sample model", MODEL],
     ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
+    ["a model reflected from the discovery board", FROM_BOARD],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-gen-"));
     try {
@@ -165,9 +171,16 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
       // The untouched scaffold raises NotImplementedError; the generated tests use stubs, so they must pass anyway.
       writeFileSync(join(dir, "pyproject.toml"), readFileSync(join(EXAMPLE, "pyproject.toml")));
       const pytest = Bun.spawnSync([VENV, "-m", "pytest", "-q", "-p", "no:cacheprovider"], { cwd: dir });
-      expect(pytest.stdout.toString()).toMatch(/\d+ passed/);
-      expect(pytest.exitCode).toBe(0);
-      const mypy = Bun.spawnSync([VENV, "-m", "mypy", "src", "tests"], { cwd: dir });
+      // A model without scenarios has no generated tests (pytest exit code 5 = "no tests collected").
+      if (modelText !== FROM_BOARD) {
+        expect(pytest.stdout.toString()).toMatch(/\d+ passed/);
+        expect(pytest.exitCode).toBe(0);
+      } else {
+        expect([0, 5]).toContain(pytest.exitCode);
+        const imp = Bun.spawnSync([VENV, "-c", "import staff_from_board.generated.staff_invitation.application.use_cases, staff_from_board.generated.notification.domain.aggregates"], { cwd: join(dir, "src") });
+        expect(imp.stderr.toString()).toBe("");
+      }
+      const mypy = Bun.spawnSync([VENV, "-m", "mypy", "src", ...(existsSync(join(dir, "tests")) ? ["tests"] : [])], { cwd: dir });
       expect(mypy.stdout.toString()).toContain("Success");
     } finally {
       rmSync(dir, { recursive: true, force: true });

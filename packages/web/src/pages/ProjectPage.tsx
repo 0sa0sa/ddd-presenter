@@ -13,8 +13,10 @@ import { ScenariosView } from "../components/ScenariosView.tsx";
 import { TopBar } from "../components/TopBar.tsx";
 import { YamlEditor, type GotoRequest } from "../components/YamlEditor.tsx";
 import { buildOutline, flatten } from "../lib/outline.ts";
+import { BoardView } from "../components/board/BoardView.tsx";
 
 const TABS = [
+  { id: "discovery", label: "ディスカバリー" },
   { id: "model", label: "モデル (YAML)" },
   { id: "diagram", label: "図" },
   { id: "rules", label: "ルール" },
@@ -30,7 +32,8 @@ interface Conflict {
 }
 
 export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: string; tab?: string; onLogout: () => void }) {
-  const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? "model") as Tab;
+  const [defaultTab, setDefaultTab] = useState<Tab>("model");
+  const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? defaultTab) as Tab;
   const [project, setProject] = useState<{ name: string; workspace_id: string }>();
   const [role, setRole] = useState<Role>("viewer");
   const [saved, setSaved] = useState<{ version: number; yaml: string }>();
@@ -54,6 +57,9 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         setRole(p.role);
         setSaved({ version: m.version, yaml: m.yaml });
         setText(m.yaml);
+        // A project whose model has no aggregates yet starts on the discovery board.
+        const parsed = validateModelText(m.yaml).model;
+        if (parsed && parsed.contexts.every((c) => c.aggregates.length === 0 && c.useCases.length === 0)) setDefaultTab("discovery");
         setPositions(l.positions);
       },
       (e) => setLoadError(e instanceof ApiError && e.status === 404 ? "このプロジェクトは存在しないか、閲覧権限がありません。" : describeError(e)),
@@ -185,7 +191,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           YAMLをエクスポート
         </a>
       </TopBar>
-      <div className={`workbench${tab === "preview" || tab === "history" ? " no-inspector" : ""}`}>
+      <div className={`workbench${tab === "preview" || tab === "history" ? " no-inspector" : ""}${tab === "discovery" ? " is-board" : ""}`}>
         <Outline nodes={outline} selected={selectedId} onSelect={(n) => {
           setSelectedId(n.id);
           if (tab === "model") gotoPath(n.path);
@@ -199,7 +205,19 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
               </button>
             ))}
           </div>
-          <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" ? " fill" : ""}`} role="tabpanel">
+          <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" || tab === "discovery" ? " fill" : ""}`} role="tabpanel">
+            {tab === "discovery" && (
+              <BoardView
+                projectId={id}
+                canEdit={canEdit}
+                modelText={text}
+                onReflect={(yaml) => {
+                  setText(yaml);
+                  setStatus("ボードの内容をモデルに反映しました。差分を確認して保存してください");
+                  navigate({ page: "project", id, tab: "model" });
+                }}
+              />
+            )}
             {tab === "model" && (
               <div className="editor-wrap">
                 <YamlEditor value={text} onChange={setText} diagnostics={diagnostics} readOnly={!canEdit} goto={goto} onCursorLine={onCursorLine} onMessage={setStatus} />
@@ -269,7 +287,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             )}
           </footer>
         </section>
-        {tab !== "preview" && tab !== "history" && (
+        {tab !== "preview" && tab !== "history" && tab !== "discovery" && (
           <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} />
         )}
       </div>

@@ -216,13 +216,19 @@ export function analyzeBoard(board: Board): Finding[] {
       });
     }
   }
-  const floating = candidates.filter((c) => !c.aggregateItemId);
+  // Only groups with commands need an aggregate; a lone event may be a fact from outside.
+  const floating = candidates.filter((c) => !c.aggregateItemId && c.commandIds.length > 0);
   for (const c of floating) {
+    const existing = c.name ? of("aggregate").find((a) => a.text.trim() === c.name) : undefined;
     out.push({
       severity: "warning",
       code: "commands-without-aggregate",
       message: `${c.commandIds.length} 個のコマンドと ${c.eventIds.length} 個のイベントに、担当する集約がありません`,
-      hint: c.name ? `「${c.name}」を集約にする案があります（補助パネルの候補から置けます）` : "どの集約がこのコマンドを受けて整合性を守るかを話し合います",
+      hint: existing
+        ? `既存の集約「${existing.text.trim()}」が担当するなら、コマンドからその集約へ矢印を引きます`
+        : c.name
+          ? `「${c.name}」を集約にする案があります（補助パネルの候補から置けます）`
+          : "どの集約がこのコマンドを受けて整合性を守るかを話し合います",
       itemIds: [...c.commandIds, ...c.eventIds],
     });
   }

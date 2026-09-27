@@ -1,4 +1,4 @@
-import type { Diagnostic, RuleUsage } from "@ddd/core";
+import type { Board, Diagnostic, RuleUsage } from "@ddd/core";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -136,5 +136,7 @@ export const api = {
   preview: (id: string, version?: number) => request<Preview>("GET", `/api/projects/${id}/preview${version ? `?version=${version}` : ""}`),
   layout: (id: string) => request<{ positions: Record<string, { x: number; y: number }> }>("GET", `/api/projects/${id}/layout`),
   saveLayout: (id: string, positions: Record<string, { x: number; y: number }>) => request("PUT", `/api/projects/${id}/layout`, { positions }),
+  board: (id: string) => request<{ version: number; board: Board; updated_at: string | null; updated_by: string | null; role: Role }>("GET", `/api/projects/${id}/board`),
+  saveBoard: (id: string, board: Board, baseVersion: number) => request<{ version: number; board: Board }>("PUT", `/api/projects/${id}/board`, { board, base_version: baseVersion }),
   validate: (yaml: string) => request<{ ok: boolean; diagnostics: Diagnostic[]; rules: RuleUsage[] }>("POST", "/api/validate", { yaml }),
 };

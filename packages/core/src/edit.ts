@@ -32,15 +32,20 @@ function apply(doc: Document, op: EditOp): void {
   switch (op.op) {
     case "set":
       if (op.path.length === 0) throw new Error("Cannot replace the whole document");
-      doc.setIn(op.path, doc.createNode(op.value, { flow: isFlowish(op.value) }));
+      doc.setIn(op.path, styled(doc, op.value));
       return;
     case "add": {
       const existing = doc.getIn(op.path, true);
-      const node = doc.createNode(op.value, { flow: isFlowish(op.value) });
+      const node = styled(doc, op.value);
       if (existing === undefined || existing === null || (isScalar(existing) && existing.value === null)) {
-        doc.setIn(op.path, doc.createNode([]));
+        const seq = doc.createNode([]);
+        (seq as { flow?: boolean }).flow = false;
+        doc.setIn(op.path, seq);
       } else if (!isSeq(existing)) {
         throw new Error(`${op.path.join(".")} is not a list`);
+      } else if (existing.flow && existing.items.length === 0) {
+        // `errors: []` in a template: switch to block style so added elements are readable.
+        existing.flow = false;
       }
       doc.addIn(op.path, node);
       return;
@@ -54,6 +59,26 @@ function apply(doc: Document, op: EditOp): void {
     case "renameGuard":
       return renameGuard(doc, op.context, op.aggregate, op.from, op.to);
   }
+}
+
+/**
+ * Creates a node in the house style: block collections, except small records (fields, parameters,
+ * short step bodies) and short scalar lists, which read best in flow style: `{ name: id, type: UUID }`.
+ */
+function styled(doc: Document, value: unknown): Node {
+  const node = doc.createNode(value) as Node;
+  const walk = (n: unknown) => {
+    if (isMap(n)) {
+      // Single-entry maps (`- save: x`) stay in block style; small records go inline.
+      n.flow = n.items.length > 1 && isFlowish(n.toJSON());
+      if (!n.flow) for (const p of n.items) walk(p.value);
+    } else if (isSeq(n)) {
+      n.flow = n.items.length === 0 || (n.items.length <= 6 && n.items.every((i) => isScalar(i)));
+      for (const i of n.items) walk(i);
+    }
+  };
+  walk(node);
+  return node;
 }
 
 /** Small records (fields, parameters) read best in flow style: `{ name: x, type: String }`. */
