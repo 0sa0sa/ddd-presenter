@@ -389,7 +389,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
       } else if ((e.key === "Delete" || e.key === "Backspace") && canEdit) {
         e.preventDefault();
         deleteSelected();
-      } else if (e.key === "Tab" && !mod && canEdit && ghostsRef.current.length) {
+      } else if (e.key === "Tab" && !mod && !e.shiftKey && canEdit && ghostsRef.current.length) {
         e.preventDefault();
         acceptGhostById(ghostsRef.current[0]!.id);
       } else if (e.key === "Escape" && ghostsRef.current.length) {

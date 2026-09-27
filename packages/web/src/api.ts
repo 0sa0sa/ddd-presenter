@@ -16,7 +16,7 @@ export class ApiError extends Error {
 export const OFFLINE_MESSAGE =
   "サーバーに接続できません。APIサーバー（bun run dev:server または bun run start）が起動しているか確認してください。";
 
-export async function request<T>(method: string, path: string, body?: unknown, fetchImpl: typeof fetch = fetch): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<T> {
   let res: Response;
   try {
     res = await fetchImpl(path, {
@@ -24,6 +24,7 @@ export async function request<T>(method: string, path: string, body?: unknown, f
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: "same-origin",
+      signal,
     });
   } catch {
     throw new ApiError(0, OFFLINE_MESSAGE, {});
@@ -119,8 +120,8 @@ export const api = {
     request<{ workspace: { id: string; name: string; ai_enabled: boolean }; role: Role; ai_available: boolean; ai_model: string | null }>("GET", `/api/workspaces/${ws}`),
   setAi: (ws: string, enabled: boolean) => request<{ ai_enabled: boolean }>("PATCH", `/api/workspaces/${ws}/settings`, { ai_enabled: enabled }),
   assistStatus: (id: string) => request<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>("GET", `/api/projects/${id}/assist`),
-  assistInline: (id: string, yaml: string, offset: number) =>
-    request<{ suggestion: { text: string; label: string; source: "llm" } | null }>("POST", `/api/projects/${id}/assist/inline`, { yaml, offset }),
+  assistInline: (id: string, yaml: string, offset: number, signal?: AbortSignal) =>
+    request<{ suggestion: { text: string; label: string; source: "llm" } | null }>("POST", `/api/projects/${id}/assist/inline`, { yaml, offset }, fetch, signal),
   propose: (id: string, body: { yaml: string; context: string; aggregate?: string; kind: string; instruction?: string }) =>
     request<{ proposal: Proposal | null; diagnostics?: Diagnostic[]; message?: string }>("POST", `/api/projects/${id}/assist/propose`, body),
   boardAssist: (id: string, board: Board, llm: boolean, instruction?: string) =>

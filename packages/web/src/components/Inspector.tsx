@@ -1,7 +1,7 @@
 import { formatPath, templates, type Analysis, type Diagnostic, type EditOp, type ModelIR, type Path, type RuleUsage } from "@ddd/core";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { describeSteps, KIND_GLYPH, KIND_LABEL, scenarioCards, type OutlineNode } from "../lib/outline.ts";
-import { PROPOSE_KINDS, type ProposeKind } from "./ProposeDialog.tsx";
+import { PROPOSE_KINDS, type ProposeKind } from "../lib/propose.ts";
 import { ScenarioCardView } from "./ScenariosView.tsx";
 
 interface Props {

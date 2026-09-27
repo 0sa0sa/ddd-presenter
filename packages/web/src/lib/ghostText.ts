@@ -15,6 +15,8 @@ export interface Ghost {
 }
 
 export interface GhostOptions {
+  /** Whether predictions are shown at all (false for read-only viewers). */
+  enabled: () => boolean;
   /** Whether LLM predictions may be requested (AI enabled for the workspace and the user can edit). */
   llmEnabled: () => boolean;
   /** Fetches an LLM prediction; resolves undefined when there is none. */
@@ -70,7 +72,7 @@ function atLineEnd(view: EditorView): number | undefined {
 
 export function acceptGhost(view: EditorView): boolean {
   const g = view.state.field(ghostField, false);
-  if (!g || completionStatus(view.state) === "active") return false;
+  if (!g || view.state.readOnly || completionStatus(view.state) === "active") return false;
   view.dispatch({
     changes: { from: g.pos, insert: g.text },
     selection: { anchor: g.pos + g.text.length },
@@ -100,12 +102,12 @@ export function ghostText(opts: GhostOptions): Extension {
         this.abort?.abort();
         opts.onBusy?.(false);
         this.localTimer = setTimeout(() => this.requestLocal(), immediate ? 0 : 350);
-        if (opts.llmEnabled()) this.llmTimer = setTimeout(() => void this.requestLlm(), immediate ? 0 : 900);
+        if (opts.enabled() && opts.llmEnabled()) this.llmTimer = setTimeout(() => void this.requestLlm(), immediate ? 0 : 900);
       }
 
       requestLocal() {
         const pos = atLineEnd(this.view);
-        if (pos === undefined || completionStatus(this.view.state) === "active") return;
+        if (pos === undefined || !opts.enabled() || completionStatus(this.view.state) === "active") return;
         const text = this.view.state.doc.toString();
         const s = suggestInline(text, pos);
         if (s && this.view.state.doc.toString() === text && this.view.state.selection.main.head === pos && !this.view.state.field(ghostField, false)) {
@@ -124,6 +126,7 @@ export function ghostText(opts: GhostOptions): Extension {
           const g = await opts.fetchLlm(text, pos, ctrl.signal);
           if (!g || ctrl.signal.aborted) return;
           if (this.view.state.doc.toString() !== text || this.view.state.selection.main.head !== pos) return;
+          if (completionStatus(this.view.state) === "active") return;
           this.view.dispatch({ effects: setGhost.of({ ...g, pos }) });
         } catch {
           // Network or model errors: keep the local prediction.

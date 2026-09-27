@@ -1,16 +1,9 @@
 import { unifiedDiff, type Proposal } from "@ddd/core";
 import { useEffect, useMemo, useState } from "react";
 import { api, describeError } from "../api.ts";
+import { PROPOSE_KINDS, type ProposeKind } from "../lib/propose.ts";
 import { DiffView } from "./DiffView.tsx";
 
-export type ProposeKind = "next-operation" | "guards" | "scenarios" | "events" | "custom";
-
-export const PROPOSE_KINDS: { kind: ProposeKind; label: string; help: string }[] = [
-  { kind: "next-operation", label: "次の操作", help: "状態の流れで足りない操作（ガード・変更・イベントつき）" },
-  { kind: "guards", label: "ルール", help: "状態ガードとエラー" },
-  { kind: "scenarios", label: "シナリオ", help: "成功と、ルールに違反する失敗のテスト" },
-  { kind: "events", label: "イベントの内容", help: "イベントが運ぶフィールド" },
-];
 
 /** Asks for a proposal (local rules, or Claude when AI is on) and shows it as a diff; nothing changes until applied. */
 export function ProposeDialog({

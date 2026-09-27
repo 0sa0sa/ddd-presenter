@@ -7,7 +7,8 @@ import { DiffView } from "../components/DiffView.tsx";
 import { HistoryView } from "../components/HistoryView.tsx";
 import { Inspector } from "../components/Inspector.tsx";
 import { Outline } from "../components/Outline.tsx";
-import { ProposeDialog, type ProposeKind } from "../components/ProposeDialog.tsx";
+import { ProposeDialog } from "../components/ProposeDialog.tsx";
+import type { ProposeKind } from "../lib/propose.ts";
 import { PreviewView } from "../components/PreviewView.tsx";
 import { RulesView } from "../components/RulesView.tsx";
 import { ScenariosView } from "../components/ScenariosView.tsx";
@@ -256,8 +257,8 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                     canEdit
                       ? {
                           llmEnabled: () => aiActive.current,
-                          fetchLlm: async (t, o) => {
-                            const r = await api.assistInline(id, t, o);
+                          fetchLlm: async (t, o, signal) => {
+                            const r = await api.assistInline(id, t, o, signal);
                             return r.suggestion ?? undefined;
                           },
                           onBusy: setAiBusy,

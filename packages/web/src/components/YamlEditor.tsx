@@ -52,7 +52,7 @@ export function YamlEditor({
   onCursorLine?: (line: number) => void;
   onMessage?: (message: string) => void;
   /** Copilot-style predictions (omit to disable, e.g. for viewers). */
-  ghost?: GhostOptions;
+  ghost?: Omit<GhostOptions, "enabled">;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -86,6 +86,7 @@ export function YamlEditor({
             onMessage: (m) => callbacks.current.onMessage?.(m),
           }),
           ghostText({
+            enabled: () => !!callbacks.current.ghost,
             llmEnabled: () => !!callbacks.current.ghost?.llmEnabled(),
             fetchLlm: (t, o, sig) => callbacks.current.ghost?.fetchLlm(t, o, sig) ?? Promise.resolve(undefined),
             onBusy: (b) => callbacks.current.ghost?.onBusy?.(b),
