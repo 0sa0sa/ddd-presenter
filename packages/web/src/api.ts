@@ -112,6 +112,15 @@ export interface AiProvider {
   model: string;
 }
 
+export interface BoardSummary {
+  id: string;
+  name: string;
+  version: number;
+  stickies: number;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
 export const api = {
   health: async () => {
     const r = await request<{ service?: string }>("GET", "/api/health");
@@ -160,7 +169,13 @@ export const api = {
   preview: (id: string, version?: number) => request<Preview>("GET", `/api/projects/${id}/preview${version ? `?version=${version}` : ""}`),
   layout: (id: string) => request<{ positions: Record<string, { x: number; y: number }> }>("GET", `/api/projects/${id}/layout`),
   saveLayout: (id: string, positions: Record<string, { x: number; y: number }>) => request("PUT", `/api/projects/${id}/layout`, { positions }),
-  board: (id: string) => request<{ version: number; board: Board; updated_at: string | null; updated_by: string | null; role: Role }>("GET", `/api/projects/${id}/board`),
-  saveBoard: (id: string, board: Board, baseVersion: number) => request<{ version: number; board: Board }>("PUT", `/api/projects/${id}/board`, { board, base_version: baseVersion }),
+  board: (id: string, boardId = "main") =>
+    request<{ id: string; name: string; version: number; board: Board; updated_at: string | null; updated_by: string | null; role: Role }>("GET", `/api/projects/${id}/boards/${boardId}`),
+  saveBoard: (id: string, board: Board, baseVersion: number, boardId = "main") =>
+    request<{ version: number; board: Board }>("PUT", `/api/projects/${id}/boards/${boardId}`, { board, base_version: baseVersion }),
+  boards: (id: string) => request<{ boards: BoardSummary[] }>("GET", `/api/projects/${id}/boards`),
+  createBoard: (id: string, name: string) => request<{ id: string; name: string }>("POST", `/api/projects/${id}/boards`, { name }),
+  renameBoard: (id: string, boardId: string, name: string) => request<{ id: string; name: string }>("PATCH", `/api/projects/${id}/boards/${boardId}`, { name }),
+  deleteBoard: (id: string, boardId: string) => request<{ ok: boolean }>("DELETE", `/api/projects/${id}/boards/${boardId}`),
   validate: (yaml: string) => request<{ ok: boolean; diagnostics: Diagnostic[]; rules: RuleUsage[] }>("POST", "/api/validate", { yaml }),
 };

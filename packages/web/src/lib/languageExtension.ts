@@ -110,7 +110,7 @@ function gotoDefinition(view: EditorView, pos: number): boolean {
 
 export interface LanguageOptions {
   /** Called with the new document after a rename; the editor applies it through its normal change path. */
-  onRename: (text: string) => void;
+  onRename: (text: string, change: { from: string; to: string }) => void;
   /** Asks the user for a new name; returns undefined when cancelled. */
   askName: (current: string) => string | undefined;
   onMessage: (message: string) => void;
@@ -129,7 +129,7 @@ export function dddLanguage(opts: LanguageOptions): Extension {
     if (!next || next === check.name) return true;
     const r = rename(text, pos, next);
     if (!r.ok) opts.onMessage(r.error);
-    else opts.onRename(r.text);
+    else opts.onRename(r.text, { from: check.name, to: next });
     return true;
   };
 

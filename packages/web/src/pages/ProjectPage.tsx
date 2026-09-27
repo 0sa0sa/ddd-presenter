@@ -15,7 +15,9 @@ import { ScenariosView } from "../components/ScenariosView.tsx";
 import { TopBar } from "../components/TopBar.tsx";
 import { YamlEditor, type GotoRequest } from "../components/YamlEditor.tsx";
 import { buildOutline, flatten } from "../lib/outline.ts";
+import { BoardTabs } from "../components/board/BoardTabs.tsx";
 import { BoardView } from "../components/board/BoardView.tsx";
+import { renameOnBoards, type Rename } from "../lib/boardRenames.ts";
 import { TutorialCoach } from "../components/TutorialCoach.tsx";
 import { tutorialStore } from "../lib/tutorial.ts";
 
@@ -54,6 +56,18 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [ai, setAi] = useState<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>();
   const [aiBusy, setAiBusy] = useState(false);
   const [propose, setPropose] = useState<{ context: string; aggregate: string; kind: ProposeKind }>();
+  const [board, setBoard] = useState<{ id: string; name: string }>(() => {
+    try {
+      return { id: localStorage.getItem(`ddd.board.${id}`) ?? "main", name: "" };
+    } catch {
+      return { id: "main", name: "" };
+    }
+  });
+  /** Type renames since the last save; applied to the boards' stickies once the model is saved. */
+  const pendingRenames = useRef<Rename[]>([]);
+  const noteRename = useCallback((from: string, to: string) => {
+    pendingRenames.current.push({ from, to });
+  }, []);
   const aiActive = useRef(false);
   aiActive.current = !!ai?.active && role !== "viewer";
 
@@ -119,10 +133,11 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
       if (!ops.length) return undefined;
       const r = applyEdits(text, ops);
       if (!r.ok) return r.error;
+      for (const op of ops) if (op.op === "renameType") noteRename(op.from, op.to);
       setText(r.text);
       return undefined;
     },
-    [text],
+    [text, noteRename],
   );
 
   const save = useCallback(
@@ -135,6 +150,12 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         setMessage("");
         setConflict(undefined);
         setStatus(r.ok ? `v${r.version} として保存しました` : `v${r.version} として保存しました（エラーが残っているため生成はできません）`);
+        const renames = pendingRenames.current.splice(0);
+        if (renames.length)
+          renameOnBoards(id, renames).then(
+            (n) => n && setStatus(`v${r.version} として保存し、ボードの付箋 ${n} 枚の名前も更新しました`),
+            (e) => setStatus(`v${r.version} として保存しました。ボードの付箋の名前は更新できませんでした: ${describeError(e)}`),
+          );
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
           setConflict({ theirs: String(e.body.yaml), version: Number(e.body.current_version) });
@@ -231,7 +252,26 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           </div>
           <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" || tab === "discovery" ? " fill" : ""}`} role="tabpanel">
             {tab === "discovery" && (
+              <div className="board-page">
+              <BoardTabs
+                projectId={id}
+                current={board.id}
+                canEdit={canEdit}
+                onSelect={(bid, name) => {
+                  setBoard((prev) => (prev.id === bid && prev.name === name ? prev : { id: bid, name }));
+                  try {
+                    localStorage.setItem(`ddd.board.${id}`, bid);
+                  } catch {
+                    // Private mode: the choice is not remembered.
+                  }
+                }}
+              />
               <BoardView
+                key={board.id}
+                boardId={board.id}
+                boardName={board.name}
+                user={me.user.username}
+                model={result.model}
                 projectId={id}
                 canEdit={canEdit}
                 modelText={text}
@@ -242,6 +282,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                   navigate({ page: "project", id, tab: "model" });
                 }}
               />
+              </div>
             )}
             {tab === "model" && (
               <div className="editor-wrap" data-tour="editor">
@@ -253,6 +294,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                   goto={goto}
                   onCursorLine={onCursorLine}
                   onMessage={setStatus}
+                  onRenamed={noteRename}
                   ghost={
                     canEdit
                       ? {

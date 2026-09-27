@@ -43,6 +43,7 @@ export function YamlEditor({
   onCursorLine,
   onMessage,
   ghost,
+  onRenamed,
 }: {
   value: string;
   onChange: (text: string) => void;
@@ -53,12 +54,14 @@ export function YamlEditor({
   onMessage?: (message: string) => void;
   /** Copilot-style predictions (omit to disable, e.g. for viewers). */
   ghost?: Omit<GhostOptions, "enabled">;
+  /** A type was renamed with F2 (the board's stickies follow when the model is saved). */
+  onRenamed?: (from: string, to: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
   const readOnlyCompartment = useRef(new Compartment());
-  const callbacks = useRef({ onChange, onCursorLine, onMessage, ghost });
-  callbacks.current = { onChange, onCursorLine, onMessage, ghost };
+  const callbacks = useRef({ onChange, onCursorLine, onMessage, ghost, onRenamed });
+  callbacks.current = { onChange, onCursorLine, onMessage, ghost, onRenamed };
 
   useEffect(() => {
     const v = new EditorView({
@@ -78,9 +81,10 @@ export function YamlEditor({
           yaml(),
           lintGutter(),
           dddLanguage({
-            onRename: (next) => {
+            onRename: (next, change) => {
               const cur = view.current;
               if (cur) cur.dispatch({ changes: { from: 0, to: cur.state.doc.length, insert: next } });
+              callbacks.current.onRenamed?.(change.from, change.to);
             },
             askName: (current) => window.prompt(`「${current}」の新しい名前（参照している箇所もまとめて変更します）`, current) ?? undefined,
             onMessage: (m) => callbacks.current.onMessage?.(m),

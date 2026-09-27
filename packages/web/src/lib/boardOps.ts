@@ -1,5 +1,5 @@
 /** Immutable board operations used by the canvas (framework-free, unit-tested). */
-import { itemsInFrame, STICKY_KINDS, type Board, type BoardConnector, type BoardGhost, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
+import { itemsInFrame, STICKY_KINDS, type Board, type BoardConnector, type BoardGhost, type BoardLane, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
 
 let counter = 0;
 export function newId(prefix: string): string {
@@ -30,6 +30,27 @@ export function updateItem(board: Board, id: string, patch: Partial<BoardItem>):
   return { ...board, items: board.items.map((i) => (i.id === id ? cleanItem({ ...i, ...patch }) : i)) };
 }
 
+/** Adds a swimlane below the existing ones (or at `y`). */
+export function addLane(board: Board, y?: number, title = ""): { board: Board; id: string } {
+  const lanes = board.lanes ?? [];
+  const id = newId("l");
+  const top = y ?? (lanes.length ? Math.max(...lanes.map((l) => l.y + l.h)) : Math.min(0, ...board.items.map((i) => i.y)) - 40);
+  return { board: { ...board, lanes: [...lanes, { id, title, y: Math.round(top), h: 220 }] }, id };
+}
+
+export function updateLane(board: Board, id: string, patch: Partial<BoardLane>): Board {
+  return { ...board, lanes: (board.lanes ?? []).map((l) => (l.id === id ? { ...l, ...patch } : l)) };
+}
+
+export function addComment(board: Board, itemId: string, author: string, text: string, at = new Date().toISOString()): Board {
+  if (!text.trim()) return board;
+  return { ...board, items: board.items.map((i) => (i.id === itemId ? { ...i, comments: [...(i.comments ?? []), { id: newId("c"), author, text: text.trim(), at }] } : i)) };
+}
+
+export function removeComment(board: Board, itemId: string, commentId: string): Board {
+  return { ...board, items: board.items.map((i) => (i.id === itemId ? cleanItem({ ...i, comments: (i.comments ?? []).filter((c) => c.id !== commentId) }) : i)) };
+}
+
 export function updateFrame(board: Board, id: string, patch: Partial<BoardFrame>): Board {
   return { ...board, frames: board.frames.map((f) => (f.id === id ? cleanFrame({ ...f, ...patch }) : f)) };
 }
@@ -42,12 +63,18 @@ function cleanItem(i: BoardItem): BoardItem {
   const out = { ...i };
   if (!out.codeName) delete out.codeName;
   if (!out.creates || out.kind !== "command") delete out.creates;
+  if (!out.pivotal || out.kind !== "event") delete out.pivotal;
+  if (!out.resolved || out.kind !== "hotspot") delete out.resolved;
+  if (!out.resolution || out.kind !== "hotspot") delete out.resolution;
+  if (!out.votes?.length) delete out.votes;
+  if (!out.comments?.length) delete out.comments;
   return out;
 }
 
 function cleanFrame(f: BoardFrame): BoardFrame {
   const out = { ...f };
   if (!out.codeName) delete out.codeName;
+  if (!out.subdomain) delete out.subdomain;
   return out;
 }
 
@@ -61,6 +88,7 @@ export function removeIds(board: Board, ids: Iterable<string>): Board {
     items,
     frames: board.frames.filter((f) => !set.has(f.id)),
     connectors: board.connectors.filter((c) => !set.has(c.id) && alive.has(c.from) && alive.has(c.to)),
+    ...(board.lanes ? { lanes: board.lanes.filter((l) => !set.has(l.id)) } : {}),
   };
 }
 
@@ -71,7 +99,7 @@ export function duplicate(board: Board, ids: Iterable<string>, offset = 32): { b
   const items = board.items.filter((i) => set.has(i.id)).map((i) => {
     const id = newId("s");
     map.set(i.id, id);
-    return { ...i, id, x: i.x + offset, y: i.y + offset, codeName: undefined } as BoardItem;
+    return { ...i, id, x: i.x + offset, y: i.y + offset, codeName: undefined, votes: undefined, comments: undefined } as BoardItem;
   });
   const frames = board.frames.filter((f) => set.has(f.id)).map((f) => {
     const id = newId("f");

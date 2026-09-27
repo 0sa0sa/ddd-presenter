@@ -1,4 +1,4 @@
-import { STICKY_KINDS, type BoardFrame, type BoardGhost, type BoardItem, type StickyKind } from "@ddd/core";
+import { STICKY_KINDS, SUBDOMAIN_LABEL, type BoardFrame, type BoardGhost, type BoardItem, type BoardLane, type StickyKind } from "@ddd/core";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { useEffect, useRef, useState } from "react";
 
@@ -33,6 +33,15 @@ export interface FrameData extends Record<string, unknown> {
 
 export type StickyNodeType = Node<StickyData, "sticky">;
 export type FrameNodeType = Node<FrameData, "frame">;
+
+export interface LaneData extends Record<string, unknown> {
+  lane: BoardLane;
+  editing: boolean;
+  onCommitTitle: (id: string, title: string) => void;
+  onStopEditing: () => void;
+}
+export type LaneNodeType = Node<LaneData, "lane">;
+export type PivotNodeType = Node<{ label: string }, "pivot">;
 
 export interface GhostData extends Record<string, unknown> {
   ghost: BoardGhost;
@@ -83,11 +92,16 @@ export function StickyNode({ data, selected }: NodeProps<StickyNodeType>) {
   const { item } = data;
   const meta = STICKY_KINDS[item.kind];
   return (
-    <div className={`sticky sticky-${item.kind}${selected ? " is-selected" : ""}${data.highlighted ? " is-highlighted" : ""}`} title={`${meta.label}: ${meta.help}`}>
+    <div
+      className={`sticky sticky-${item.kind}${selected ? " is-selected" : ""}${data.highlighted ? " is-highlighted" : ""}${item.pivotal ? " is-pivotal" : ""}${item.resolved ? " is-resolved" : ""}`}
+      title={`${meta.label}: ${meta.help}${item.resolution ? `\n結論: ${item.resolution}` : ""}`}
+    >
       <NodeResizer isVisible={selected} minWidth={80} minHeight={40} lineClassName="board-resize-line" handleClassName="board-resize-handle" />
       <div className="sticky-kind">
         <span aria-hidden>{STICKY_GLYPH[item.kind]}</span> {meta.label}
         {item.kind === "command" && item.creates && <span className="sticky-flag">作成</span>}
+        {item.pivotal && <span className="sticky-flag">節目</span>}
+        {item.resolved && <span className="sticky-flag">✓ 解決</span>}
       </div>
       {data.editing ? (
         <InlineText value={item.text} multiline onCommit={(v) => data.onCommitText(item.id, v)} onCancel={data.onStopEditing} />
@@ -95,6 +109,12 @@ export function StickyNode({ data, selected }: NodeProps<StickyNodeType>) {
         <div className="sticky-text">{item.text || <span className="sticky-placeholder">ダブルクリックで入力</span>}</div>
       )}
       {item.codeName && <div className="sticky-code">{item.codeName}</div>}
+      {(item.votes?.length || item.comments?.length) && (
+        <div className="sticky-meta" aria-label={`投票 ${item.votes?.length ?? 0}・コメント ${item.comments?.length ?? 0}`}>
+          {item.votes?.length ? <span className="sticky-votes">{"●".repeat(Math.min(item.votes.length, 6))}{item.votes.length > 6 ? ` ${item.votes.length}` : ""}</span> : null}
+          {item.comments?.length ? <span className="sticky-comments">💬 {item.comments.length}</span> : null}
+        </div>
+      )}
       {HANDLES}
     </div>
   );
@@ -110,7 +130,13 @@ export function FrameNode({ data, selected }: NodeProps<FrameNodeType>) {
           <InlineText value={frame.title} multiline={false} onCommit={(v) => data.onCommitTitle(frame.id, v)} onCancel={data.onStopEditing} />
         ) : (
           <>
-            <span className="board-frame-label">コンテキスト</span> {frame.title || "無題（ダブルクリックで名前）"}
+            <span className="board-frame-label">コンテキスト</span>
+            {frame.subdomain && (
+              <span className={`subdomain-badge subdomain-${frame.subdomain}`} title={SUBDOMAIN_LABEL[frame.subdomain].help}>
+                {SUBDOMAIN_LABEL[frame.subdomain].label}
+              </span>
+            )}{" "}
+            {frame.title || "無題（ダブルクリックで名前）"}
             {frame.codeName && <span className="sticky-code"> {frame.codeName}</span>}
           </>
         )}
@@ -157,4 +183,26 @@ export function GhostNode({ data }: NodeProps<GhostNodeType>) {
   );
 }
 
-export const nodeTypes = { sticky: StickyNode, frame: FrameNode, ghost: GhostNode };
+/** A horizontal swimlane behind the stickies; only its vertical position and height matter. */
+export function LaneNode({ data, selected }: NodeProps<LaneNodeType>) {
+  const { lane } = data;
+  return (
+    <div className={`board-lane${selected ? " is-selected" : ""}`}>
+      <NodeResizer isVisible={selected} minWidth={400} minHeight={60} lineClassName="board-resize-line" handleClassName="board-resize-handle" />
+      <div className="board-lane-title">
+        {data.editing ? <InlineText value={lane.title} multiline={false} onCommit={(v) => data.onCommitTitle(lane.id, v)} onCancel={data.onStopEditing} /> : lane.title || "レーン（ダブルクリックで名前）"}
+      </div>
+    </div>
+  );
+}
+
+/** Vertical line through a pivotal event: the timeline's turning points. */
+export function PivotNode({ data }: NodeProps<PivotNodeType>) {
+  return (
+    <div className="board-pivot" title={`節目: ${data.label}`}>
+      <span>{data.label}</span>
+    </div>
+  );
+}
+
+export const nodeTypes = { sticky: StickyNode, frame: FrameNode, ghost: GhostNode, lane: LaneNode, pivot: PivotNode };

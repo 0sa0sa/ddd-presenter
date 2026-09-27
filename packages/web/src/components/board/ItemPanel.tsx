@@ -1,6 +1,6 @@
-import { STICKY_KINDS, suggestCodeName, type Board, type StickyKind } from "@ddd/core";
+import { STICKY_KINDS, SUBDOMAIN_LABEL, suggestCodeName, type Board, type BoardItem, type StickyKind, type Subdomain } from "@ddd/core";
 import { useEffect, useState } from "react";
-import { newId, removeIds, updateConnector, updateFrame, updateItem } from "../../lib/boardOps.ts";
+import { addComment, newId, removeComment, removeIds, updateConnector, updateFrame, updateItem, updateLane } from "../../lib/boardOps.ts";
 import { STICKY_GLYPH } from "./nodes.tsx";
 
 const PASCAL = /^[A-Z][A-Za-z0-9]*$/;
@@ -31,7 +31,78 @@ function Field({ label, value, onCommit, placeholder, multiline, invalid, disabl
   );
 }
 
-export function ItemPanel({ board, selectedIds, selectedEdgeId, canEdit, onChange, onEdit }: { board: Board; selectedIds: string[]; selectedEdgeId?: string; canEdit: boolean; onChange: (b: Board) => void; onEdit: (id: string) => void }) {
+/** Discussion on a sticky: what people asked or decided, kept next to it. */
+function Comments({ board, item, user, canEdit, onChange }: { board: Board; item: BoardItem; user: string; canEdit: boolean; onChange: (b: Board) => void }) {
+  const [draft, setDraft] = useState("");
+  const comments = item.comments ?? [];
+  return (
+    <div className="stack comments" style={{ gap: 6 }}>
+      <h4 className="small">コメント{comments.length ? `（${comments.length}）` : ""}</h4>
+      {comments.map((c) => (
+        <div key={c.id} className="comment">
+          <div className="small muted">
+            {c.author}・{c.at ? new Date(c.at).toLocaleString() : ""}
+            {canEdit && c.author === user && (
+              <button className="linklike small" onClick={() => onChange(removeComment(board, item.id, c.id))}>
+                削除
+              </button>
+            )}
+          </div>
+          <div className="small comment-text">{c.text}</div>
+        </div>
+      ))}
+      {canEdit && (
+        <form
+          className="stack"
+          style={{ gap: 4 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            onChange(addComment(board, item.id, user, draft));
+            setDraft("");
+          }}
+        >
+          <textarea rows={2} value={draft} placeholder="質問・補足・決まったこと" aria-label="コメント" onChange={(e) => setDraft(e.target.value)} />
+          <button type="submit" className="small-button" disabled={!draft.trim()}>
+            コメントする
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+export function ItemPanel({
+  board,
+  selectedIds,
+  selectedEdgeId,
+  canEdit,
+  user,
+  onChange,
+  onEdit,
+}: {
+  board: Board;
+  selectedIds: string[];
+  selectedEdgeId?: string;
+  canEdit: boolean;
+  user: string;
+  onChange: (b: Board) => void;
+  onEdit: (id: string) => void;
+}) {
+  const lane = selectedIds.length === 1 ? board.lanes?.find((l) => l.id === selectedIds[0]) : undefined;
+  if (lane) {
+    return (
+      <section className="board-panel">
+        <h3>☰ スイムレーン</h3>
+        <p className="small muted">人・部署・プロセスごとに横の帯で分けて、誰の流れかを見やすくします。上下に動かしたり高さを変えたりできます。</p>
+        <Field label="名前" value={lane.title} disabled={!canEdit} onCommit={(v) => onChange(updateLane(board, lane.id, { title: v }))} />
+        {canEdit && (
+          <button className="danger" onClick={() => onChange(removeIds(board, [lane.id]))}>
+            レーンを削除（付箋は残る）
+          </button>
+        )}
+      </section>
+    );
+  }
   const items = board.items.filter((i) => selectedIds.includes(i.id));
   const frames = board.frames.filter((f) => selectedIds.includes(f.id));
   const edge = board.connectors.find((c) => c.id === selectedEdgeId);
@@ -124,6 +195,22 @@ export function ItemPanel({ board, selectedIds, selectedEdgeId, canEdit, onChang
             このコマンドで集約を新しく作る（ファクトリになる）
           </label>
         )}
+        {item.kind === "event" && (
+          <label className="small row" style={{ gap: 6 }} title="業務の段階が変わる出来事。コンテキストの境界の手がかりになります">
+            <input type="checkbox" disabled={!canEdit} checked={!!item.pivotal} onChange={(e) => onChange(updateItem(board, item.id, { pivotal: e.target.checked }))} />
+            流れの節目になる出来事（ピボタルイベント）
+          </label>
+        )}
+        {item.kind === "hotspot" && (
+          <div className="stack" style={{ gap: 6 }}>
+            <label className="small row" style={{ gap: 6 }}>
+              <input type="checkbox" disabled={!canEdit} checked={!!item.resolved} onChange={(e) => onChange(updateItem(board, item.id, { resolved: e.target.checked }))} />
+              結論が出た（解決済み）
+            </label>
+            {item.resolved && <Field label="結論" value={item.resolution ?? ""} multiline placeholder="例: 期限切れの招待は再送せず、新しく発行する" disabled={!canEdit} onCommit={(v) => onChange(updateItem(board, item.id, { resolution: v.trim() }))} />}
+          </div>
+        )}
+        {item.votes?.length ? <p className="small">投票 {item.votes.length} 票（{[...new Set(item.votes)].join("、")}）</p> : null}
         {canEdit && (
           <div className="row">
             <button onClick={() => onEdit(item.id)}>テキストを編集</button>
@@ -132,6 +219,7 @@ export function ItemPanel({ board, selectedIds, selectedEdgeId, canEdit, onChang
             </button>
           </div>
         )}
+        <Comments board={board} item={item} user={user} canEdit={canEdit} onChange={onChange} />
       </section>
     );
   }
@@ -144,6 +232,21 @@ export function ItemPanel({ board, selectedIds, selectedEdgeId, canEdit, onChang
         <h3>▭ コンテキスト（境界の候補）</h3>
         <p className="small muted">言葉の意味が変わる所・担当が変わる所が境界の目安です。中に置いた付箋はフレームと一緒に動きます。</p>
         <Field label="名前" value={frame.title} disabled={!canEdit} onCommit={(v) => onChange(updateFrame(board, frame.id, { title: v }))} />
+        <fieldset className="stack subdomain-choice" disabled={!canEdit}>
+          <legend className="small">サブドメインの分類</legend>
+          {(Object.keys(SUBDOMAIN_LABEL) as Subdomain[]).map((k) => (
+            <label key={k} className="small row" style={{ gap: 6 }}>
+              <input type="radio" name={`subdomain-${frame.id}`} checked={frame.subdomain === k} onChange={() => onChange(updateFrame(board, frame.id, { subdomain: k }))} />
+              <span className={`subdomain-badge subdomain-${k}`}>{SUBDOMAIN_LABEL[k].label}</span>
+              {SUBDOMAIN_LABEL[k].help}
+            </label>
+          ))}
+          {frame.subdomain && (
+            <button type="button" className="linklike small" onClick={() => onChange(updateFrame(board, frame.id, { subdomain: undefined }))}>
+              分類を外す
+            </button>
+          )}
+        </fieldset>
         <Field label="モデルでの名前（PascalCase）" value={frame.codeName ?? ""} placeholder={suggestCodeName(frame.title, "pascal") || "例: StaffInvitation"} invalid={invalid} disabled={!canEdit} onCommit={(v) => onChange(updateFrame(board, frame.id, { codeName: v.trim() }))} />
         {canEdit && (
           <button className="danger" onClick={() => onChange(removeIds(board, [frame.id]))}>

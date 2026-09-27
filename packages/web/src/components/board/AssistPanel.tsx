@@ -1,8 +1,10 @@
-import { itemsInFrame, type AggregateCandidate, type Board, type ContextLink, type Finding } from "@ddd/core";
+import { itemsInFrame, SUBDOMAIN_LABEL, type AggregateCandidate, type Board, type ContextLink, type Finding, type ModelIR } from "@ddd/core";
 import { useState } from "react";
 import { addConnector, addItem } from "../../lib/boardOps.ts";
+import { SyncPanel } from "./SyncPanel.tsx";
+import { WorkshopPanel } from "./WorkshopPanel.tsx";
 
-type Tab = "hints" | "aggregates" | "contexts";
+type Tab = "workshop" | "hints" | "aggregates" | "contexts" | "model";
 
 export function AssistPanel({
   board,
@@ -13,7 +15,15 @@ export function AssistPanel({
   onFocus,
   onChange,
   onReflect,
+  model,
+  user,
+  voting,
+  onVoting,
 }: {
+  model?: ModelIR;
+  user: string;
+  voting: boolean;
+  onVoting: (on: boolean) => void;
   board: Board;
   findings: Finding[];
   candidates: AggregateCandidate[];
@@ -23,7 +33,7 @@ export function AssistPanel({
   onChange: (b: Board) => void;
   onReflect: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>("hints");
+  const [tab, setTab] = useState<Tab>(() => (board.workshop ? "workshop" : "hints"));
   const text = (id: string) => board.items.find((i) => i.id === id)?.text || "無題";
   const frameTitle = (id: string) => board.frames.find((f) => f.id === id)?.title || "無題";
   const warnings = findings.filter((f) => f.severity === "warning").length;
@@ -48,6 +58,9 @@ export function AssistPanel({
         </button>
       </div>
       <div className="tabs assist-tabs" role="tablist">
+        <button className="tab" role="tab" data-tour="assist-tab-workshop" aria-selected={tab === "workshop"} onClick={() => setTab("workshop")}>
+          進行
+        </button>
         <button className="tab" role="tab" data-tour="assist-tab-hints" aria-selected={tab === "hints"} onClick={() => setTab("hints")}>
           ヒント{warnings ? ` ▲${warnings}` : ""}
         </button>
@@ -57,7 +70,13 @@ export function AssistPanel({
         <button className="tab" role="tab" data-tour="assist-tab-contexts" aria-selected={tab === "contexts"} onClick={() => setTab("contexts")}>
           コンテキスト
         </button>
+        <button className="tab" role="tab" data-tour="assist-tab-model" aria-selected={tab === "model"} onClick={() => setTab("model")}>
+          モデル
+        </button>
       </div>
+
+      {tab === "workshop" && <WorkshopPanel board={board} user={user} canEdit={canEdit} voting={voting} onVoting={onVoting} onChange={onChange} onFocus={onFocus} />}
+      {tab === "model" && <SyncPanel board={board} model={model} canEdit={canEdit} onChange={onChange} onFocus={onFocus} onReflect={onReflect} />}
 
       {tab === "hints" && (
         <ul className="assist-list">
@@ -136,6 +155,7 @@ export function AssistPanel({
                       <span aria-hidden>▭</span>
                       <span>
                         <strong>{f.title || "無題"}</strong>
+                        {f.subdomain && <span className={`subdomain-badge subdomain-${f.subdomain}`}>{SUBDOMAIN_LABEL[f.subdomain].label}</span>}
                         <span className="small muted">
                           {" "}
                           集約 {inside.filter((i) => i.kind === "aggregate").length}・コマンド {inside.filter((i) => i.kind === "command").length}・イベント {inside.filter((i) => i.kind === "event").length}

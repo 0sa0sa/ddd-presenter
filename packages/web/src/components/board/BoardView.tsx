@@ -1,4 +1,4 @@
-import { analyzeBoard, boardGhosts, contextMap, sampleBoard, STICKY_KINDS, suggestAggregates, type Board, type BoardGhost, type StickyKind } from "@ddd/core";
+import { analyzeBoard, boardGhosts, boardToSvg, contextMap, phaseOf, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type ModelIR, type StickyKind } from "@ddd/core";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -18,10 +18,10 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, describeError } from "../../api.ts";
-import { acceptGhost, addConnector, addFrame, addItem, duplicate, frameContents, History, removeIds, updateItem, visibleGhosts } from "../../lib/boardOps.ts";
+import { acceptGhost, addConnector, addFrame, addItem, addLane, duplicate, frameContents, History, removeIds, updateItem, updateLane, visibleGhosts } from "../../lib/boardOps.ts";
 import { AssistPanel } from "./AssistPanel.tsx";
 import { ItemPanel } from "./ItemPanel.tsx";
-import { nodeTypes, STICKY_GLYPH, type FrameData, type GhostData, type StickyData } from "./nodes.tsx";
+import { nodeTypes, STICKY_GLYPH, type FrameData, type GhostData, type LaneData, type StickyData } from "./nodes.tsx";
 import { ReflectDialog } from "./ReflectDialog.tsx";
 
 const NO_HIGHLIGHT: string[] = [];
@@ -36,6 +36,13 @@ interface Props {
   onReflect: (yaml: string) => void;
   /** AI (Claude) is enabled for the workspace: offer "ask AI for stickies". */
   aiActive?: boolean;
+  /** Which of the project's boards is shown. */
+  boardId?: string;
+  boardName?: string;
+  /** Current user (votes and comments are attributed to them). */
+  user: string;
+  /** The model from the editor, for the board ↔ model comparison. */
+  model?: ModelIR;
 }
 
 export function BoardView(props: Props) {
@@ -48,7 +55,7 @@ export function BoardView(props: Props) {
 
 type Tool = StickyKind | "frame";
 
-function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Props) {
+function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, boardId = "main", boardName, user, model }: Props) {
   const rf = useReactFlow();
   const [board, setBoard] = useState<Board>();
   const [saved, setSaved] = useState<{ version: number; json: string }>({ version: 0, json: "" });
@@ -65,6 +72,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
   const [asking, setAsking] = useState(false);
   const [showGhosts, setShowGhosts] = useState(true);
+  const [voting, setVoting] = useState(false);
   const history = useRef(new History());
   const dragStart = useRef<{ frameId?: string; contents: string[]; origin: Record<string, { x: number; y: number }> }>(undefined);
   const boardRef = useRef<Board | undefined>(undefined);
@@ -77,7 +85,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
 
   const load = useCallback(async () => {
     try {
-      const r = await api.board(projectId);
+      const r = await api.board(projectId, boardId);
       setBoard(r.board);
       setSaved({ version: r.version, json: JSON.stringify(r.board) });
       history.current.clear();
@@ -85,7 +93,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
     } catch (e) {
       setStatus(describeError(e));
     }
-  }, [projectId]);
+  }, [projectId, boardId]);
 
   useEffect(() => {
     void load();
@@ -97,7 +105,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
       if (!b || !canEdit) return;
       const body = JSON.stringify(b);
       try {
-        const r = await api.saveBoard(projectId, b, baseVersion ?? saved.version);
+        const r = await api.saveBoard(projectId, b, baseVersion ?? saved.version, boardId);
         setSaved({ version: r.version, json: body });
         setConflict(undefined);
         setStatus("保存しました");
@@ -106,7 +114,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
         else setStatus(`保存できませんでした: ${describeError(e)}`);
       }
     },
-    [projectId, saved.version, canEdit],
+    [projectId, boardId, saved.version, canEdit],
   );
 
   useEffect(() => {
@@ -121,7 +129,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
     const t = setInterval(async () => {
       if (dirty || editingId || document.visibilityState !== "visible") return;
       try {
-        const r = await api.board(projectId);
+        const r = await api.board(projectId, boardId);
         if (r.version > saved.version) {
           setBoard(r.board);
           setSaved({ version: r.version, json: JSON.stringify(r.board) });
@@ -133,7 +141,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
       }
     }, 4000);
     return () => clearInterval(t);
-  }, [projectId, dirty, editingId, saved.version]);
+  }, [projectId, boardId, dirty, editingId, saved.version]);
 
   // -- board mutations ---------------------------------------------------------
 
@@ -162,6 +170,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
       const b = boardRef.current!;
       setEditingId(undefined);
       if (b.items.some((i) => i.id === id)) commit(updateItem(b, id, { text }));
+      else if (b.lanes?.some((l) => l.id === id)) commit(updateLane(b, id, { title: text }));
       else commit({ ...b, frames: b.frames.map((f) => (f.id === id ? { ...f, title: text } : f)) });
     },
     [commit],
@@ -215,6 +224,25 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
     setNodes((prev) => {
       const sel = new Set(prev.filter((n) => n.selected).map((n) => n.id));
       const hl = new Set(highlight);
+      const boxes = [...board.items, ...board.frames];
+      const minX = (boxes.length ? Math.min(...boxes.map((b) => b.x)) : 0) - 240;
+      const maxX = (boxes.length ? Math.max(...boxes.map((b) => b.x + b.w)) : 1200) + 400;
+      const lanes: Node[] = (board.lanes ?? []).map((l) => ({
+        id: l.id,
+        type: "lane",
+        position: { x: minX, y: l.y },
+        width: maxX - minX,
+        height: l.h,
+        zIndex: -2,
+        selected: sel.has(l.id),
+        draggable: canEdit,
+        data: { lane: l, editing: editingId === l.id, onCommitTitle: commitText, onStopEditing: stopEditing } satisfies LaneData,
+      }));
+      const top = (boxes.length ? Math.min(...boxes.map((b) => b.y)) : 0) - 60;
+      const bottom = (boxes.length ? Math.max(...boxes.map((b) => b.y + b.h)) : 600) + 60;
+      const pivots: Node[] = board.items
+        .filter((i) => i.pivotal)
+        .map((i) => ({ id: `pivot-${i.id}`, type: "pivot", position: { x: i.x + i.w + 16, y: top }, width: 4, height: bottom - top, zIndex: -1, draggable: false, selectable: false, connectable: false, data: { label: i.text } }));
       const frames: Node[] = board.frames.map((f) => ({
         id: f.id,
         type: "frame",
@@ -247,7 +275,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
         connectable: false,
         data: { ghost: g, first: i === 0, onAccept: acceptGhostById, onDismiss: dismissGhost } satisfies GhostData,
       }));
-      return [...frames, ...items, ...ghostNodes];
+      return [...lanes, ...pivots, ...frames, ...items, ...ghostNodes];
     });
     setEdges((prev) => {
       const sel = new Set(prev.filter((e) => e.selected).map((e) => e.id));
@@ -287,7 +315,8 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
           if (c.type !== "dimensions" || !c.dimensions) continue;
           const pos = rf.getNode(c.id)?.position;
           const patch = { w: Math.round(c.dimensions.width), h: Math.round(c.dimensions.height), ...(pos ? { x: Math.round(pos.x), y: Math.round(pos.y) } : {}) };
-          b = b.items.some((i) => i.id === c.id) ? updateItem(b, c.id, patch) : { ...b, frames: b.frames.map((f) => (f.id === c.id ? { ...f, ...patch } : f)) };
+          if (b.lanes?.some((l) => l.id === c.id)) b = updateLane(b, c.id, { h: patch.h, ...(pos ? { y: patch.y } : {}) });
+          else b = b.items.some((i) => i.id === c.id) ? updateItem(b, c.id, patch) : { ...b, frames: b.frames.map((f) => (f.id === c.id ? { ...f, ...patch } : f)) };
         }
         commit(b);
       }
@@ -328,6 +357,14 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
         const p = positions.get(f.id);
         return p && (Math.round(p.x) !== f.x || Math.round(p.y) !== f.y) ? { ...f, x: Math.round(p.x), y: Math.round(p.y) } : f;
       }),
+      ...(b.lanes
+        ? {
+            lanes: b.lanes.map((l) => {
+              const p = positions.get(l.id);
+              return p && Math.round(p.y) !== l.y ? { ...l, y: Math.round(p.y) } : l;
+            }),
+          }
+        : {}),
     };
     if (JSON.stringify(moved) !== JSON.stringify(b)) commit(moved);
     dragStart.current = undefined;
@@ -416,6 +453,37 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
     [rf],
   );
 
+  const phaseKinds = new Set<StickyKind>(board?.workshop ? phaseOf(board).kinds : []);
+
+  const exportImage = (format: "svg" | "png") => {
+    const b = boardRef.current;
+    if (!b) return;
+    const title = `${boardName ?? "ボード"}（${new Date().toLocaleDateString()}）`;
+    const svg = boardToSvg(b, title);
+    const name = `${(boardName ?? "board").replace(/[\\/:*?"<>|]/g, "_")}-${new Date().toISOString().slice(0, 10)}`;
+    const download = (blob: Blob, ext: string) => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${name}.${ext}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+    const svgBlob = new Blob([svg], { type: "image/svg+xml" });
+    if (format === "svg") return download(svgBlob, "svg");
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(2, 8000 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d")!;
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      canvas.toBlob((png) => png && download(png, "png"), "image/png");
+    };
+    img.src = URL.createObjectURL(svgBlob);
+  };
+
   if (!board) return <div className="view muted">{status ?? "ボードを読み込んでいます…"}</div>;
 
   const selectedEdge = edges.find((e) => e.selected);
@@ -429,7 +497,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
               <button
                 key={k}
                 data-tour={`palette-${k}`}
-                className={`palette-item sticky-swatch sticky-${k}`}
+                className={`palette-item sticky-swatch sticky-${k}${phaseKinds.size ? (phaseKinds.has(k) ? " is-phase" : " is-dim") : ""}`}
                 aria-pressed={tool === k}
                 title={`${STICKY_KINDS[k].label}: ${STICKY_KINDS[k].help}（クリックで追加・キャンバスをダブルクリックでその場所に追加）`}
                 onClick={() => {
@@ -453,6 +521,18 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
             >
               ▭ コンテキスト
             </button>
+            <button
+              className="palette-item palette-frame"
+              data-tour="palette-lane"
+              title="人やプロセスごとの横の帯（スイムレーン）を足します"
+              onClick={() => {
+                const r = addLane(boardRef.current!);
+                commit(r.board);
+                setEditingId(r.id);
+              }}
+            >
+              ☰ レーン
+            </button>
             <span className="toolbar-sep" />
             <button className="quiet" onClick={undo} disabled={!history.current.canUndo} title="元に戻す（⌘/Ctrl+Z）">
               ↶
@@ -463,6 +543,18 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
           </>
         )}
         <div className="spacer" />
+        {voting && <span className="vote-banner">投票中: 付箋をクリックで1票（Shift+クリックで取り消し）</span>}
+        <details className="export-menu">
+          <summary className="quiet">画像で保存</summary>
+          <div className="export-menu-body">
+            <button className="quiet" onClick={() => exportImage("svg")}>
+              SVG（拡大しても鮮明）
+            </button>
+            <button className="quiet" onClick={() => exportImage("png")}>
+              PNG（チャットや資料に貼る）
+            </button>
+          </div>
+        </details>
         {canEdit && (
           <label className="small row" style={{ gap: 4 }} title="付箋の並びから、次に置きそうな付箋を半透明で表示します（Tab で追加・Esc で消す）">
             <input type="checkbox" checked={showGhosts} onChange={(e) => setShowGhosts(e.target.checked)} />
@@ -504,7 +596,14 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
             onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onConnect={(c) => canEdit && c.source && c.target && commit(addConnector(boardRef.current!, c.source, c.target))}
-            onNodeDoubleClick={(_, n) => canEdit && setEditingId(n.id)}
+            onNodeDoubleClick={(_, n) => canEdit && !voting && setEditingId(n.id)}
+            onNodeClick={(e, n) => {
+              if (!voting || !canEdit || n.type !== "sticky") return;
+              const b = boardRef.current!;
+              const next = toggleVote(b, n.id, user, e.shiftKey);
+              if (next === b) setStatus(e.shiftKey ? "この付箋にはあなたの票がありません" : "票を使い切りました。Shift+クリックで取り消せます");
+              else commit(next);
+            }}
             onSelectionChange={({ nodes: ns }) => {
               // Only store real changes: React Flow reports selection on every node update, and
               // setting a fresh array each time would re-derive the nodes and loop forever.
@@ -521,7 +620,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
             multiSelectionKeyCode={["Meta", "Control", "Shift"]}
             connectionMode={ConnectionMode.Loose}
             nodesConnectable={canEdit}
-            nodesDraggable={canEdit}
+            nodesDraggable={canEdit && !voting}
             elementsSelectable
             minZoom={0.1}
             maxZoom={2.5}
@@ -546,6 +645,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
         <aside className="board-side" aria-label="付箋の詳細と整理の補助">
           <ItemPanel
             board={board}
+            user={user}
             selectedIds={selected}
             selectedEdgeId={selectedEdge?.id}
             canEdit={canEdit}
@@ -554,6 +654,10 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Pro
           />
           <AssistPanel
             board={board}
+            model={model}
+            user={user}
+            voting={voting}
+            onVoting={setVoting}
             findings={findings}
             candidates={candidates}
             links={links}
