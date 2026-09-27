@@ -10,3 +10,4 @@ dist/
 packages/server/data/
 *.vsix
 packages/vscode/dist/
+.claude/worktrees/

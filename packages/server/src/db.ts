@@ -69,6 +69,8 @@ const MIGRATIONS: string[] = [
    );`,
   // AI assistance is off until a workspace owner turns it on (FR-035: tenants can disable AI entirely).
   `ALTER TABLE workspaces ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0;`,
+  // Which assistant the workspace uses (api / claude-code / codex); NULL = the first the server offers.
+  `ALTER TABLE workspaces ADD COLUMN ai_provider TEXT;`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

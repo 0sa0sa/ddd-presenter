@@ -86,7 +86,29 @@ code --install-extension packages/vscode/ddd-presenter-0.1.0.vsix
 GitHub Copilot のように、次に書きそうな内容を半透明で先に表示し、Tab で確定できる。予測には2種類ある。
 
 - **ローカルの予測**（常に使える・送信なし）: モデルの構造から決まる続き。`packages/core/src/assist.ts`。
-- **AI の予測**（ワークスペースで有効にしたときだけ）: Claude（Anthropic）がモデル全体を読んで続きを書く。サーバーに `ANTHROPIC_API_KEY` を設定し、ワークスペースのオーナーが「設定」タブで有効にする。オンのあいだ、予測・提案のたびにモデル（YAML）やボードの内容が Anthropic の API に送られる。切り替えは監査ログに残る。
+- **AI の予測**（ワークスペースで有効にしたときだけ）: AI がモデル全体を読んで続きを書く。ワークスペースのオーナーが「設定」タブで、使う AI を選んで有効にする。オンのあいだ、予測・提案のたびにモデル（YAML）やボードの内容が選んだ AI に送られる。切り替えは監査ログに残る。
+
+### 使える AI
+
+サーバーは起動時に、使える AI を見つけて「設定」タブの選択肢に出す。
+
+| AI | 条件 | 送信先 |
+|---|---|---|
+| Claude API | サーバーに `ANTHROPIC_API_KEY`（または `ANTHROPIC_AUTH_TOKEN`）を設定 | Anthropic |
+| Claude Code（ローカルCLI） | サーバーのマシンで `claude` が使え、ログイン済み | Claude Code 経由で Anthropic |
+| Codex CLI（ローカル） | サーバーのマシンで `codex` が使え、ログイン済み | Codex 経由で OpenAI |
+
+- ローカルの CLI は、API キーなしで、手元の Claude / ChatGPT のサブスクリプションで使える。サーバーを動かしているマシンのログインを使うので、チームで共有するサーバーでは、そのアカウントの利用枠を全員で使うことになる。
+- CLI はコーディングエージェントとしてではなく、文章の生成だけに使う。Claude Code は `--tools=`（ツールなし）・MCP なし・ユーザー設定とフックなし・独自のシステムプロンプトで、Codex は read-only のサンドボックスでシェル・ブラウザ・プラグインを無効にして動かす。どちらも空の一時ディレクトリで起動する。
+- 1回の予測は数秒〜数十秒かかる（CLI の起動を含む）。入力を続けると、途中の呼び出しは止める。同時に動かす CLI は最大2つ。
+- Claude Code の予測は既定で速いモデル（`haiku`）、提案は CLI の既定モデルを使う。
+
+| 環境変数 | 意味 |
+|---|---|
+| `DDD_AI` | `off` で AI を使わない。`claude-code,codex` のように書くと、その AI だけを選択肢に出す |
+| `DDD_AI_MODEL` / `DDD_AI_INLINE_MODEL` | Claude API・Claude Code のモデル（提案用 / 予測用） |
+| `DDD_AI_CODEX_MODEL` / `DDD_AI_CODEX_INLINE_MODEL` | Codex のモデル |
+| `DDD_CLAUDE_BIN` / `DDD_CODEX_BIN` | CLI の場所（PATH にない場合） |
 
 ### YAML エディタ
 

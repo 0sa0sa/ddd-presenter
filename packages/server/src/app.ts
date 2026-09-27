@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { boardGhosts, emptyBoard, normalizeBoard, proposeLocally, ruleUsage, STICKY_KINDS, validateModelText, type BoardGhost, type ProposalKind, type StickyKind } from "@ddd/core";
-import type { ModelAssistant } from "./ai.ts";
+import { PROVIDER_LABEL, type ModelAssistant, type ProviderId } from "./ai.ts";
+import { fitToCursor } from "./fit.ts";
 import { computePlan, generatePython, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
 import { strToU8, zipSync } from "fflate";
 import { Hono, type Context } from "hono";
@@ -21,10 +22,17 @@ export interface AppOptions {
   secureCookies?: boolean;
   /** LLM used for assistance when a workspace enables AI; undefined = local suggestions only. */
   assistant?: ModelAssistant;
+  /** Assistants the workspace owner can choose from (Claude API, local Claude Code / Codex CLIs). */
+  assistants?: Partial<Record<ProviderId, ModelAssistant>>;
 }
 
 export function createApp(db: Database, options: AppOptions = {}) {
   const app = new Hono<Env>();
+  const assistants: Partial<Record<ProviderId, ModelAssistant>> = options.assistants ?? (options.assistant ? { api: options.assistant } : {});
+  const providerIds = Object.keys(assistants) as ProviderId[];
+  const providers = providerIds.map((id) => ({ id, label: PROVIDER_LABEL[id], model: assistants[id]!.model }));
+  /** The provider a workspace uses: its choice if the server still offers it, else the first one. */
+  const providerOf = (choice: string | null): ProviderId | undefined => (choice && choice in assistants ? (choice as ProviderId) : providerIds[0]);
 
   // ---------------------------------------------------------------------------
   // helpers
@@ -213,19 +221,36 @@ export function createApp(db: Database, options: AppOptions = {}) {
   app.get("/api/workspaces/:wsId", (c) => {
     const wsId = c.req.param("wsId");
     const role = roleIn(wsId, c.get("user").id);
-    const ws = db.query("SELECT id, name, created_at, ai_enabled FROM workspaces WHERE id = ?").get(wsId) as { ai_enabled: number } & Record<string, unknown>;
-    return c.json({ workspace: { ...ws, ai_enabled: !!ws.ai_enabled }, role, ai_available: !!options.assistant, ai_model: options.assistant?.model ?? null });
+    const { ai_provider, ...ws } = db.query("SELECT id, name, created_at, ai_enabled, ai_provider FROM workspaces WHERE id = ?").get(wsId) as { ai_enabled: number; ai_provider: string | null } & Record<string, unknown>;
+    const provider = providerOf(ai_provider);
+    return c.json({
+      workspace: { ...ws, ai_enabled: !!ws.ai_enabled, ai_provider: provider ?? null },
+      role,
+      ai_available: providerIds.length > 0,
+      ai_model: provider ? assistants[provider]!.model : null,
+      ai_providers: providers,
+    });
   });
 
   app.patch("/api/workspaces/:wsId/settings", async (c) => {
     const wsId = c.req.param("wsId");
     const actor = c.get("user");
     requireRole(roleIn(wsId, actor.id), "owner");
-    const { ai_enabled } = await body<{ ai_enabled?: boolean }>(c);
-    if (typeof ai_enabled !== "boolean") fail(400, "ai_enabled must be true or false");
-    db.query("UPDATE workspaces SET ai_enabled = ? WHERE id = ?").run(ai_enabled ? 1 : 0, wsId);
-    audit(wsId, actor.id, ai_enabled ? "ai.enable" : "ai.disable", wsId);
-    return c.json({ ok: true, ai_enabled });
+    const { ai_enabled, ai_provider } = await body<{ ai_enabled?: boolean; ai_provider?: string }>(c);
+    if (ai_enabled === undefined && ai_provider === undefined) fail(400, "ai_enabled or ai_provider is required");
+    if (ai_enabled !== undefined && typeof ai_enabled !== "boolean") fail(400, "ai_enabled must be true or false");
+    if (ai_provider !== undefined && !(ai_provider in assistants)) fail(400, `ai_provider must be one of: ${providerIds.join(", ") || "(none configured)"}`);
+    if (ai_provider !== undefined) {
+      db.query("UPDATE workspaces SET ai_provider = ? WHERE id = ?").run(ai_provider, wsId);
+      audit(wsId, actor.id, "ai.provider", wsId, { provider: ai_provider });
+    }
+    if (ai_enabled !== undefined) {
+      db.query("UPDATE workspaces SET ai_enabled = ? WHERE id = ?").run(ai_enabled ? 1 : 0, wsId);
+      audit(wsId, actor.id, ai_enabled ? "ai.enable" : "ai.disable", wsId);
+    }
+    const row = db.query("SELECT ai_enabled, ai_provider FROM workspaces WHERE id = ?").get(wsId) as { ai_enabled: number; ai_provider: string | null };
+    const provider = providerOf(row.ai_provider);
+    return c.json({ ok: true, ai_enabled: !!row.ai_enabled, ai_provider: provider ?? null, ai_model: provider ? assistants[provider]!.model : null });
   });
 
   app.get("/api/workspaces/:wsId/members", (c) => {
@@ -531,16 +556,18 @@ export function createApp(db: Database, options: AppOptions = {}) {
   // -- AI assistance ---------------------------------------------------------------
 
   const aiFor = (workspaceId: string): ModelAssistant | undefined => {
-    const row = db.query("SELECT ai_enabled FROM workspaces WHERE id = ?").get(workspaceId) as { ai_enabled: number } | null;
-    return row?.ai_enabled ? options.assistant : undefined;
+    const row = db.query("SELECT ai_enabled, ai_provider FROM workspaces WHERE id = ?").get(workspaceId) as { ai_enabled: number; ai_provider: string | null } | null;
+    const provider = row?.ai_enabled ? providerOf(row.ai_provider) : undefined;
+    return provider ? assistants[provider] : undefined;
   };
 
   const errorCount = (yaml: string) => validateModelText(yaml).diagnostics.filter((d) => d.severity === "error").length;
 
   app.get("/api/projects/:projectId/assist", (c) => {
     const { project } = loadProject(c);
-    const row = db.query("SELECT ai_enabled FROM workspaces WHERE id = ?").get(project.workspace_id) as { ai_enabled: number };
-    return c.json({ available: !!options.assistant, enabled: !!row.ai_enabled, active: !!aiFor(project.workspace_id), model: options.assistant?.model ?? null });
+    const row = db.query("SELECT ai_enabled, ai_provider FROM workspaces WHERE id = ?").get(project.workspace_id) as { ai_enabled: number; ai_provider: string | null };
+    const provider = providerOf(row.ai_provider);
+    return c.json({ available: providerIds.length > 0, enabled: !!row.ai_enabled, active: !!aiFor(project.workspace_id), model: provider ? assistants[provider]!.model : null, provider: provider ?? null });
   });
 
   /** Ghost text from the LLM. Suggestions that break the YAML or add validation errors are dropped. */
@@ -553,12 +580,14 @@ export function createApp(db: Database, options: AppOptions = {}) {
     checkModelSize(yaml!);
     let text: string | undefined;
     try {
-      text = await ai!.inline({ yaml: yaml!, offset: offset! });
+      // The browser aborts when the user keeps typing; that also stops a local CLI process.
+      text = await ai!.inline({ yaml: yaml!, offset: offset!, signal: c.req.raw.signal });
     } catch (e) {
       console.error("assist.inline failed:", (e as Error).message);
       return c.json({ suggestion: null, error: "AI の応答を取得できませんでした" });
     }
     if (!text || !text.trim()) return c.json({ suggestion: null });
+    text = fitToCursor(yaml!, offset!, text);
     const next = yaml!.slice(0, offset) + text + yaml!.slice(offset);
     if (errorCount(next) > errorCount(yaml!)) return c.json({ suggestion: null, dropped: true });
     return c.json({ suggestion: { text, label: "AI の提案", source: "llm" } });
@@ -577,7 +606,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
       if (!p) return c.json({ proposal: null, message: "モデルの構造から提案できることはありません" });
       return c.json({ proposal: p, diagnostics: validateModelText(p.yaml).diagnostics });
     }
-    const req = { yaml: b.yaml!, context: b.context!, aggregate: b.aggregate, kind: b.kind!, instruction: typeof b.instruction === "string" ? b.instruction.slice(0, 2000) : undefined };
+    const req = { yaml: b.yaml!, context: b.context!, aggregate: b.aggregate, kind: b.kind!, instruction: typeof b.instruction === "string" ? b.instruction.slice(0, 2000) : undefined, signal: c.req.raw.signal };
     try {
       let p = await ai.propose(req);
       if (!p) return c.json({ proposal: null, message: "AI が提案を返しませんでした" });
@@ -608,7 +637,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
     const ai = aiFor(project.workspace_id);
     if (ai && raw.llm) {
       try {
-        const suggestions = await ai.board({ board: board!, instruction: typeof raw.instruction === "string" ? raw.instruction.slice(0, 500) : undefined });
+        const suggestions = await ai.board({ board: board!, instruction: typeof raw.instruction === "string" ? raw.instruction.slice(0, 500) : undefined, signal: c.req.raw.signal });
         suggestions.forEach((s, i) => {
           const near = board!.items.find((it) => it.id === s.near_item_id);
           if (!near || !(s.kind in STICKY_KINDS) || !s.text.trim()) return;

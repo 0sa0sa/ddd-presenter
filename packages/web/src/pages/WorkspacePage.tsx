@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { api, ApiError, describeError, type AuditEntry, type Me, type Member, type ProjectSummary, type Role } from "../api.ts";
+import { api, ApiError, describeError, type AiProvider, type AiProviderId, type AuditEntry, type Me, type Member, type ProjectSummary, type Role } from "../api.ts";
 import { href, navigate } from "../App.tsx";
 import { TopBar } from "../components/TopBar.tsx";
 
@@ -20,11 +20,12 @@ const ACTION_LABEL: Record<string, string> = {
   "project.delete": "プロジェクトを削除",
   "ai.enable": "AI の提案を有効化",
   "ai.disable": "AI の提案を無効化",
+  "ai.provider": "使う AI を変更",
 };
 
 export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: string; onLogout: () => void; onChanged: () => void }) {
   const [tab, setTab] = useState<"projects" | "members" | "audit" | "settings">("projects");
-  const [ai, setAi] = useState<{ enabled: boolean; available: boolean; model: string | null }>();
+  const [ai, setAi] = useState<AiSettings>();
   const [name, setName] = useState<string>();
   const [role, setRole] = useState<Role>();
   const [error, setError] = useState<string>();
@@ -34,7 +35,7 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
       (r) => {
         setName(r.workspace.name);
         setRole(r.role);
-        setAi({ enabled: r.workspace.ai_enabled, available: r.ai_available, model: r.ai_model });
+        setAi({ enabled: r.workspace.ai_enabled, available: r.ai_available, model: r.ai_model, provider: r.workspace.ai_provider, providers: r.ai_providers });
       },
       (e) => setError(e instanceof ApiError && e.status === 404 ? "このワークスペースは存在しないか、参加していません。" : describeError(e)),
     );
@@ -92,23 +93,30 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
   );
 }
 
-function Settings({
-  ws,
-  ai,
-  onAi,
-}: {
-  ws: string;
-  ai: { enabled: boolean; available: boolean; model: string | null };
-  onAi: (ai: { enabled: boolean; available: boolean; model: string | null }) => void;
-}) {
+interface AiSettings {
+  enabled: boolean;
+  available: boolean;
+  model: string | null;
+  provider: AiProviderId | null;
+  providers: AiProvider[];
+}
+
+/** Where the model text goes, per provider (shown before the owner turns AI on). */
+const DESTINATION: Record<AiProviderId, string> = {
+  api: "Anthropic の Claude API（サーバーに設定した API キー）",
+  "claude-code": "このサーバーで動く Claude Code（ログイン中の Claude アカウント）経由で Anthropic",
+  codex: "このサーバーで動く Codex CLI（ログイン中のアカウント）経由で OpenAI",
+};
+
+function Settings({ ws, ai, onAi }: { ws: string; ai: AiSettings; onAi: (ai: AiSettings) => void }) {
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const toggle = async (enabled: boolean) => {
+  const save = async (settings: { ai_enabled?: boolean; ai_provider?: AiProviderId }) => {
     setBusy(true);
     setError(undefined);
     try {
-      const r = await api.setAi(ws, enabled);
-      onAi({ ...ai, enabled: r.ai_enabled });
+      const r = await api.setAi(ws, settings);
+      onAi({ ...ai, enabled: r.ai_enabled, provider: r.ai_provider, model: r.ai_model });
     } catch (e) {
       setError(describeError(e));
     } finally {
@@ -123,18 +131,37 @@ function Settings({
       <div className="panel-body stack">
         {error && <p className="error-banner">{error}</p>}
         <p className="small">
-          オンにすると、モデルの編集中に Claude（Anthropic）が続きを予測したり（Tab で確定）、操作・ルール・シナリオ・イベントの内容、ボードの付箋を提案したりします。
-          提案のたびに、このワークスペースのモデル（YAML）やボードの内容が Anthropic の API に送られます。提案は差分として表示され、確定するまでモデルは変わりません。
+          オンにすると、モデルの編集中に AI が続きを予測したり（Tab で確定）、操作・ルール・シナリオ・イベントの内容、ボードの付箋を提案したりします。
+          予測や提案のたびに、このワークスペースのモデル（YAML）やボードの内容が {ai.provider ? DESTINATION[ai.provider] : "AI"} に送られます。提案は差分として表示され、確定するまでモデルは変わりません。
         </p>
         <p className="small muted">オフのときも、送信なしで動くローカルの予測と提案は使えます。切り替えは監査ログに残ります。</p>
         {ai.available ? (
-          <label className="row">
-            <input type="checkbox" checked={ai.enabled} disabled={busy} onChange={(e) => void toggle(e.target.checked)} />
-            <span>このワークスペースで AI の提案を使う（モデル: {ai.model}）</span>
-          </label>
+          <>
+            <fieldset className="stack ai-providers" disabled={busy}>
+              <legend className="small">使う AI</legend>
+              {ai.providers.map((p) => (
+                <label key={p.id} className="row">
+                  <input type="radio" name="ai-provider" checked={ai.provider === p.id} onChange={() => void save({ ai_provider: p.id })} />
+                  <span>
+                    {p.label}
+                    {p.model !== p.label && <span className="small muted">（{p.model}）</span>}
+                  </span>
+                </label>
+              ))}
+              {ai.provider !== "api" && (
+                <p className="small muted">
+                  ローカルの CLI は、サーバーを動かしているマシンでログイン済みのアカウントを使います。ツール（コマンド実行・ファイル操作）は無効にして、文章の生成だけに使います。1回の予測に数秒かかります。
+                </p>
+              )}
+            </fieldset>
+            <label className="row">
+              <input type="checkbox" checked={ai.enabled} disabled={busy} onChange={(e) => void save({ ai_enabled: e.target.checked })} />
+              <span>このワークスペースで AI の提案を使う</span>
+            </label>
+          </>
         ) : (
           <p className="small warn-note">
-            サーバーに Claude の API キーが設定されていないため使えません。サーバーを <code>ANTHROPIC_API_KEY</code> を設定して起動してください（<code>DDD_AI_MODEL</code> でモデルを変更できます）。
+            サーバーで使える AI がありません。サーバーを <code>ANTHROPIC_API_KEY</code> を設定して起動するか、サーバーのマシンに Claude Code（<code>claude</code>）か Codex CLI（<code>codex</code>）を入れてログインし、サーバーを再起動してください。
           </p>
         )}
       </div>

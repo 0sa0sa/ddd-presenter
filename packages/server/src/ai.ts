@@ -1,15 +1,22 @@
 /**
- * LLM assistance for domain modelling, via the Claude API (official SDK).
- * The server is the only place that talks to the model: the browser never sees the API key,
+ * LLM assistance for domain modelling. The prompts live here; how they reach a model is a `Completer`:
+ * the Claude API (official SDK), or a local agent CLI (Claude Code / Codex) running on the server's machine.
+ * The server is the only place that talks to a model: the browser never sees credentials,
  * and nothing is sent unless the workspace owner enabled AI.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { Board, Proposal } from "@ddd/core";
+import { mkdtempSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import dslReference from "../../../docs/10-dsl-reference.md" with { type: "text" };
 
 export interface InlineRequest {
   yaml: string;
   offset: number;
+  /** Aborted when the browser gives up on the prediction (the user kept typing). */
+  signal?: AbortSignal;
 }
 
 export interface ProposeRequest {
@@ -20,11 +27,13 @@ export interface ProposeRequest {
   instruction?: string;
   /** Diagnostics from a previous attempt, for one repair round. */
   repair?: { yaml: string; errors: string[] };
+  signal?: AbortSignal;
 }
 
 export interface BoardRequest {
   board: Board;
   instruction?: string;
+  signal?: AbortSignal;
 }
 
 export interface BoardSuggestion {
@@ -38,13 +47,48 @@ export interface BoardSuggestion {
 
 /** What the rest of the server needs from an LLM. Tests inject a fake implementation. */
 export interface ModelAssistant {
+  /** Shown to the workspace owner, e.g. "claude-opus-5" or "Claude Code（このサーバーのCLI）". */
   readonly model: string;
   inline(req: InlineRequest): Promise<string | undefined>;
   propose(req: ProposeRequest): Promise<Omit<Proposal, "source"> | undefined>;
   board(req: BoardRequest): Promise<BoardSuggestion[]>;
 }
 
-const SYSTEM = `You help software teams build domain models with DDD (Domain-Driven Design) in "DDD Presenter".
+/** Where assistance can come from. */
+export type ProviderId = "api" | "claude-code" | "codex";
+
+export const PROVIDER_LABEL: Record<ProviderId, string> = {
+  api: "Claude API",
+  "claude-code": "Claude Code（ローカルCLI）",
+  codex: "Codex CLI（ローカル）",
+};
+
+// -- transport -----------------------------------------------------------------
+
+export interface Message {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface CompleteRequest {
+  purpose: "inline" | "propose" | "board";
+  messages: Message[];
+  /** JSON Schema for a structured answer; the result is then JSON text. */
+  schema?: Record<string, unknown>;
+  effort: "low" | "medium";
+  maxTokens: number;
+  signal?: AbortSignal;
+}
+
+/** Sends one request to a model; resolves the answer text, or undefined when the model declined. */
+export interface Completer {
+  readonly model: string;
+  complete(req: CompleteRequest): Promise<string | undefined>;
+}
+
+// -- prompts -------------------------------------------------------------------
+
+export const SYSTEM = `You help software teams build domain models with DDD (Domain-Driven Design) in "DDD Presenter".
 Models are YAML files in the DSL documented below. Code (Python) and tests are generated from them.
 
 Principles:
@@ -104,31 +148,25 @@ const KIND_HINT: Record<string, string> = {
   custom: "Do what the instruction asks.",
 };
 
-export function claudeAssistant(options: { client?: Anthropic; model?: string; inlineModel?: string } = {}): ModelAssistant {
-  const client = options.client ?? new Anthropic();
-  const model = options.model ?? process.env.DDD_AI_MODEL ?? "claude-opus-5";
-  const inlineModel = options.inlineModel ?? process.env.DDD_AI_INLINE_MODEL ?? model;
-  const system: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
+const parseJson = <T>(text: string | undefined): T | undefined => {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined;
+  }
+};
 
-  /** Text of a response, or undefined when the model (and its fallback) declined. */
-  const textOf = (r: Anthropic.Beta.BetaMessage): string | undefined => {
-    if (r.stop_reason === "refusal") return undefined;
-    return r.content
-      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-  };
-
+/** The modelling assistant on top of any transport. */
+export function assistantWith(completer: Completer): ModelAssistant {
   return {
-    model,
-    async inline({ yaml, offset }) {
-      const r = await client.beta.messages.create({
-        model: inlineModel,
-        max_tokens: 1024,
-        betas: ["server-side-fallback-2026-07-01"],
-        fallbacks: "default",
-        output_config: { effort: "low" },
-        system,
+    model: completer.model,
+    async inline({ yaml, offset, signal }) {
+      const text = await completer.complete({
+        purpose: "inline",
+        effort: "low",
+        maxTokens: 1024,
+        signal,
         messages: [
           {
             role: "user",
@@ -140,56 +178,40 @@ ${yaml.slice(0, offset)}<cursor/>${yaml.slice(offset)}
           },
         ],
       });
-      const text = textOf(r);
       if (!text) return undefined;
       return text.replace(/^```[a-z]*\n?/i, "").replace(/\n?```\s*$/, "").replace(/\s+$/, "");
     },
 
-    async propose({ yaml, context, aggregate, kind, instruction, repair }) {
+    async propose({ yaml, context, aggregate, kind, instruction, repair, signal }) {
       const task = [
         KIND_HINT[kind] ?? KIND_HINT.custom,
         `Target: context "${context}"${aggregate ? `, aggregate "${aggregate}"` : ""}.`,
         instruction ? `Instruction from the team: ${instruction}` : "",
         "Keep every existing element unless the instruction asks to change it. Return the complete updated model in `yaml`.",
+        "Write summary, facts, assumptions and questions in the natural language the model's descriptions use.",
       ]
         .filter(Boolean)
         .join("\n");
-      const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: `${task}\n\n<model>\n${yaml}\n</model>` }];
+      const messages: Message[] = [{ role: "user", content: `${task}\n\n<model>\n${yaml}\n</model>` }];
       if (repair) {
         messages.push({ role: "assistant", content: JSON.stringify({ yaml: repair.yaml }) });
         messages.push({ role: "user", content: `The model you returned has validation errors. Fix them and return the complete model again:\n${repair.errors.join("\n")}` });
       }
-      const r = await client.beta.messages.create({
-        model,
-        max_tokens: 16000,
-        betas: ["server-side-fallback-2026-07-01"],
-        fallbacks: "default",
-        output_config: { effort: "medium", format: { type: "json_schema", schema: PROPOSAL_SCHEMA } },
-        system,
-        messages,
-      });
-      const text = textOf(r);
-      if (!text) return undefined;
-      try {
-        return JSON.parse(text) as Omit<Proposal, "source">;
-      } catch {
-        return undefined;
-      }
+      return parseJson<Omit<Proposal, "source">>(await completer.complete({ purpose: "propose", effort: "medium", maxTokens: 16000, schema: PROPOSAL_SCHEMA, messages, signal }));
     },
 
-    async board({ board, instruction }) {
+    async board({ board, instruction, signal }) {
       const compact = {
         frames: board.frames.map((f) => ({ id: f.id, title: f.title })),
         items: board.items.map((i) => ({ id: i.id, kind: i.kind, text: i.text })),
         connectors: board.connectors.map((c) => ({ from: c.from, to: c.to })),
       };
-      const r = await client.beta.messages.create({
-        model,
-        max_tokens: 8000,
-        betas: ["server-side-fallback-2026-07-01"],
-        fallbacks: "default",
-        output_config: { effort: "low", format: { type: "json_schema", schema: BOARD_SCHEMA } },
-        system,
+      const text = await completer.complete({
+        purpose: "board",
+        signal,
+        effort: "low",
+        maxTokens: 8000,
+        schema: BOARD_SCHEMA,
         messages: [
           {
             role: "user",
@@ -201,20 +223,251 @@ ${JSON.stringify(compact)}
           },
         ],
       });
-      const text = textOf(r);
-      if (!text) return [];
-      try {
-        return (JSON.parse(text) as { suggestions: BoardSuggestion[] }).suggestions ?? [];
-      } catch {
-        return [];
-      }
+      return parseJson<{ suggestions: BoardSuggestion[] }>(text)?.suggestions ?? [];
     },
   };
 }
 
-/** The assistant configured from the environment, or undefined when no Claude credentials are present. */
+// -- Claude API ------------------------------------------------------------------
+
+export function apiCompleter(options: { client?: Anthropic; model?: string; inlineModel?: string } = {}): Completer {
+  const client = options.client ?? new Anthropic();
+  const model = options.model ?? process.env.DDD_AI_MODEL ?? "claude-opus-5";
+  const inlineModel = options.inlineModel ?? process.env.DDD_AI_INLINE_MODEL ?? model;
+  const system: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
+  return {
+    model,
+    async complete({ purpose, messages, schema, effort, maxTokens, signal }) {
+      const r = await client.beta.messages.create(
+        {
+          model: purpose === "inline" ? inlineModel : model,
+          max_tokens: maxTokens,
+          betas: ["server-side-fallback-2026-07-01"],
+          fallbacks: "default",
+          output_config: schema ? { effort, format: { type: "json_schema", schema } } : { effort },
+          system,
+          messages,
+        },
+        { signal },
+      );
+      if (r.stop_reason === "refusal") return undefined;
+      return r.content
+        .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+    },
+  };
+}
+
+/** The Claude API assistant (kept as the name tests and callers use). */
+export function claudeAssistant(options: { client?: Anthropic; model?: string; inlineModel?: string } = {}): ModelAssistant {
+  return assistantWith(apiCompleter(options));
+}
+
+// -- local agent CLIs ------------------------------------------------------------
+
+export interface RunResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Runs a command with stdin; injectable for tests. */
+export type Runner = (cmd: string[], opts: { stdin: string; cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<RunResult>;
+
+export const spawnRunner: Runner = async (cmd, { stdin, cwd, timeoutMs, signal }) => {
+  const proc = Bun.spawn(cmd, { cwd, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
+  const kill = () => proc.kill();
+  const timer = setTimeout(kill, timeoutMs);
+  signal?.addEventListener("abort", kill, { once: true });
+  try {
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", kill);
+  }
+};
+
+/** At most `max` model processes at a time; waiting requests give up when aborted. */
+export function limiter(max: number) {
+  let running = 0;
+  const queue: (() => void)[] = [];
+  return async function run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (running >= max) {
+      await new Promise<void>((resolve, reject) => {
+        const go = () => {
+          signal?.removeEventListener("abort", cancel);
+          resolve();
+        };
+        const cancel = () => {
+          const i = queue.indexOf(go);
+          if (i >= 0) queue.splice(i, 1);
+          reject(new Error("aborted"));
+        };
+        queue.push(go);
+        signal?.addEventListener("abort", cancel, { once: true });
+      });
+    }
+    running++;
+    try {
+      return await task();
+    } finally {
+      running--;
+      queue.shift()?.();
+    }
+  };
+}
+
+/** A conversation with an earlier answer, flattened for a single-prompt CLI. */
+function flatten(messages: Message[]): string {
+  if (messages.length === 1) return messages[0]!.content;
+  return messages.map((m) => (m.role === "user" ? m.content : `<your_previous_answer>\n${m.content}\n</your_previous_answer>`)).join("\n\n");
+}
+
+const TIMEOUT: Record<CompleteRequest["purpose"], number> = { inline: 120_000, propose: 600_000, board: 300_000 };
+
+export interface CliOptions {
+  /** Executable (default: `claude` / `codex` on PATH). */
+  bin?: string;
+  /** Model passed to the CLI; default: the CLI's own default. */
+  model?: string;
+  /** Model for inline predictions (faster is better). */
+  inlineModel?: string;
+  run?: Runner;
+  /** Working directory for the CLI: an empty directory so no project files or instructions are picked up. */
+  cwd?: string;
+  concurrency?: number;
+}
+
+const emptyDir = () => mkdtempSync(join(tmpdir(), "ddd-ai-"));
+
+function cliError(name: string, r: RunResult): Error {
+  const detail = (r.stderr || r.stdout).trim().split("\n").slice(-3).join(" ").slice(0, 300);
+  return new Error(`${name} exited with ${r.code}: ${detail}`);
+}
+
+/**
+ * Claude Code in print mode, with every tool disabled, no MCP servers, no settings/hooks,
+ * and our system prompt instead of the coding-agent one.
+ */
+export function claudeCodeCompleter(options: CliOptions = {}): Completer {
+  const bin = options.bin ?? "claude";
+  const run = options.run ?? spawnRunner;
+  const cwd = options.cwd ?? emptyDir();
+  const limit = limiter(options.concurrency ?? 2);
+  const model = options.model ?? process.env.DDD_AI_MODEL;
+  // Ghost text must arrive within seconds; the CLI's default (large) model takes far longer.
+  const inlineModel = options.inlineModel ?? process.env.DDD_AI_INLINE_MODEL ?? "haiku";
+  return {
+    model: `${PROVIDER_LABEL["claude-code"]}${model ? ` ${model}` : ""}`,
+    complete: (req) =>
+      limit(async () => {
+        const m = req.purpose === "inline" ? inlineModel : model;
+        const cmd = [
+          bin,
+          "-p",
+          "--output-format",
+          "json",
+          // `--opt=` form: an empty separate argument would be dropped by the process spawner,
+          // and the option would swallow the next flag instead of disabling everything.
+          "--tools=",
+          "--strict-mcp-config",
+          "--setting-sources=",
+          "--no-session-persistence",
+          "--effort",
+          req.effort,
+          "--system-prompt",
+          SYSTEM,
+          ...(m ? ["--model", m] : []),
+          ...(req.schema ? ["--json-schema", JSON.stringify(req.schema)] : []),
+        ];
+        const r = await run(cmd, { stdin: flatten(req.messages), cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal });
+        const out = parseJson<{ is_error?: boolean; result?: string; structured_output?: unknown; stop_reason?: string }>(r.stdout.trim().split("\n").pop());
+        if (!out) throw cliError("claude", r);
+        if (out.is_error) throw new Error(`claude: ${String(out.result ?? "error").slice(0, 300)}`);
+        if (out.stop_reason === "refusal") return undefined;
+        if (req.schema) return out.structured_output !== undefined ? JSON.stringify(out.structured_output) : out.result;
+        return out.result;
+      }, req.signal),
+  };
+}
+
+/** Features that let Codex act on the machine; assistance only needs text, so they are all off. */
+const CODEX_DISABLED = ["shell_tool", "unified_exec", "shell_snapshot", "browser_use", "in_app_browser", "computer_use", "apps", "plugins", "hooks"];
+
+/** Codex in exec mode, read-only sandbox, with its shell / browser / plugin tools disabled. */
+export function codexCompleter(options: CliOptions = {}): Completer {
+  const bin = options.bin ?? "codex";
+  const run = options.run ?? spawnRunner;
+  const cwd = options.cwd ?? emptyDir();
+  const limit = limiter(options.concurrency ?? 2);
+  const model = options.model ?? process.env.DDD_AI_CODEX_MODEL;
+  const inlineModel = options.inlineModel ?? process.env.DDD_AI_CODEX_INLINE_MODEL ?? model;
+  return {
+    model: `${PROVIDER_LABEL.codex}${model ? ` ${model}` : ""}`,
+    complete: (req) =>
+      limit(async () => {
+        const dir = await mkdtemp(join(tmpdir(), "ddd-codex-"));
+        try {
+          const outFile = join(dir, "answer.txt");
+          const schemaFile = join(dir, "schema.json");
+          if (req.schema) await writeFile(schemaFile, JSON.stringify(req.schema));
+          const m = req.purpose === "inline" ? inlineModel : model;
+          const cmd = [
+            bin,
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            ...CODEX_DISABLED.flatMap((f) => ["--disable", f]),
+            "-c",
+            'web_search="disabled"',
+            "-c",
+            `model_reasoning_effort="${req.effort}"`,
+            ...(m ? ["--model", m] : []),
+            ...(req.schema ? ["--output-schema", schemaFile] : []),
+            "--output-last-message",
+            outFile,
+            "-",
+          ];
+          const stdin = `<instructions>\n${SYSTEM}\n</instructions>\n\n${flatten(req.messages)}`;
+          const r = await run(cmd, { stdin, cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal });
+          if (r.code !== 0) throw cliError("codex", r);
+          const text = await readFile(outFile, "utf8").catch(() => "");
+          return text.trim() ? text : undefined;
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }, req.signal),
+  };
+}
+
+// -- configuration -----------------------------------------------------------------
+
+/**
+ * Every assistant this server can offer, from the environment:
+ * `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` → Claude API; `claude` / `codex` on PATH → local CLIs.
+ * `DDD_AI=off` disables AI; `DDD_AI=claude-code,codex` limits the choice.
+ */
+export function assistantsFromEnv(which: (bin: string) => string | null = (b) => Bun.which(b)): Partial<Record<ProviderId, ModelAssistant>> {
+  const setting = (process.env.DDD_AI ?? "").trim();
+  if (setting === "off") return {};
+  const allowed = setting ? new Set(setting.split(",").map((s) => s.trim())) : undefined;
+  const ok = (id: ProviderId) => !allowed || allowed.has(id);
+  const out: Partial<Record<ProviderId, ModelAssistant>> = {};
+  if (ok("api") && (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)) out.api = claudeAssistant();
+  const claudeBin = process.env.DDD_CLAUDE_BIN ?? which("claude");
+  if (ok("claude-code") && claudeBin) out["claude-code"] = assistantWith(claudeCodeCompleter({ bin: claudeBin }));
+  const codexBin = process.env.DDD_CODEX_BIN ?? which("codex");
+  if (ok("codex") && codexBin) out.codex = assistantWith(codexCompleter({ bin: codexBin }));
+  return out;
+}
+
+/** The first configured assistant (kept for callers that need only one). */
 export function assistantFromEnv(): ModelAssistant | undefined {
-  if (process.env.DDD_AI === "off") return undefined;
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) return undefined;
-  return claudeAssistant();
+  return Object.values(assistantsFromEnv())[0];
 }

@@ -105,6 +105,13 @@ export interface Preview {
   breaking: { path: string; symbol: string; reason: string }[];
 }
 
+export type AiProviderId = "api" | "claude-code" | "codex";
+export interface AiProvider {
+  id: AiProviderId;
+  label: string;
+  model: string;
+}
+
 export const api = {
   health: async () => {
     const r = await request<{ service?: string }>("GET", "/api/health");
@@ -117,8 +124,15 @@ export const api = {
   me: () => request<Me>("GET", "/api/me"),
   createWorkspace: (name: string) => request<{ id: string }>("POST", "/api/workspaces", { name }),
   workspace: (ws: string) =>
-    request<{ workspace: { id: string; name: string; ai_enabled: boolean }; role: Role; ai_available: boolean; ai_model: string | null }>("GET", `/api/workspaces/${ws}`),
-  setAi: (ws: string, enabled: boolean) => request<{ ai_enabled: boolean }>("PATCH", `/api/workspaces/${ws}/settings`, { ai_enabled: enabled }),
+    request<{
+      workspace: { id: string; name: string; ai_enabled: boolean; ai_provider: AiProviderId | null };
+      role: Role;
+      ai_available: boolean;
+      ai_model: string | null;
+      ai_providers: AiProvider[];
+    }>("GET", `/api/workspaces/${ws}`),
+  setAi: (ws: string, settings: { ai_enabled?: boolean; ai_provider?: AiProviderId }) =>
+    request<{ ai_enabled: boolean; ai_provider: AiProviderId | null; ai_model: string | null }>("PATCH", `/api/workspaces/${ws}/settings`, settings),
   assistStatus: (id: string) => request<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>("GET", `/api/projects/${id}/assist`),
   assistInline: (id: string, yaml: string, offset: number, signal?: AbortSignal) =>
     request<{ suggestion: { text: string; label: string; source: "llm" } | null }>("POST", `/api/projects/${id}/assist/inline`, { yaml, offset }, fetch, signal),

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
-import { assistantFromEnv } from "./ai.ts";
+import { assistantsFromEnv, PROVIDER_LABEL, type ProviderId } from "./ai.ts";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db.ts";
 
@@ -9,8 +9,8 @@ const port = Number(process.env.PORT ?? process.env.DDD_PORT ?? 4870);
 const dbPath = process.env.DDD_DB ?? join(import.meta.dir, "../data/ddd.sqlite");
 if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 const db = openDatabase(dbPath);
-const assistant = assistantFromEnv();
-const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1", assistant });
+const assistants = assistantsFromEnv();
+const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1", assistants });
 
 // Serve the built web app (packages/web/dist) when present; the Vite dev server proxies /api otherwise.
 const dist = join(import.meta.dir, "../../web/dist");
@@ -32,4 +32,4 @@ try {
   }
   throw e;
 }
-console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath}; AI: ${assistant ? assistant.model : "off - set ANTHROPIC_API_KEY to enable"})`);
+console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath}; AI: ${Object.keys(assistants).length ? (Object.keys(assistants) as ProviderId[]).map((id) => PROVIDER_LABEL[id]).join(", ") : "off - set ANTHROPIC_API_KEY or install the claude / codex CLI"})`);

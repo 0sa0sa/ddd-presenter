@@ -1962,3 +1962,9 @@ input[aria-invalid="true"] {
   background: var(--surface);
   border-top: 1px solid var(--line);
 }
+.ai-providers {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  gap: 6px;
+}

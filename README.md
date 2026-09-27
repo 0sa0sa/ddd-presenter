@@ -76,7 +76,7 @@ bun run dev:web          # http://localhost:5173
 bun run build:web && bun run start   # http://localhost:4870
 ```
 
-AI の予測・提案（Claude）を使うには、サーバーを `ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
+AI の予測・提案を使うには、サーバーのマシンで Claude Code（`claude`）か Codex CLI（`codex`）にログインしておくか、`ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで使う AI を選んで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
 
 ログインは開発用の簡易方式（ユーザー名のみ。docs/09 の決定）。初回ログインでアカウントと個人ワークスペースを作る。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
 

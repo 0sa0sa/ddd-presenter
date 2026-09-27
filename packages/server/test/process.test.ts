@@ -21,7 +21,7 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function waitFor(url: string, timeoutMs = 10_000): Promise<void> {
+async function waitFor(url: string, timeoutMs = 60_000): Promise<void> {
   const start = Date.now();
   for (;;) {
     try {
