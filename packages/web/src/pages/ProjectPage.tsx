@@ -14,6 +14,8 @@ import { TopBar } from "../components/TopBar.tsx";
 import { YamlEditor, type GotoRequest } from "../components/YamlEditor.tsx";
 import { buildOutline, flatten } from "../lib/outline.ts";
 import { BoardView } from "../components/board/BoardView.tsx";
+import { TutorialCoach } from "../components/TutorialCoach.tsx";
+import { tutorialStore } from "../lib/tutorial.ts";
 
 const TABS = [
   { id: "discovery", label: "ディスカバリー" },
@@ -46,6 +48,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [loadError, setLoadError] = useState<string>();
   const [conflict, setConflict] = useState<Conflict>();
   const lastGoodModel = useRef<ModelIR>(undefined);
+  const [coach, setCoach] = useState(() => tutorialStore.get().projectId === id);
 
   const canEdit = role !== "viewer";
   const dirty = saved !== undefined && text !== saved.yaml;
@@ -77,6 +80,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const flat = useMemo(() => flatten(outline), [outline]);
   const rules = useMemo(() => (result.analysis ? ruleUsage(result.analysis) : []), [result.analysis]);
   const selected = flat.find((n) => n.id === selectedId);
+  const savedCheck = useMemo(() => (saved ? validateModelText(saved.yaml) : undefined), [saved]);
   const errors = diagnostics.filter((d) => d.severity === "error").length;
   const warnings = diagnostics.filter((d) => d.severity === "warning").length;
 
@@ -187,6 +191,18 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           </>
         }
       >
+        {!coach && (
+          <button
+            className="quiet small-button"
+            onClick={() => {
+              tutorialStore.show(id);
+              setCoach(true);
+            }}
+            title="手順ガイドを表示します"
+          >
+            ガイド
+          </button>
+        )}
         <a className="small" href={`/api/projects/${id}/export`} download>
           YAMLをエクスポート
         </a>
@@ -291,6 +307,21 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} />
         )}
       </div>
+      {coach && (
+        <TutorialCoach
+          projectId={id}
+          currentTab={tab}
+          draft={result.model}
+          saved={savedCheck?.model}
+          savedOk={!!savedCheck?.ok}
+          savedVersion={saved.version}
+          onOpenTab={(t) => navigate({ page: "project", id, tab: t })}
+          onClose={() => {
+            tutorialStore.hide();
+            setCoach(false);
+          }}
+        />
+      )}
       {conflict && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
           <div className="modal">

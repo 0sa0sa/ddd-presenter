@@ -4,17 +4,20 @@ import { LoginPage } from "./pages/LoginPage.tsx";
 import { HomePage } from "./pages/HomePage.tsx";
 import { WorkspacePage } from "./pages/WorkspacePage.tsx";
 import { ProjectPage } from "./pages/ProjectPage.tsx";
+import { TutorialPage } from "./pages/TutorialPage.tsx";
 
-export type Route = { page: "home" } | { page: "workspace"; ws: string } | { page: "project"; id: string; tab?: string };
+export type Route = { page: "home" } | { page: "tutorial" } | { page: "workspace"; ws: string } | { page: "project"; id: string; tab?: string };
 
 export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  if (parts[0] === "tutorial") return { page: "tutorial" };
   if (parts[0] === "w" && parts[1]) return { page: "workspace", ws: parts[1] };
   if (parts[0] === "p" && parts[1]) return { page: "project", id: parts[1], tab: parts[2] };
   return { page: "home" };
 }
 
 export function href(route: Route): string {
+  if (route.page === "tutorial") return "#/tutorial";
   if (route.page === "workspace") return `#/w/${route.ws}`;
   if (route.page === "project") return `#/p/${route.id}${route.tab ? `/${route.tab}` : ""}`;
   return "#/";
@@ -80,6 +83,8 @@ export function App() {
   };
 
   switch (route.page) {
+    case "tutorial":
+      return <TutorialPage me={me} onLogout={logout} />;
     case "workspace":
       return <WorkspacePage me={me} ws={route.ws} onLogout={logout} onChanged={refreshMe} />;
     case "project":

@@ -13,6 +13,9 @@ export function TopBar({ me, crumbs, children, onLogout }: { me: Me; crumbs?: Re
       {crumbs && <nav className="crumbs" aria-label="現在地">{crumbs}</nav>}
       <div className="spacer" />
       {children}
+      <a className="small" href="#/tutorial">
+        使い方
+      </a>
       <span className="muted small">{me.user.username}</span>
       <button className="quiet" onClick={onLogout}>
         ログアウト

@@ -11,6 +11,8 @@ Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）�
 - **書きやすさ**: YAML でも、キー・型・エラー・イベント・操作・変数・Rule 式のフィールドや Enum 値を補完し、説明の表示・定義へ移動・名前の一括変更ができる（Web のエディタと VS Code 拡張で同じ言語サービス）。
 - **Web**: モデルを編集・レビューする（YAML、フォーム、図、ルール追跡、シナリオ、生成プレビュー、履歴、メンバーと権限）。
 
+> **はじめての方へ:** DDD の考え方とこのツールの使い方は [チュートリアル（docs/12）](docs/12-tutorial.md) にまとめています。アプリでは右上の「使い方」から、確認クイズつきの説明と、手順ガイドつきのハンズオンを始められます。
+
 > 実装状況: 要件の Phase 1（ローカル CLI の MVP）と Phase 2（Web 編集・チームレビュー）に加え、ディスカバリーボードと言語サービス（Web・VS Code）。決定事項は [docs/09](docs/09-implementation-decisions.md)、DSL は [docs/10](docs/10-dsl-reference.md) を参照。
 
 ## クイックスタート
@@ -133,6 +135,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
 | [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボードとエディタ補完の使い方 |
+| [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語
 

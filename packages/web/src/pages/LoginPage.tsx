@@ -44,7 +44,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       </section>
       <section className="login-form">
         <h2>ログイン</h2>
-        <p className="muted small">開発用の簡易ログインです。ユーザー名だけで入れます。初めての名前ならアカウントと個人ワークスペースを作ります。</p>
+        <p className="muted small">開発用の簡易ログインです。ユーザー名だけで入れます。初めての名前ならアカウントと個人ワークスペースを作ります。ログイン後、右上の「使い方」から DDD の説明とチュートリアルを開けます。</p>
         <form className="stack" onSubmit={submit}>
           <label className="field">
             ユーザー名

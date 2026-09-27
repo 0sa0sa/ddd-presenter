@@ -131,6 +131,15 @@ function Projects({ ws, role }: { ws: string; role: Role }) {
         {projects && projects.length === 0 && (
           <div className="panel-body muted">まだプロジェクトがありません。サンプルモデルから始めると、生成されるコードとテストをすぐに確認できます。</div>
         )}
+        {projects && projects.length < 3 && (
+          <div className="panel-body tut-banner">
+            <strong>はじめての方へ</strong>
+            <span className="small">DDD の考え方と、このツールでモデルを作ってコードを生成するまでを、チュートリアルで順に体験できます。</span>
+            <a className="small" href={href({ page: "tutorial" })}>
+              チュートリアルを開く
+            </a>
+          </div>
+        )}
         <ul className="list">
           {projects?.map((p) => (
             <li key={p.id}>
