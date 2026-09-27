@@ -202,7 +202,8 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" ? " fill" : ""}`} role="tabpanel">
             {tab === "model" && (
               <div className="editor-wrap">
-                <YamlEditor value={text} onChange={setText} diagnostics={diagnostics} readOnly={!canEdit} goto={goto} onCursorLine={onCursorLine} />
+                <YamlEditor value={text} onChange={setText} diagnostics={diagnostics} readOnly={!canEdit} goto={goto} onCursorLine={onCursorLine} onMessage={setStatus} />
+                <p className="editor-help small muted">Ctrl+Space 補完・ホバーで説明・⌘/Ctrl+クリック または F12 で定義へ・F2 で名前を一括変更</p>
                 {diagnostics.length > 0 && (
                   <div className="diagnostics" aria-label="診断">
                     {diagnostics.map((d, i) => (

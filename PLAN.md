@@ -15,7 +15,7 @@
 ## Phase 2.5 — 書きやすさとディスカバリー（2026-09-27 追加）
 
 - [x] L1 core: 言語サービス（補完・ホバー・定義ジャンプ・名前変更）。YAMLのキー／参照／Rule式の文脈を判定
-- [ ] L2 web: CodeMirrorに補完・ホバー・Ctrl/Cmd+クリックで定義へ・F2で名前変更
+- [x] L2 web: CodeMirrorに補完・ホバー・Ctrl/Cmd+クリックで定義へ・F2で名前変更
 - [ ] L3 lsp + vscode: Language Server（stdio）と VS Code 拡張（*.ddd.yaml）。JSON-RPCの結合テスト
 - [ ] D1 core: ディスカバリーボードの型、整理の補助（ヒューリスティック診断・集約候補・コンテキスト連携）、モデル骨格の生成
 - [ ] D2 server: ボードの保存API（楽観排他・プロジェクト単位・モデルとは別保存）

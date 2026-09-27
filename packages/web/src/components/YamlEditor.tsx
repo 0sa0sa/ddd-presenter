@@ -7,6 +7,7 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import type { Diagnostic } from "@ddd/core";
 import { useEffect, useRef } from "react";
+import { dddLanguage } from "../lib/languageExtension.ts";
 
 export interface GotoRequest {
   line: number;
@@ -39,6 +40,7 @@ export function YamlEditor({
   readOnly,
   goto,
   onCursorLine,
+  onMessage,
 }: {
   value: string;
   onChange: (text: string) => void;
@@ -46,12 +48,13 @@ export function YamlEditor({
   readOnly: boolean;
   goto?: GotoRequest;
   onCursorLine?: (line: number) => void;
+  onMessage?: (message: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
   const readOnlyCompartment = useRef(new Compartment());
-  const callbacks = useRef({ onChange, onCursorLine });
-  callbacks.current = { onChange, onCursorLine };
+  const callbacks = useRef({ onChange, onCursorLine, onMessage });
+  callbacks.current = { onChange, onCursorLine, onMessage };
 
   useEffect(() => {
     const v = new EditorView({
@@ -70,6 +73,14 @@ export function YamlEditor({
           syntaxHighlighting(highlight),
           yaml(),
           lintGutter(),
+          dddLanguage({
+            onRename: (next) => {
+              const cur = view.current;
+              if (cur) cur.dispatch({ changes: { from: 0, to: cur.state.doc.length, insert: next } });
+            },
+            askName: (current) => window.prompt(`「${current}」の新しい名前（参照している箇所もまとめて変更します）`, current) ?? undefined,
+            onMessage: (m) => callbacks.current.onMessage?.(m),
+          }),
           keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
           theme,
           EditorState.tabSize.of(2),

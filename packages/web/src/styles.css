@@ -600,7 +600,54 @@ label.field {
 .editor-wrap {
   height: 100%;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+.editor-help {
+  margin: 0;
+  padding: 3px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.cm-tooltip {
+  background: var(--surface) !important;
+  color: var(--ink);
+  border: 1px solid var(--line-strong) !important;
+  border-radius: var(--radius-s);
+  font-family: var(--font-ui);
+}
+.cm-ddd-doc {
+  max-width: 420px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cm-ddd-doc p {
+  margin: 0 0 6px;
+}
+.cm-ddd-doc p:last-child {
+  margin-bottom: 0;
+}
+.cm-ddd-doc ul {
+  margin: 0 0 6px;
+  padding-left: 1.1em;
+}
+.cm-ddd-doc code {
+  background: var(--sunken);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.cm-tooltip-autocomplete ul li[aria-selected] {
+  background: color-mix(in srgb, var(--k-aggregate) 20%, transparent) !important;
+  color: var(--ink) !important;
+}
+.cm-completionDetail {
+  color: var(--ink-faint);
+  margin-left: 8px;
+  font-style: normal !important;
+}
+.cm-completionSection {
+  color: var(--ink-faint);
+  font-size: 11px;
 }
 .editor-wrap .cm-editor {
   height: 100%;
