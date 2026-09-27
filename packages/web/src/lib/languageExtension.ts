@@ -22,6 +22,8 @@ const CM_TYPE: Record<CompletionKind, string> = {
   factory: "method",
   keyword: "keyword",
   value: "constant",
+  context: "namespace",
+  useCase: "function",
 };
 
 const KIND_LABEL: Record<CompletionKind, string> = {
@@ -42,6 +44,8 @@ const KIND_LABEL: Record<CompletionKind, string> = {
   factory: "Factory",
   keyword: "キーワード",
   value: "値",
+  context: "Bounded context",
+  useCase: "Use case",
 };
 
 /** Minimal Markdown (bold, code, bullet lists, paragraphs) rendered safely as DOM. */

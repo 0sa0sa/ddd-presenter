@@ -113,9 +113,27 @@ function Details(props: Props & { node: OutlineNode }) {
             <dd>{ctx.valueObjects.length}</dd>
             <dt>Use case</dt>
             <dd>{ctx.useCases.length}</dd>
+            <dt>Policy</dt>
+            <dd>{ctx.policies.length}</dd>
             <dt>名前付きルール</dt>
             <dd>{rules.filter((r) => r.context === ctx.name).length}</dd>
           </dl>
+          {model!.relationships.some((r) => r.upstream === ctx.name || r.downstream === ctx.name) && (
+            <section>
+              <h3>コンテキストマップ</h3>
+              <dl className="facts small">
+                {model!.relationships
+                  .filter((r) => r.upstream === ctx.name || r.downstream === ctx.name)
+                  .map((r) => (
+                    <FactRow key={`${r.upstream}-${r.downstream}`} term={`${r.upstream} → ${r.downstream}`}>
+                      <span className="mono">{r.pattern}</span>
+                      {r.events.length > 0 && <> · {r.events.join(", ")}</>}
+                    </FactRow>
+                  ))}
+              </dl>
+              <p className="small muted">上流 → 下流。下流は上流のイベント契約（events）に挙げたイベントだけをポリシーで受け取れます。</p>
+            </section>
+          )}
           {ctx.glossary.length > 0 && (
             <section>
               <h3>用語</h3>
@@ -388,14 +406,50 @@ function Details(props: Props & { node: OutlineNode }) {
     }
     case "event": {
       const info = props.analysis?.contexts.get(ctx.name)?.events.get(node.name);
+      const consumers = [...(props.analysis?.contexts.values() ?? [])].flatMap((ca) =>
+        [...ca.policies.entries()].filter(([, p]) => p.event.context === ctx.name && p.event.name === node.name).map(([name]) => `${ca.ir.name}.${name}`),
+      );
       return info ? (
         <dl className="facts small">
           <dt>発生元</dt>
           <dd>{info.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}</dd>
           <dt>内容</dt>
           <dd className="mono">{info.fields.map((f) => f.name).join(", ") || "—"}</dd>
+          <dt>反応するポリシー</dt>
+          <dd className="mono">{consumers.join(", ") || "—"}</dd>
         </dl>
       ) : null;
+    }
+    case "policy": {
+      const p = ctx.policies.find((x) => x.name === node.name);
+      if (!p) return null;
+      const info = props.analysis?.contexts.get(ctx.name)?.policies.get(p.name);
+      return (
+        <>
+          <Description path={node.path} value={p.description} {...props} />
+          <dl className="facts small">
+            <dt>きっかけ</dt>
+            <dd className="mono">{p.when}</dd>
+            <dt>実行する Use case</dt>
+            <dd>
+              <button className="linklike small" onClick={() => props.onSelectId(`${ctx.name}/useCase/${p.run}`)}>
+                {p.run}
+              </button>
+            </dd>
+            <dt>入力</dt>
+            <dd className="mono">{Object.entries(p.args).map(([k, v]) => `${k} = ${v}`).join(", ") || "—"}</dd>
+            {info?.crossContext && (
+              <>
+                <dt>コンテキスト間</dt>
+                <dd>
+                  {info.event.context} → {ctx.name}（<span className="mono">{info.relationship?.pattern ?? "関係なし"}</span>）
+                </dd>
+              </>
+            )}
+          </dl>
+          <p className="small muted">生成コードではイベントを受けて Use case を実行するハンドラになり、subscriptions() でイベントバスに登録できます。</p>
+        </>
+      );
     }
     case "extension": {
       const x = ctx.extensionPoints.find((e) => e.name === node.name);
@@ -485,7 +539,7 @@ function Rename(props: Props & { node: OutlineNode }) {
   let op: EditOp | undefined;
   if (TYPE_KINDS.has(node.kind)) op = { op: "renameType", context: node.context, from: node.name, to: name };
   else if (node.kind === "guard") op = { op: "renameGuard", context: node.context, aggregate: node.owner!, from: node.name, to: name };
-  else if (node.kind === "invariant" || node.kind === "scenario") op = { op: "set", path: [...node.path, "name"], value: name };
+  else if (node.kind === "invariant" || node.kind === "scenario" || node.kind === "policy") op = { op: "set", path: [...node.path, "name"], value: name };
   if (!op) return null;
   const submit = (e: FormEvent) => {
     e.preventDefault();

@@ -18,6 +18,9 @@ import type {
   NormalizeStep,
   OperationIR,
   ParameterIR,
+  PolicyIR,
+  RelationshipIR,
+  RelationshipPattern,
   ScenarioThenIR,
   StateGuardIR,
   StepIR,
@@ -25,7 +28,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
-import { SCHEMA_VERSION } from "./ir.ts";
+import { RELATIONSHIP_PATTERNS, SCHEMA_VERSION } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -565,7 +568,7 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
   if (!o) return undefined;
   r.keys(
     o,
-    ["name", "description", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases"],
+    ["name", "description", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases", "policies"],
     path,
     "context",
   );
@@ -657,6 +660,39 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
     aggregates: r.list(o, "aggregates", path).flatMap(({ value: av, path: ap }) => readAggregate(r, av, ap) ?? []),
     extensionPoints,
     useCases: r.list(o, "use_cases", path).flatMap(({ value: uv, path: up }) => readUseCase(r, uv, up) ?? []),
+    policies: r.list(o, "policies", path).flatMap(({ value: pv, path: pp }) => readPolicy(r, pv, pp) ?? []),
+    path,
+  };
+}
+
+function readPolicy(r: Reader, value: unknown, path: Path): PolicyIR | undefined {
+  const o = r.obj(value, path, "policy");
+  if (!o) return undefined;
+  r.keys(o, ["name", "description", "when", "run", "args"], path, "policy");
+  const name = r.str(o, "name", path, true);
+  const when = r.str(o, "when", path, true);
+  const run = r.str(o, "run", path, true);
+  if (!name || !when || !run) return undefined;
+  return { name, description: r.str(o, "description", path, false), when, run, args: r.exprMap(o, "args", path), path };
+}
+
+function readRelationship(r: Reader, value: unknown, path: Path): RelationshipIR | undefined {
+  const o = r.obj(value, path, "relationship");
+  if (!o) return undefined;
+  r.keys(o, ["upstream", "downstream", "pattern", "events", "description"], path, "relationship");
+  const upstream = r.str(o, "upstream", path, true);
+  const downstream = r.str(o, "downstream", path, true);
+  const pattern = r.str(o, "pattern", path, false) ?? "customer_supplier";
+  if (!(RELATIONSHIP_PATTERNS as readonly string[]).includes(pattern)) {
+    r.bag.error("invalid-value", `Unknown relationship pattern "${pattern}"`, [...path, "pattern"], { hint: `Use one of ${RELATIONSHIP_PATTERNS.join(", ")}` });
+  }
+  if (!upstream || !downstream) return undefined;
+  return {
+    upstream,
+    downstream,
+    pattern: (RELATIONSHIP_PATTERNS as readonly string[]).includes(pattern) ? (pattern as RelationshipPattern) : "customer_supplier",
+    events: r.strList(o, "events", path),
+    description: r.str(o, "description", path, false),
     path,
   };
 }
@@ -719,7 +755,7 @@ export function parseModel(text: string): ParseResult {
   const root = r.obj(data, [], "model");
   let model: ModelIR | undefined;
   if (root) {
-    r.keys(root, ["schema_version", "project", "description", "generation", "contexts"], [], "model");
+    r.keys(root, ["schema_version", "project", "description", "generation", "contexts", "relationships"], [], "model");
     const version = root.schema_version;
     if (version === undefined) {
       bag.error("missing-key", 'Missing required key "schema_version"', []);
@@ -742,6 +778,7 @@ export function parseModel(text: string): ParseResult {
         testsDir: r.str(gen, "tests_dir", ["generation"], false) ?? "tests",
       },
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
+      relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),
     };
   }
 

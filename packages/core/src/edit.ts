@@ -11,7 +11,7 @@ export type EditOp =
   /** Appends to the sequence at `path`, creating it when missing. */
   | { op: "add"; path: Path; value: unknown }
   | { op: "remove"; path: Path }
-  /** Renames an enum, value object, entity, aggregate, error or event and updates every reference in the context. */
+  /** Renames an enum, value object, entity, aggregate, error or event and updates every reference in the context (and, for events, the policies and contracts of other contexts). */
   | { op: "renameType"; context: string; from: string; to: string }
   /** Renames a state guard of an aggregate and updates `require` lists and use case conditions. */
   | { op: "renameGuard"; context: string; aggregate: string; from: string; to: string };
@@ -117,8 +117,8 @@ function styled(doc: Document, value: unknown): Node {
   const node = doc.createNode(value) as Node;
   const walk = (n: unknown) => {
     if (isMap(n)) {
-      // Single-entry maps (`- save: x`) stay in block style; small records go inline.
-      n.flow = n.items.length > 1 && isFlowish(n.toJSON());
+      // Single-entry maps (`- save: x`) stay in block style; small records go inline; empty maps read `{}`.
+      n.flow = n.items.length === 0 || (n.items.length > 1 && isFlowish(n.toJSON()));
       if (!n.flow) for (const p of n.items) walk(p.value);
     } else if (isSeq(n)) {
       n.flow = n.items.length === 0 || (n.items.length <= 6 && n.items.every((i) => isScalar(i)));
@@ -205,10 +205,38 @@ function renameType(doc: Document, context: string, from: string, to: string, re
         if (key === "command") definitions++;
         return;
       }
+      if (key === "when" && keys.includes("policies")) {
+        // A policy's event: `Event` or `Context.Event`; another context's event of the same name is left alone.
+        const ref = /^\s*(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*)\s*$/.exec(v);
+        if (ref && (!ref[1] || ref[1] === context) && ref[2] === from) replace(node, v.replace(new RegExp(`${from}(\\s*)$`), `${to}$1`));
+        return;
+      }
       if (isExpressionPosition(keys) && replaceToken(v, from, to) !== v) replace(node, replaceToken(v, from, to));
     },
   });
   if (definitions === 0) throw new Error(`No type named ${from} in context ${context}`);
+  // Other contexts consume this context's events through `when: Context.Event` and the relationships' event contracts.
+  const qualified = new RegExp(`^(\\s*${context}\\s*\\.\\s*)${from}(\\s*)$`);
+  const contexts = doc.get("contexts", true);
+  if (isSeq(contexts)) {
+    for (const other of contexts.items) {
+      if (other === ctx || !isMap(other)) continue;
+      const policies = other.get("policies", true);
+      if (!isSeq(policies)) continue;
+      for (const p of policies.items) {
+        const w = isMap(p) ? p.get("when", true) : undefined;
+        if (isScalar(w) && typeof w.value === "string" && qualified.test(w.value)) replace(w, w.value.replace(qualified, `$1${to}$2`));
+      }
+    }
+  }
+  const relationships = doc.get("relationships", true);
+  if (isSeq(relationships)) {
+    for (const r of relationships.items) {
+      if (!isMap(r) || r.get("upstream") !== context) continue;
+      const events = r.get("events", true);
+      if (isSeq(events)) for (const e of events.items) if (isScalar(e) && e.value === from) replace(e, to);
+    }
+  }
 }
 
 function renameGuard(doc: Document, context: string, aggregate: string, from: string, to: string, replace: Replace): void {

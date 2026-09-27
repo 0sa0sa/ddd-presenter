@@ -2,9 +2,9 @@
 
 DDDの知識を実装の散在した条件分岐にせず、ドメインモデルを中心に設計・検証し、実行可能なコードへ変換するサービス。
 
-Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）と状態ガード（StateGuard）、ユースケースの手順、Given-When-Thenシナリオをひとつの YAML モデルに書くと、次のことができる。
+Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）と状態ガード（StateGuard）、ユースケースの手順、イベントに反応するポリシーとコンテキストマップ、Given-When-Thenシナリオをひとつの YAML モデルに書くと、次のことができる。
 
-- **検証**: 参照、型、Rule式、Aggregate境界、循環、シナリオの完全性を、位置と修正案つきで診断する。
+- **検証**: 参照、型、Rule式、Aggregate境界、循環、シナリオの完全性、コンテキストをまたぐ連携のイベント契約（ポリシーとコンテキストマップ）を、位置と修正案つきで診断する。
 - **生成**: Python（Pydantic v2）のドメイン層・アプリケーション層と pytest を決定的に生成する。生成物は `mypy --strict` を通る。
 - **安全な再生成**: 手編集を検知して停止する。削除されたファイルは stale として報告し、顧客所有の拡張コードは上書きしない。
 - **ディスカバリー**: Miro のように自由に付箋を置ける EventStorming のボードで、イベント・コマンド・集約・コンテキストの境界を探る。抜けの指摘、集約とコンテキスト連携の候補を示し、決めた内容を差分を確認してからモデルに反映する（候補は提案のみで、決めるのはチーム）。
@@ -53,7 +53,7 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydanti
 cd ../.. && bun run verify:example   # diff --check → pytest → mypy --strict
 ```
 
-`examples/cleaning-platform` には、生成済みのコードと、顧客が書く拡張（`src/cleaning_platform/extensions/`）と手書きテスト（`tests/custom/`）が入っている。golden test は、このディレクトリの生成物がバイト単位で再現されることを確認する。
+`examples/cleaning-platform` には、生成済みのコード（招待を扱う `CleaningStaff` と、招待の受諾をポリシーで受けてスタッフを登録する下流の `Staffing`）と、顧客が書く拡張（`src/cleaning_platform/extensions/`）と手書きテスト（`tests/custom/`）が入っている。golden test は、このディレクトリの生成物がバイト単位で再現されることを確認する。
 
 ### VS Code 拡張
 
@@ -85,15 +85,18 @@ AI の予測・提案（Claude）を使うには、サーバーを `ANTHROPIC_AP
 ```text
 src/<package>/
   generated/                       # 生成器が所有。手で編集しない（編集すると次回の generate が止まる）
-    _runtime.py                    # DomainError / ValueObject / Entity / AggregateRoot / Transition / StateGuard
+    _runtime.py                    # DomainError / ValueObject / Entity / AggregateRoot / Transition / StateGuard / dispatch
     adapters.py                    # SystemClock（aware UTC）/ RandomIds
     <context>/domain/{errors,enums,value_objects,entities,aggregates,events,commands,rules}.py
     <context>/application/{ports,use_cases}.py
+    <context>/application/policies.py   # ポリシーのハンドラと subscriptions()（ポリシーがあるコンテキストだけ）
     <context>/testing.py           # In-memory の Repository / Clock / Publisher / UnitOfWork
     <context>/README.md            # ルール・適用箇所・テストの対応表
     model_manifest.json            # モデルhash・生成器版・各ファイルのsha256
   extensions/<context>/extensions.py   # 初回のみ作成。以後はあなたのコード
+  extensions/<context>/translators.py  # anticorruption_layer の翻訳層。初回のみ作成
 tests/generated/test_<context>_<name>.py
+tests/generated/test_<context>_policies.py
 ```
 
 生成コードの例（サンプルの `accept`）:

@@ -134,7 +134,23 @@ describe("board → model", () => {
     expect(ctx[0]!.useCases.map((u) => u.name).sort()).toEqual(["accept_invitation", "issue_invitation", "revoke_invitation"]);
     expect(ctx[0]!.useCases.find((u) => u.name === "accept_invitation")!.actor).toBe("スタッフ候補");
     expect(ctx[0]!.glossary.map((g) => g.term)).toContain("招待が受諾された");
-    expect(r.skipped.map((s) => s.id).sort()).toEqual(["h-resend", "p-welcome", "rm-list", "x-mail"]);
+    expect(r.skipped.map((s) => s.id).sort()).toEqual(["h-resend", "rm-list", "x-mail"]);
+    // Event → policy → command across frames: a policy in the command's context and a relationship (context map).
+    expect(ctx[1]!.policies).toEqual([
+      {
+        name: "send_welcome_mail_on_invitation_accepted",
+        description: "受諾されたら歓迎メールを送る",
+        when: "StaffInvitation.InvitationAccepted",
+        run: "send_welcome_mail",
+        args: {},
+        path: ["contexts", 1, "policies", 0],
+      },
+    ]);
+    expect(v.model!.relationships.map(({ path: _, ...rel }) => rel)).toEqual([
+      { upstream: "StaffInvitation", downstream: "Notification", pattern: "customer_supplier", events: ["InvitationAccepted"], description: undefined },
+    ]);
+    expect(r.names.find((n) => n.id === "p-welcome")).toMatchObject({ kind: "policy", style: "snake", suggested: "send_welcome_mail_on_invitation_accepted" });
+    expect(r.summary).toContain("Notification: ポリシー 1");
     expect(r.yaml).toContain("project: staff");
   });
 
@@ -152,7 +168,7 @@ describe("board → model", () => {
     const ctx = v.model!.contexts.find((c) => c.name === "CleaningStaff")!;
     const ops = ctx.aggregates.find((a) => a.name === "CleaningStaffInvitation")!.operations.map((o) => o.name);
     expect(ops).toEqual(["accept", "revoke", "suspend"]);
-    expect(v.model!.contexts.map((c) => c.name)).toEqual(["CleaningStaff", "Notification"]);
+    expect(v.model!.contexts.map((c) => c.name)).toEqual(["CleaningStaff", "Staffing", "Notification"]);
     expect(r.skipped.find((x) => x.id === "c-issue")?.reason).toContain("必須フィールド");
     // Everything that existed is still there.
     expect(r.yaml).toContain("pending_until_expiry");
@@ -200,5 +216,92 @@ describe("board → model", () => {
     const r = boardToModel({ ...emptyBoard(), items: [{ id: "e", kind: "event", text: "x happened", x: 0, y: 0, w: 1, h: 1 }] }, EMPTY_MODEL);
     expect(r.ok).toBe(false);
     expect(r.error).toContain("集約");
+  });
+});
+
+describe("board → model: policies and the context map", () => {
+  const item = (id: string, kind: Board["items"][number]["kind"], text: string, x: number, extra: Partial<Board["items"][number]> = {}) => ({ id, kind, text, x, y: 100, w: 160, h: 100, ...extra });
+  /** One context: accepting an invitation triggers (policy) archiving the same invitation. */
+  const sameContext = (): Board => ({
+    version: 1,
+    frames: [],
+    items: [
+      item("ag", "aggregate", "Invitation", 0, { y: 300 }),
+      item("c1", "command", "accept invitation", 0, { codeName: "accept_invitation" }),
+      item("e1", "event", "invitation accepted", 200, { codeName: "InvitationAccepted" }),
+      item("p", "policy", "when accepted, archive", 400, { codeName: "archive_when_accepted" }),
+      item("c2", "command", "archive invitation", 600, { codeName: "archive_invitation" }),
+      item("e2", "event", "invitation archived", 800, { codeName: "InvitationArchived" }),
+    ],
+    connectors: [
+      { id: "k1", from: "c1", to: "e1" },
+      { id: "k2", from: "c1", to: "ag" },
+      { id: "k3", from: "e1", to: "p" },
+      { id: "k4", from: "p", to: "c2" },
+      { id: "k5", from: "c2", to: "e2" },
+      { id: "k6", from: "c2", to: "ag" },
+    ],
+  });
+
+  test("a chain inside one context maps the aggregate id from the event", () => {
+    const r = boardToModel(sameContext(), EMPTY_MODEL);
+    expect(r.ok).toBe(true);
+    const ctx = validateModelText(r.yaml!).model!.contexts[0]!;
+    expect(ctx.policies.map(({ path: _, ...p }) => p)).toEqual([
+      { name: "archive_when_accepted", description: "when accepted, archive", when: "InvitationAccepted", run: "archive_invitation", args: { invitation_id: "event.id" } },
+    ]);
+    expect(validateModelText(r.yaml!).model!.relationships).toEqual([]);
+  });
+
+  test("reflecting again adds nothing twice", () => {
+    const first = boardToModel(sampleBoard(), EMPTY_MODEL);
+    const again = boardToModel(sampleBoard(), first.yaml!);
+    expect(again.ok).toBe(true);
+    const v = validateModelText(again.yaml!);
+    expect(v.model!.contexts.flatMap((c) => c.policies.map((p) => p.name))).toEqual(["send_welcome_mail_on_invitation_accepted"]);
+    expect(v.model!.relationships).toHaveLength(1);
+    expect(again.yaml).toBe(first.yaml);
+  });
+
+  test("an existing relationship gains the event; separate_ways is respected", () => {
+    const b = sampleBoard();
+    const base = boardToModel(b, EMPTY_MODEL).yaml!;
+    // Remove the reflected policy and empty the contract, then reflect again.
+    const stripped = base.replace(/    policies:\n[\s\S]*?(?=\n\S)/, "").replace(/events: \[ ?InvitationAccepted ?\]/, "events: []");
+    expect(validateModelText(stripped).model!.relationships[0]!.events).toEqual([]);
+    const again = boardToModel(b, stripped);
+    expect(again.ok).toBe(true);
+    const v = validateModelText(again.yaml!);
+    expect(v.model!.relationships.map((r) => r.events)).toEqual([["InvitationAccepted"]]);
+    const apart = boardToModel(b, stripped.replace("pattern: customer_supplier", "pattern: separate_ways"));
+    expect(apart.skipped.find((s) => s.id === "p-welcome")?.reason).toContain("separate_ways");
+  });
+
+  test("inputs that cannot be read from the event are left for the team, with the reason", () => {
+    const b = sampleBoard();
+    b.items.find((i) => i.id === "c-welcome")!.creates = false; // now the use case needs notification_id
+    const r = boardToModel(b, EMPTY_MODEL);
+    expect(r.ok).toBe(true);
+    expect(r.skipped.find((s) => s.id === "p-welcome")?.reason).toContain("notification_id");
+    expect(validateModelText(r.yaml!).model!.contexts.flatMap((c) => c.policies)).toEqual([]);
+  });
+
+  test("a policy without a command is pointed out and not reflected", () => {
+    const b = sameContext();
+    b.connectors = b.connectors.filter((c) => c.id !== "k4");
+    expect(codes(b)).toContain("policy-without-command");
+    const r = boardToModel(b, EMPTY_MODEL);
+    expect(r.skipped.find((s) => s.id === "p")?.reason).toContain("コマンド");
+  });
+
+  test("a Japanese policy label gets a default name derived from the command and the event", () => {
+    const b = sameContext();
+    b.items.find((i) => i.id === "p")!.text = "受諾されたら保管する";
+    delete b.items.find((i) => i.id === "p")!.codeName;
+    const r = boardToModel(b, EMPTY_MODEL);
+    expect(r.missing).toEqual([]);
+    expect(validateModelText(r.yaml!).model!.contexts[0]!.policies[0]!.name).toBe("archive_invitation_on_invitation_accepted");
+    const named = boardToModel(b, EMPTY_MODEL, { p: "archive_on_acceptance" });
+    expect(validateModelText(named.yaml!).model!.contexts[0]!.policies[0]!.name).toBe("archive_on_acceptance");
   });
 });

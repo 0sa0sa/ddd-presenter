@@ -306,6 +306,7 @@ describe("expressions", () => {
     aggregates: [],
     extensionPoints: [],
     useCases: [],
+    policies: [],
     path: [],
   };
   const env = () =>

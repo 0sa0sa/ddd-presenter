@@ -1,0 +1,149 @@
+schema_version: 1
+project: context-map
+description: Policies within and across contexts (customer/supplier and an anticorruption layer)
+generation:
+  package: context_map
+
+contexts:
+  - name: Hiring
+    errors:
+      - { name: CandidateNotFound, code: candidate_not_found, message: candidate not found }
+      - { name: CandidateNotInvited, code: candidate_not_invited, message: candidate is not invited }
+    enums:
+      - { name: CandidateStatus, values: [invited, accepted] }
+    value_objects:
+      - name: EmailAddress
+        fields:
+          - { name: value, type: String, constraints: { pattern: "^[^@\\s]+@[^@\\s]+$" } }
+        normalize: { value: [strip, lower] }
+    aggregates:
+      - name: Candidate
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: email, type: EmailAddress }
+          - { name: status, type: CandidateStatus }
+        state_guards:
+          - { name: is_invited, expression: status == invited, error: CandidateNotInvited }
+        factories:
+          - name: invite
+            parameters: [{ name: id, type: UUID }, { name: email, type: EmailAddress }]
+            fields: { id: id, email: email, status: invited }
+            emits: [{ name: CandidateInvited, fields: [id, email] }]
+        operations:
+          - name: accept
+            parameters: [{ name: at, type: DateTime }]
+            require: [is_invited]
+            changes: { status: accepted }
+            emits: [{ name: CandidateAccepted, fields: [id, email, status, at] }]
+    use_cases:
+      - name: accept_candidate
+        command: AcceptCandidate
+        input: [{ name: candidate_id, type: UUID }]
+        steps:
+          - load: { aggregate: Candidate, by: candidate_id, as: candidate, not_found: CandidateNotFound }
+          - invoke: { target: candidate, operation: accept, args: { at: clock.now } }
+          - save: candidate
+          - publish_after_commit: CandidateAccepted
+
+  - name: Staffing
+    errors:
+      - { name: StaffNotFound, code: staff_not_found, message: staff not found }
+    enums:
+      - { name: Source, values: [hiring, manual] }
+    aggregates:
+      - name: StaffMember
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: candidate_id, type: UUID }
+          - { name: email, type: String }
+          - { name: joined_at, type: DateTime }
+          - { name: source, type: Source }
+          - { name: welcomed, type: Boolean }
+        factories:
+          - name: register
+            parameters:
+              - { name: id, type: UUID }
+              - { name: candidate_id, type: UUID }
+              - { name: email, type: String }
+              - { name: joined_at, type: DateTime }
+              - { name: source, type: Source }
+            fields: { id: id, candidate_id: candidate_id, email: email, joined_at: joined_at, source: source, welcomed: false }
+            emits: [{ name: StaffRegistered, fields: [id, email] }]
+        operations:
+          - name: welcome
+            changes: { welcomed: true }
+            emits: [{ name: StaffWelcomed, fields: [id] }]
+    use_cases:
+      - name: register_staff
+        command: RegisterStaff
+        input:
+          - { name: candidate_id, type: UUID }
+          - { name: email, type: String }
+          - { name: joined_at, type: DateTime }
+          - { name: source, type: Source }
+          - { name: note, type: String, required: false }
+        steps:
+          - create:
+              aggregate: StaffMember
+              factory: register
+              as: staff
+              args: { id: ids.new, candidate_id: candidate_id, email: email, joined_at: joined_at, source: source }
+          - save: staff
+          - publish_after_commit: StaffRegistered
+          - return: staff.id
+      - name: welcome_staff
+        command: WelcomeStaff
+        input: [{ name: staff_id, type: UUID }]
+        steps:
+          - load: { aggregate: StaffMember, by: staff_id, as: staff, not_found: StaffNotFound }
+          - invoke: { target: staff, operation: welcome }
+          - save: staff
+          - publish_after_commit: StaffWelcomed
+    policies:
+      - name: register_accepted_candidate
+        description: Accepted candidates join the staff
+        when: Hiring.CandidateAccepted
+        run: register_staff
+        args: { candidate_id: event.id, email: event.email.value, joined_at: event.at, source: hiring }
+      - name: welcome_registered_staff
+        when: StaffRegistered
+        run: welcome_staff
+        args: { staff_id: event.id }
+
+  - name: Payroll
+    aggregates:
+      - name: PayrollAccount
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: staff_id, type: UUID }
+          - { name: opened_at, type: DateTime }
+        factories:
+          - name: open
+            parameters: [{ name: id, type: UUID }, { name: staff_id, type: UUID }, { name: opened_at, type: DateTime }]
+            fields: { id: id, staff_id: staff_id, opened_at: opened_at }
+    use_cases:
+      - name: open_account
+        command: OpenAccount
+        input: [{ name: account_id, type: UUID }, { name: staff_id, type: UUID }, { name: opened_at, type: DateTime }]
+        steps:
+          - create: { aggregate: PayrollAccount, factory: open, as: account, args: { id: account_id, staff_id: staff_id, opened_at: opened_at } }
+          - save: account
+    policies:
+      - name: open_account_for_new_staff
+        when: Staffing.StaffRegistered
+        run: open_account
+        args: { account_id: ids.new, staff_id: event.id, opened_at: clock.now }
+
+relationships:
+  - upstream: Hiring
+    downstream: Staffing
+    pattern: customer_supplier
+    events: [CandidateAccepted]
+    description: Staffing registers accepted candidates
+  - upstream: Staffing
+    downstream: Payroll
+    pattern: anticorruption_layer
+    events: [StaffRegistered]

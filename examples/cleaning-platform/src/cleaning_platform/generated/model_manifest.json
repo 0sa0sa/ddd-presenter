@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "70976be81eccbeee5e3991528f445042e26b355fbc0e70d13f0102c6c4924da1",
+  "model_sha256": "b7e59156aee6d862ee8b1d63db1d28687aa657aa576595a6c80652eee5f12120",
   "files": [
     {
       "path": "src/cleaning_platform/generated/__init__.py",
@@ -11,7 +11,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/_runtime.py",
-      "sha256": "732e85a6fbf79026857ebe22c650a7434bcabcf96d1bf6b353fcf17f3d46ddb2"
+      "sha256": "78fe4332e92b34e285e0fc3dc39437a9887fe77d8e86e54479b3fa75478b8eb0"
     },
     {
       "path": "src/cleaning_platform/generated/adapters.py",
@@ -71,11 +71,75 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/README.md",
-      "sha256": "1ec39d604064b8674a6221b650031afec8f5d6cbe6b5cadaa7439530b1b3ad98"
+      "sha256": "2dddd63f5961122d83cafc5a32763ac2bea6c045b2ee46873c5dd8019189a14b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
       "sha256": "58a0f4167c438032d4c68dd2653c91b444f289005537e93c223514bd422f729c"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/__init__.py",
+      "sha256": "2e688f698fbf9afcf7e7cfa97b51df88f1068c5e8b38ec6a6f4227be34603305"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/application/__init__.py",
+      "sha256": "37d709f33de7b0aa57a26cf317cb02cb73359d8338848244f95dff31eae0c95c"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/application/policies.py",
+      "sha256": "af4a384d1e3525e38b9ec4f99705447adb4c91f7c10d3f95690a64aa4c407661"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/application/ports.py",
+      "sha256": "f55ee9aa2a08846202a05ce1960b76c076cb158690458fadc782abd2499a25ad"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/application/use_cases.py",
+      "sha256": "8544cce9ca8d7f006929fd6676a9e70cae0d0f81978073e91585128dfeec9ac7"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/__init__.py",
+      "sha256": "710113fc0cc5998f5d1930b6d88c80a881c87b9270e72c20f960e303baef48ba"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/aggregates.py",
+      "sha256": "e2b16b9952a0513827fefab1e2c652692b37ba3b57237cdc3ec9a53a301cd570"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/commands.py",
+      "sha256": "362a4de8f4eb2b626b892524f3ae94c025fc2d434abb73759c6a3b66b02cbdf4"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/entities.py",
+      "sha256": "d4fedfc6672655b6a472caf6c293107683827db1098a1a24883ee98fff2bd392"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/enums.py",
+      "sha256": "07535c98222e20e181addbe85aa7e087df4cec19c2f173cee27f2ef492809a34"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/errors.py",
+      "sha256": "33b731bd9bf41d1b21227a7bd87a5b76823745cb9deb296cd2db27b60e276ccc"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/events.py",
+      "sha256": "248ba7092bc8af9c69bd3badeb1706b447ef4a04cf9ea6b7bf69d9cd8f309e4b"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/rules.py",
+      "sha256": "d09e51b1569ba7c8df46ce06573505a9cc4c46aea9ff8ffe5afa797c040c1014"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/domain/value_objects.py",
+      "sha256": "cb4d4fec5be76d933e41f38c430ae3f88284ff12c5610808b9f27e56a5adc5ce"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/README.md",
+      "sha256": "5833a09f12c679c4cfed46c7a7bdb496cb89bd41834e9a35749df62760cf69bf"
+    },
+    {
+      "path": "src/cleaning_platform/generated/staffing/testing.py",
+      "sha256": "26523c4170435ddbb223833b5f958f9d5ffd88d2275eff2750c6bea4867fd6eb"
     },
     {
       "path": "tests/generated/test_cleaning_staff_accept_invitation.py",
@@ -92,6 +156,14 @@
     {
       "path": "tests/generated/test_cleaning_staff_revoke_invitation.py",
       "sha256": "6b6224d10f45ad6a03ede54cae0be1b83f057bdf2a8578ad6b1d6afc5865a81c"
+    },
+    {
+      "path": "tests/generated/test_staffing_policies.py",
+      "sha256": "acfec2d548333d6ed64dd99cf4a5e004f6818154512c6dca92f6a75963b9ceca"
+    },
+    {
+      "path": "tests/generated/test_staffing_register_staff.py",
+      "sha256": "cc9c5f24c4b92ce62c582300b0bf1ccb74307d4dc100417fd2230833dc2c8208"
     }
   ],
   "scaffold": [

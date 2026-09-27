@@ -10,6 +10,8 @@ import type {
   InvariantIR,
   ModelIR,
   ParameterIR,
+  PolicyIR,
+  RelationshipIR,
   ScenarioThenIR,
   StepIR,
   UseCaseIR,
@@ -39,6 +41,16 @@ export interface UseCaseInfo {
   idsCount: number;
 }
 
+export interface PolicyInfo {
+  /** The consumed event, resolved to its owning context. */
+  event: { context: string; name: string };
+  /** The event comes from another context (through `relationship`). */
+  crossContext: boolean;
+  relationship?: RelationshipIR;
+  usesClock: boolean;
+  usesIds: boolean;
+}
+
 export interface ContextAnalysis {
   ir: ContextIR;
   /** owner name → field name → resolved type (optional wrapped). Owners: VOs, entities, aggregates, commands, errors. */
@@ -47,6 +59,8 @@ export interface ContextAnalysis {
   exprs: Map<string, TExpr>;
   events: Map<string, EventInfo>;
   useCases: Map<string, UseCaseInfo>;
+  /** Policies whose event and use case resolved. Typed args are in `exprs` (path `…policies[i].args.<input>`). */
+  policies: Map<string, PolicyInfo>;
 }
 
 export interface Analysis {
@@ -115,6 +129,8 @@ const RESERVED_TYPES = new Set([
   "EventPublisher",
   "UnitOfWork",
   "Extensions",
+  "EventHandler",
+  "Callable",
   "List",
   "Optional",
   "Ref",
@@ -161,6 +177,308 @@ class Validator {
       seen.set(snake, ctx.path);
       this.contexts.set(ctx.name, new ContextValidator(this.bag, ctx).run());
     }
+    // Context map and policies need every context's events and use cases.
+    this.checkRelationships();
+    for (const ctx of m.contexts) this.checkPolicies(ctx);
+    this.checkPolicyCycles();
+    this.checkContractUsage();
+  }
+
+  // -- context map ------------------------------------------------------------
+
+  relEl(r: RelationshipIR): string {
+    return `Context map › ${r.upstream} → ${r.downstream}`;
+  }
+
+  unknownContext(name: string, path: Path, element: string): void {
+    const s = closest(name, this.model.contexts.map((c) => c.name));
+    this.bag.error("unknown-context", `Unknown context "${name}"`, path, { element, hint: s ? `Did you mean "${s}"?` : `Contexts: ${this.model.contexts.map((c) => c.name).join(", ") || "none"}` });
+  }
+
+  checkRelationships(): void {
+    const pairs = new Set<string>();
+    for (const r of this.model.relationships) {
+      const el = this.relEl(r);
+      const up = this.contexts.get(r.upstream);
+      if (!up) this.unknownContext(r.upstream, [...r.path, "upstream"], el);
+      if (!this.contexts.has(r.downstream)) this.unknownContext(r.downstream, [...r.path, "downstream"], el);
+      if (r.upstream === r.downstream) {
+        this.bag.error("self-relationship", `A context cannot be upstream of itself (${r.upstream})`, [...r.path, "downstream"], {
+          element: el,
+          hint: "Policies inside one context need no relationship; relationships connect two different contexts",
+        });
+      }
+      const key = `${r.upstream}→${r.downstream}`;
+      if (pairs.has(key)) {
+        this.bag.error("duplicate-relationship", `Relationship ${r.upstream} → ${r.downstream} is declared more than once`, r.path, {
+          element: el,
+          hint: "Declare one relationship per upstream/downstream pair and list every contract event in its events",
+        });
+      }
+      pairs.add(key);
+      if (r.pattern === "separate_ways" && r.events.length) {
+        this.bag.error("separate-ways-with-events", "separate_ways means the contexts do not integrate, so it cannot carry an event contract", [...r.path, "events"], {
+          element: el,
+          hint: "Remove the events, or choose a pattern that integrates (e.g. customer_supplier, conformist, anticorruption_layer)",
+        });
+      }
+      const seen = new Set<string>();
+      r.events.forEach((e, i) => {
+        if (seen.has(e)) this.bag.error("duplicate-name", `Event ${e} is listed twice`, [...r.path, "events", i], { element: el });
+        seen.add(e);
+        if (up && !up.events.has(e)) {
+          const s = closest(e, [...up.events.keys()]);
+          this.bag.error("unknown-event", `Event ${e} is not emitted in upstream context ${r.upstream}`, [...r.path, "events", i], {
+            element: el,
+            hint: s ? `Did you mean "${s}"?` : up.events.size ? `Events of ${r.upstream}: ${[...up.events.keys()].join(", ")}` : `${r.upstream} emits no events yet`,
+          });
+        }
+      });
+    }
+  }
+
+  // -- policies -------------------------------------------------------------
+
+  checkPolicies(ctx: ContextIR): void {
+    const ca = this.contexts.get(ctx.name);
+    if (!ca || !ctx.policies.length) return;
+    const seen = new Set<string>();
+    for (const p of ctx.policies) {
+      if (seen.has(p.name)) this.bag.error("duplicate-name", `Duplicate policy "${p.name}"`, [...p.path, "name"], { element: this.el(ctx, p) });
+      seen.add(p.name);
+    }
+    // tests/generated/test_<context>_policies.py must not collide with a use case or aggregate test file.
+    for (const clash of [...ctx.useCases.map((u) => u.name), ...ctx.aggregates.map((a) => toSnake(a.name))].filter((n) => n === "policies")) {
+      this.bag.error("reserved-name", `"${clash}" clashes with the generated policy tests of ${ctx.name}`, [...ctx.policies[0]!.path, "name"], { element: ctx.name, hint: "Rename the use case or aggregate" });
+    }
+    for (const p of ctx.policies) this.checkPolicy(ctx, ca, p);
+  }
+
+  el(ctx: ContextIR, p: PolicyIR): string {
+    return `${ctx.name} › ${p.name}`;
+  }
+
+  checkPolicy(ctx: ContextIR, ca: ContextAnalysis, p: PolicyIR): void {
+    const el = this.el(ctx, p);
+    checkSnakeName(this.bag, p.name, "Policy name", [...p.path, "name"], el);
+    const wpath = [...p.path, "when"];
+    const ref = parseEventRef(p.when);
+    let event: EventInfo | undefined;
+    let evCtx: ContextAnalysis | undefined;
+    if (!ref) {
+      this.bag.error("invalid-reference", `"when" must name an event: Event (this context) or Context.Event, got "${p.when}"`, wpath, { element: el });
+    } else {
+      evCtx = this.contexts.get(ref.context ?? ctx.name);
+      if (!evCtx) this.unknownContext(ref.context!, wpath, el);
+      else {
+        event = evCtx.events.get(ref.name);
+        if (!event) {
+          const elsewhere = [...this.contexts.values()].find((c) => c !== evCtx && c.events.has(ref.name));
+          const s = closest(ref.name, [...evCtx.events.keys()]);
+          this.bag.error("unknown-event", `Event ${ref.name} is not emitted in context ${evCtx.ir.name}`, wpath, {
+            element: el,
+            hint: elsewhere ? `It is emitted by ${elsewhere.ir.name}; write when: ${elsewhere.ir.name}.${ref.name}` : s ? `Did you mean "${s}"?` : "Events are declared in the emits of an operation or factory",
+          });
+        }
+      }
+    }
+    const uc = ctx.useCases.find((u) => u.name === p.run);
+    if (!uc) {
+      const s = closest(p.run, ctx.useCases.map((u) => u.name));
+      this.bag.error("unknown-use-case", `Unknown use case "${p.run}" in context ${ctx.name}`, [...p.path, "run"], {
+        element: el,
+        hint: s ? `Did you mean "${s}"?` : "A policy runs a use case of its own context; declare it under use_cases",
+      });
+    }
+    if (!event || !evCtx) return;
+    const cross = evCtx.ir.name !== ctx.name;
+    let relationship: RelationshipIR | undefined;
+    if (cross) {
+      const up = evCtx.ir.name;
+      const rels = this.model.relationships.filter((r) => r.upstream === up && r.downstream === ctx.name);
+      relationship = rels.find((r) => r.events.includes(event!.name));
+      if (!rels.length) {
+        this.bag.error("missing-relationship", `Policy ${p.name} consumes ${up}.${event.name} from another context, but no relationship ${up} → ${ctx.name} declares that event contract`, wpath, {
+          element: el,
+          hint: `Cross-context integration needs an explicit contract. Add at the top level:\nrelationships:\n  - { upstream: ${up}, downstream: ${ctx.name}, pattern: customer_supplier, events: [${event.name}] }`,
+        });
+      } else if (!relationship) {
+        const r = rels[0]!;
+        this.bag.error("event-not-in-contract", `Relationship ${up} → ${ctx.name} does not list ${event.name} in its events`, wpath, {
+          element: el,
+          hint: `Add it to the contract: events: [${[...r.events, event.name].join(", ")}] (relationships[${this.model.relationships.indexOf(r)}])`,
+        });
+      }
+    }
+    const info: PolicyInfo = { event: { context: evCtx.ir.name, name: event.name }, crossContext: cross, relationship, usesClock: false, usesIds: false };
+    if (uc) this.checkPolicyArgs(ctx, ca, p, uc, event, evCtx, info, el);
+    ca.policies.set(p.name, info);
+  }
+
+  checkPolicyArgs(ctx: ContextIR, ca: ContextAnalysis, p: PolicyIR, uc: UseCaseIR, event: EventInfo, evCtx: ContextAnalysis, info: PolicyInfo, el: string): void {
+    const inputs = ca.fieldTypes.get(uc.command) ?? new Map<string, Type>();
+    const eventFields = event.fields.map((f) => f.name);
+    for (const k of Object.keys(p.args)) {
+      if (!uc.input.some((f) => f.name === k)) {
+        const s = closest(k, uc.input.map((f) => f.name));
+        this.bag.error("unknown-argument", `Use case ${uc.name} has no input "${k}"`, [...p.path, "args", k], {
+          element: el,
+          hint: s ? `Did you mean "${s}"?` : uc.input.length ? `Inputs: ${uc.input.map((f) => f.name).join(", ")}` : `${uc.name} takes no input`,
+        });
+      }
+    }
+    for (const f of uc.input) {
+      const t = inputs.get(f.name);
+      const src = p.args[f.name];
+      if (src === undefined) {
+        if (f.required) {
+          const same = event.fields.find((x) => x.name === f.name) ?? (f.name.endsWith("_id") ? event.fields.find((x) => x.name === "id") : undefined);
+          this.bag.error("missing-argument", `Missing argument "${f.name}" for use case ${uc.name}`, Object.keys(p.args).length ? [...p.path, "args"] : p.path, {
+            element: el,
+            hint: same ? `Map it from the event: args: { ${f.name}: event.${same.name} }` : `Use event.<field> (${eventFields.join(", ") || "the event has no fields"}), clock.now, ids.new or a literal`,
+          });
+        }
+        continue;
+      }
+      if (!t) continue;
+      const apath = [...p.path, "args", f.name];
+      const m = /^\s*event((?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*$/.exec(src);
+      if (m) {
+        const segs = m[1]!.split(".").map((x) => x.trim()).filter(Boolean);
+        const e = this.eventPath(event, evCtx, segs, apath, el);
+        if (!e) continue;
+        if (info.crossContext && crossesAsModelType(e.type)) {
+          this.bag.error("cross-context-type", `event.${segs.join(".")} is ${typeToString(e.type)}, a type of ${evCtx.ir.name} that ${ctx.name} cannot hold`, apath, {
+            element: el,
+            hint: "Across contexts pass values only (String, Integer, UUID, DateTime, …): pick a field of the value object, e.g. event.email.value",
+          });
+          continue;
+        }
+        if (!assignable(e.type, t)) {
+          this.bag.error("type-mismatch", `event.${segs.join(".")} is ${typeToString(e.type)} but input "${f.name}" of ${uc.name} is ${typeToString(t)}`, apath, {
+            element: el,
+            hint: e.type.k === "optional" ? "The event field may be null; make the input optional (required: false)" : undefined,
+          });
+          continue;
+        }
+        ca.exprs.set(formatPath(apath), e);
+        continue;
+      }
+      const r = checkExpression(src, makeEnv(ctx, { allowPorts: true }), t);
+      for (const err of r.errors) {
+        this.bag.error("invalid-expression", err.message, apath, {
+          element: el,
+          hint: /\bevent\b/.test(src) ? "Write event.<field> alone as the argument; policies do not compute with event fields" : err.hint ?? `in "${src}" at column ${err.start + 1}`,
+        });
+      }
+      if (!r.expr) continue;
+      walk(r.expr, (n) => {
+        if (n.t === "port" && n.port === "clock") info.usesClock = true;
+        if (n.t === "port" && n.port === "ids") info.usesIds = true;
+      });
+      ca.exprs.set(formatPath(apath), r.expr);
+    }
+  }
+
+  /** Resolves `event.a.b` against the event payload and the upstream context's value objects. */
+  eventPath(event: EventInfo, evCtx: ContextAnalysis, segs: string[], path: Path, el: string): TExpr | undefined {
+    if (!segs.length) {
+      this.bag.error("invalid-expression", "Pass a field of the event, not the event itself", path, { element: el, hint: `e.g. event.${event.fields[0]?.name ?? "id"}` });
+      return undefined;
+    }
+    let cur: TExpr = { t: "local", name: "event", type: { k: "event", name: event.name } };
+    let fields = new Map(event.fields.map((f) => [f.name, f.type]));
+    let owner = event.name;
+    for (const [i, seg] of segs.entries()) {
+      const ft = fields.get(seg);
+      if (!ft) {
+        const s = closest(seg, [...fields.keys()]);
+        this.bag.error("unknown-field", `${owner} has no field "${seg}"`, path, { element: el, hint: s ? `Did you mean "${s}"?` : `Fields: ${[...fields.keys()].join(", ") || "none"}` });
+        return undefined;
+      }
+      cur = { t: "field", name: seg, owner: cur, type: ft };
+      if (i === segs.length - 1) break;
+      if (ft.k === "optional") {
+        this.bag.error("invalid-expression", `${owner}.${seg} may be null, so its fields cannot be read here`, path, { element: el });
+        return undefined;
+      }
+      if (ft.k !== "vo" && ft.k !== "entity") {
+        this.bag.error("invalid-expression", `${owner}.${seg} is ${typeToString(ft)} and has no fields`, path, { element: el });
+        return undefined;
+      }
+      fields = evCtx.fieldTypes.get(ft.name) ?? new Map();
+      owner = ft.name;
+    }
+    return cur;
+  }
+
+  /** A use case that publishes the event its own policy consumes (directly or through other policies) loops forever. */
+  checkPolicyCycles(): void {
+    const deps = new Map<string, string[]>();
+    const via = new Map<string, { ctx: ContextIR; policy: PolicyIR }>();
+    for (const ctx of this.model.contexts) {
+      const ca = this.contexts.get(ctx.name);
+      if (!ca) continue;
+      for (const p of ctx.policies) {
+        const info = ca.policies.get(p.name);
+        const uc = ca.useCases.get(p.run);
+        if (!info || !uc) continue;
+        const from = `${info.event.context}.${info.event.name}`;
+        const to = uc.publishes.map((e) => `${ctx.name}.${e}`);
+        deps.set(from, [...(deps.get(from) ?? []), ...to]);
+        for (const t of to) if (!via.has(`${from}→${t}`)) via.set(`${from}→${t}`, { ctx, policy: p });
+      }
+    }
+    for (const cycle of findCycles(deps)) {
+      const steps = cycle.map((n, i) => ({ node: n, by: via.get(`${n}→${cycle[(i + 1) % cycle.length]}`) }));
+      const first = steps[0]!.by;
+      if (!first) continue;
+      const chain = steps.map((s) => `${s.node} → (${s.by ? `${s.by.ctx.name}.${s.by.policy.name}` : "?"})`).join(" → ");
+      this.bag.warning("policy-cycle", `Policies form a loop: ${chain} → ${cycle[0]}`, [...first.policy.path, "when"], {
+        element: this.el(first.ctx, first.policy),
+        hint: "Each event runs a use case that publishes an event of the loop again. Stop the chain with a condition in a use case, or split the reaction",
+      });
+    }
+  }
+
+  checkContractUsage(): void {
+    for (const r of this.model.relationships) {
+      const down = this.contexts.get(r.downstream);
+      const up = this.contexts.get(r.upstream);
+      if (!down || !up || r.pattern === "separate_ways") continue;
+      r.events.forEach((e, i) => {
+        const consumed = [...down.policies.values()].some((p) => p.event.context === r.upstream && p.event.name === e);
+        if (!consumed && up.events.has(e)) {
+          this.bag.info("unused-contract-event", `${r.downstream} has no policy that consumes ${r.upstream}.${e}`, [...r.path, "events", i], {
+            element: this.relEl(r),
+            hint: `Add a policy to ${r.downstream} with when: ${r.upstream}.${e}, or remove the event from the contract`,
+          });
+        }
+      });
+    }
+  }
+}
+
+/** Parses a policy's `when`: `Event` or `Context.Event`. */
+export function parseEventRef(src: string): { context?: string; name: string } | undefined {
+  const m = /^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(src);
+  if (!m) return undefined;
+  return m[1] ? { context: m[1], name: m[2]! } : { name: m[2]! };
+}
+
+/** Enum / value object / entity types are classes of one context and cannot cross a context boundary. */
+function crossesAsModelType(t: Type): boolean {
+  const b = unwrap(t);
+  return b.k === "enum" || b.k === "vo" || b.k === "entity" || b.k === "aggregate";
+}
+
+function checkSnakeName(bag: DiagnosticBag, name: string, what: string, path: Path, element?: string): void {
+  if (!SNAKE.test(name)) {
+    bag.error("invalid-name", `${what} "${name}" must be snake_case`, path, { element, hint: `e.g. ${toSnake(name)}` });
+  } else if (PY_KEYWORDS.has(name)) {
+    bag.error("reserved-name", `${what} "${name}" is a Python keyword`, path, { element, hint: `e.g. ${name}_` });
+  } else if (name.startsWith("model_") || RESERVED_MEMBERS.has(name)) {
+    bag.error("reserved-name", `${what} "${name}" clashes with a generated or Pydantic member name`, path, { element });
   }
 }
 
@@ -169,6 +487,7 @@ class ContextValidator {
   readonly exprs = new Map<string, TExpr>();
   readonly events = new Map<string, EventInfo>();
   readonly useCases = new Map<string, UseCaseInfo>();
+  readonly policies = new Map<string, PolicyInfo>();
   /** Names that become Python classes in the context namespace. */
   readonly typeNames = new Map<string, { kind: string; path: Path }>();
 
@@ -202,7 +521,7 @@ class ContextValidator {
       this.checkDuplicateSnake(uc.scenarios.map((s) => ({ name: s.name, path: [...s.path, "name"] })), "scenario", this.el(uc.name));
       for (const sc of uc.scenarios) this.checkUseCaseScenario(uc, sc);
     }
-    return { ir: this.ctx, fieldTypes: this.fieldTypes, exprs: this.exprs, events: this.events, useCases: this.useCases };
+    return { ir: this.ctx, fieldTypes: this.fieldTypes, exprs: this.exprs, events: this.events, useCases: this.useCases, policies: this.policies };
   }
 
   // -- registration & naming ------------------------------------------------
@@ -234,6 +553,7 @@ class ContextValidator {
       reg(u.command, "command", [...u.path, "command"]);
       reg(`${pascal(u.name)}UseCase`, "use case class", [...u.path, "name"]);
     }
+    for (const p of this.ctx.policies) reg(`${pascal(p.name)}Policy`, "policy class", [...p.path, "name"]);
     // Events are registered once each (possibly emitted from several places).
     const eventSeen = new Set<string>();
     for (const a of this.ctx.aggregates) {
@@ -249,13 +569,7 @@ class ContextValidator {
   }
 
   checkSnake(name: string, what: string, path: Path, element?: string): void {
-    if (!SNAKE.test(name)) {
-      this.bag.error("invalid-name", `${what} "${name}" must be snake_case`, path, { element, hint: `e.g. ${toSnake(name)}` });
-    } else if (PY_KEYWORDS.has(name)) {
-      this.bag.error("reserved-name", `${what} "${name}" is a Python keyword`, path, { element, hint: `e.g. ${name}_` });
-    } else if (name.startsWith("model_") || RESERVED_MEMBERS.has(name)) {
-      this.bag.error("reserved-name", `${what} "${name}" clashes with a generated or Pydantic member name`, path, { element });
-    }
+    checkSnakeName(this.bag, name, what, path, element);
   }
 
   checkDuplicateSnake(items: { name: string; path: Path }[], what: string, element?: string): void {

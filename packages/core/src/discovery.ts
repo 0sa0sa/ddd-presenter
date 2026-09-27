@@ -6,7 +6,7 @@
 import { parseDocument } from "yaml";
 import { applyEdits, type EditOp } from "./edit.ts";
 import { parseModel } from "./parse.ts";
-import { analyzeModel, validateModelText } from "./validate.ts";
+import { analyzeModel, parseEventRef, validateModelText } from "./validate.ts";
 import type { Diagnostic } from "./diagnostics.ts";
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ export const STICKY_KINDS: Record<StickyKind, StickyMeta> = {
   event: { label: "ドメインイベント", help: "業務で起きた事実。過去形で書く（例: 招待が受諾された）", code: "pascal", w: 160, h: 100 },
   command: { label: "コマンド", help: "誰かの意図・操作（例: 招待を受諾する）", code: "snake", w: 160, h: 100 },
   actor: { label: "アクター", help: "コマンドを実行する人・役割", code: null, w: 120, h: 60 },
-  policy: { label: "ポリシー", help: "「〜が起きたら〜する」という自動の反応", code: null, w: 160, h: 100 },
+  policy: { label: "ポリシー", help: "「〜が起きたら〜する」という自動の反応。イベント → ポリシー → コマンドとつなぐ", code: "snake", w: 160, h: 100 },
   aggregate: { label: "集約", help: "コマンドを受けて整合性を守り、イベントを出すまとまり", code: "pascal", w: 200, h: 120 },
   read_model: { label: "リードモデル", help: "判断に必要な情報・画面", code: null, w: 160, h: 100 },
   external_system: { label: "外部システム", help: "自分たちの外にあるシステム", code: null, w: 160, h: 100 },
@@ -196,6 +196,15 @@ export function analyzeBoard(board: Board): Finding[] {
   for (const p of of("policy")) {
     if (!incoming(p.id).some((x) => x.kind === "event")) {
       out.push({ severity: "warning", code: "policy-without-trigger", message: `ポリシー「${label(p)}」のきっかけになるイベントがありません`, itemIds: [p.id] });
+    }
+    if (!outgoing(p.id).some((x) => x.kind === "command")) {
+      out.push({
+        severity: "warning",
+        code: "policy-without-command",
+        message: `ポリシー「${label(p)}」が実行するコマンドがありません`,
+        hint: "ポリシーからコマンドへ矢印を引きます。モデルに反映すると、イベントを受けてそのコマンドの Use case を実行するポリシーになります",
+        itemIds: [p.id],
+      });
     }
   }
 
@@ -542,8 +551,27 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
   for (const c of candidates.filter((x) => !x.aggregateItemId)) {
     for (const id of [...c.commandIds, ...c.eventIds]) skipped.push({ id, text: byId.get(id)?.text ?? "", reason: "担当する集約が決まっていません（補助パネルの候補から集約を置くと反映できます）" });
   }
+  // Event → policy → command chains become policies of the command's context (names are requested like the rest).
+  const policyChains: { item: BoardItem; name: string; event: BoardItem; eventName: string; command: BoardItem }[] = [];
+  for (const p of board.items.filter((i) => i.kind === "policy")) {
+    const events = board.connectors.filter((c) => c.to === p.id).map((c) => byId.get(c.from)).filter((i): i is BoardItem => i?.kind === "event");
+    const commands = board.connectors.filter((c) => c.from === p.id).map((c) => byId.get(c.to)).filter((i): i is BoardItem => i?.kind === "command");
+    if (!events.length || !commands.length) {
+      skipped.push({ id: p.id, text: p.text, reason: events.length ? "実行するコマンドがありません（ポリシーからコマンドへ矢印を引くと反映できます）" : "きっかけのイベントがありません（イベントからポリシーへ矢印を引くと反映できます）" });
+      continue;
+    }
+    const pairs = events.flatMap((e) => commands.map((c) => ({ e, c })));
+    pairs.forEach(({ e, c }, i) => {
+      const eventName = nameOf(e.id, "event", e.text, "pascal", e.codeName);
+      const commandName = resolve(c.id, c.text, "snake");
+      // Default: <command>_on_<event>, e.g. send_welcome_mail_on_invitation_accepted.
+      const fallback = SNAKE.test(commandName) && PASCAL.test(eventName) ? `${commandName}_on_${snakeOf(eventName)}` : "";
+      const base = names[p.id] || boardCodeName(board, p.id) || suggestCodeName(p.text, "snake") || fallback;
+      if (i === 0) requests.push({ id: p.id, kind: "policy", text: p.text, suggested: suggestCodeName(p.text, "snake") || fallback, style: "snake" });
+      policyChains.push({ item: p, name: i === 0 ? base : base && `${base}_${i + 1}`, event: e, eventName, command: c });
+    });
+  }
   for (const i of board.items) {
-    if (i.kind === "policy") skipped.push({ id: i.id, text: i.text, reason: "ポリシーは他の Use case への連携として手で書きます" });
     if (i.kind === "hotspot") skipped.push({ id: i.id, text: i.text, reason: "未解決の論点です" });
     if (i.kind === "read_model" || i.kind === "external_system") skipped.push({ id: i.id, text: i.text, reason: `${STICKY_KINDS[i.kind].label}はモデルの対象外です` });
   }
@@ -551,7 +579,7 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
   const unique = new Map<string, NameRequest>();
   for (const r of requests) unique.set(r.id, r);
   const allNames = [...unique.values()];
-  const finalName = (r: NameRequest) => resolve(r.id, r.text, r.style);
+  const finalName = (r: NameRequest) => (r.kind === "policy" ? policyChains.find((x) => x.item.id === r.id)?.name ?? "" : resolve(r.id, r.text, r.style));
   const missing = allNames.filter((r) => {
     const n = finalName(r);
     return !(r.style === "pascal" ? PASCAL.test(n) : SNAKE.test(n));
@@ -587,11 +615,21 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
   let working = isEmpty ? doc.toString({ lineWidth: 0 }) : currentYaml;
   const current = parseModel(working).model!;
   const currentEvents = analyzeModel(current).contexts;
+  /** What the reflection produces, for wiring policies afterwards. */
+  const produced = {
+    contextIndex: new Map<string, number>(),
+    /** context → event name → payload field names and emitting aggregate */
+    events: new Map<string, Map<string, { fields: string[]; aggregate: string }>>(),
+    /** command sticky id → the use case that will run it */
+    useCases: new Map<string, { context: string; name: string; input: { name: string; required: boolean }[] }>(),
+  };
+  let newContexts = 0;
 
   for (const c of plan.contexts) {
     const ctxName = c.name;
     const existingCtx = current.contexts.find((x) => x.name === ctxName);
     const ctxIndex = existingCtx ? current.contexts.indexOf(existingCtx) : undefined;
+    produced.contextIndex.set(ctxName, ctxIndex ?? current.contexts.length + newContexts++);
     const ctxPath = (idx: number) => ["contexts", idx];
     const errors: Record<string, unknown>[] = [];
     const aggregatesOut: Record<string, unknown>[] = [];
@@ -620,6 +658,9 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
         for (const e of cmd.events) {
           if (e.item.text.trim() && !/^[\x20-\x7e]+$/.test(e.item.text)) glossary.push({ term: e.item.text.trim(), definition: `イベント ${e.name}` });
         }
+        const ctxProduced = produced.events.get(ctxName) ?? new Map<string, { fields: string[]; aggregate: string }>();
+        for (const em of emits) ctxProduced.set(em.name, { fields: em.fields, aggregate: aggName });
+        produced.events.set(ctxName, ctxProduced);
         const existingOp = existingAgg && [...existingAgg.operations, ...existingAgg.factories].find((o) => o.name === opName);
         const requiredFields = existingAgg?.fields.filter((f) => f.required && f.name !== existingAgg.identity) ?? [];
         if (!existingOp && cmd.item.creates && requiredFields.length) {
@@ -627,8 +668,10 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
           continue;
         }
         if (existingOp) {
-          const invoked = existingCtx!.useCases.some((u) => JSON.stringify(u.steps).includes(`"${opName}"`));
+          const invoker = existingCtx!.useCases.find((u) => u.name === opName) ?? existingCtx!.useCases.find((u) => JSON.stringify(u.steps).includes(`"${opName}"`));
+          const invoked = !!invoker;
           const needsArgs = existingOp.parameters.some((p) => p.required);
+          if (invoker) produced.useCases.set(cmd.item.id, { context: ctxName, name: invoker.name, input: invoker.input.map((f) => ({ name: f.name, required: f.required })) });
           if (invoked || needsArgs) {
             if (needsArgs && !invoked) skipped.push({ id: cmd.item.id, text: cmd.item.text, reason: `既存の操作 ${opName} は引数が必要なため、Use case は手で書きます` });
             continue;
@@ -641,7 +684,11 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
             operations.push({ name: opName, description: cmd.item.text.trim() || undefined, ...(emits.length ? { emits } : {}) });
           }
         }
-        if (existingCtx?.useCases.some((u) => u.name === opName)) continue;
+        const existingUseCase = existingCtx?.useCases.find((u) => u.name === opName);
+        if (existingUseCase) {
+          produced.useCases.set(cmd.item.id, { context: ctxName, name: opName, input: existingUseCase.input.map((f) => ({ name: f.name, required: f.required })) });
+          continue;
+        }
         const command = opName
           .split("_")
           .map((w) => w[0]!.toUpperCase() + w.slice(1))
@@ -662,6 +709,7 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
               ...emits.map((e) => ({ publish_after_commit: e.name })),
             ];
         if (!cmd.item.creates) needNotFound.add(aggName);
+        produced.useCases.set(cmd.item.id, { context: ctxName, name: opName, input: cmd.item.creates ? [] : [{ name: idField, required: true }] });
         useCasesOut.push({
           name: opName,
           ...(cmd.actor ? { actor: cmd.actor } : {}),
@@ -721,6 +769,71 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
     }
   }
 
+  // Policies and the context map: added after every context exists (indexes of new contexts are known now).
+  const newRelationships: { upstream: string; downstream: string; pattern: string; events: string[] }[] = [];
+  const policyCount = new Map<string, number>();
+  for (const chain of policyChains) {
+    const uc = produced.useCases.get(chain.command.id);
+    const skip = (reason: string) => skipped.push({ id: chain.item.id, text: chain.item.text, reason });
+    if (!uc) {
+      skip(`コマンド「${label(chain.command)}」の Use case が反映されないため、ポリシーは手で書きます`);
+      continue;
+    }
+    const eventCtx = plan.contexts.find((c) => c.frameId === contextKey(chain.event))?.name ?? resolve(contextKey(chain.event), frames.find((f) => f.id === contextKey(chain.event))?.title ?? "Core", "pascal");
+    const known = currentEvents.get(eventCtx)?.events.get(chain.eventName);
+    const event = produced.events.get(eventCtx)?.get(chain.eventName) ?? (known ? { fields: known.fields.map((f) => f.name), aggregate: known.sources[0]!.aggregate } : undefined);
+    if (!event) {
+      skip(`イベント ${chain.eventName} を発生させる操作が反映されないため、ポリシーは手で書きます`);
+      continue;
+    }
+    // Map each required input from the event: same field name, or <aggregate>_id ← id.
+    const args: Record<string, string> = {};
+    const unmapped = uc.input.filter((f) => {
+      if (event.fields.includes(f.name)) args[f.name] = `event.${f.name}`;
+      else if (f.name === `${snakeOf(event.aggregate)}_id` && event.fields.includes("id")) args[f.name] = "event.id";
+      return f.required && !(f.name in args);
+    });
+    if (unmapped.length) {
+      skip(`Use case ${uc.name} の入力（${unmapped.map((f) => f.name).join(", ")}）をイベント ${chain.eventName} から決められないため、ポリシーは手で書きます`);
+      continue;
+    }
+    const cross = eventCtx !== uc.context;
+    const when = cross ? `${eventCtx}.${chain.eventName}` : chain.eventName;
+    const existingCtx = current.contexts.find((c) => c.name === uc.context);
+    const duplicate = existingCtx?.policies.find((x) => {
+      const ref = parseEventRef(x.when);
+      return x.name === chain.name || (x.run === uc.name && ref?.name === chain.eventName && (ref.context ?? uc.context) === eventCtx);
+    });
+    if (duplicate) continue;
+    if (cross) {
+      const existingRel = current.relationships.find((r) => r.upstream === eventCtx && r.downstream === uc.context);
+      if (existingRel?.pattern === "separate_ways") {
+        skip(`${eventCtx} と ${uc.context} は separate_ways（連携しない）の関係なので、ポリシーは反映しません`);
+        continue;
+      }
+      if (existingRel) {
+        if (!existingRel.events.includes(chain.eventName)) {
+          ops.push({ op: "add", path: ["relationships", current.relationships.indexOf(existingRel), "events"], value: chain.eventName });
+          existingRel.events.push(chain.eventName);
+        }
+      } else {
+        const rel = newRelationships.find((r) => r.upstream === eventCtx && r.downstream === uc.context);
+        if (!rel) newRelationships.push({ upstream: eventCtx, downstream: uc.context, pattern: "customer_supplier", events: [chain.eventName] });
+        else if (!rel.events.includes(chain.eventName)) rel.events.push(chain.eventName);
+      }
+    }
+    ops.push({
+      op: "add",
+      path: ["contexts", produced.contextIndex.get(uc.context)!, "policies"],
+      // args is always written (block style, and the place to add inputs later is visible).
+      value: clean({ name: chain.name, description: chain.item.text.trim() || undefined, when, run: uc.name, args }),
+    });
+    policyCount.set(uc.context, (policyCount.get(uc.context) ?? 0) + 1);
+  }
+  for (const rel of newRelationships) ops.push({ op: "add", path: ["relationships"], value: rel });
+  for (const [ctx, n] of policyCount) summary.push(`${ctx}: ポリシー ${n}`);
+  if (newRelationships.length) summary.push(`コンテキストマップ: ${newRelationships.map((r) => `${r.upstream} → ${r.downstream}`).join(", ")}`);
+
   const r = applyEdits(working, ops);
   if (!r.ok) return { ok: false, names: allNames, missing: [], skipped, diagnostics: [], error: r.error, summary };
   working = r.text;
@@ -735,6 +848,10 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
     error: v.ok ? undefined : "生成したモデルに検証エラーがあります（コード名の重複などを確認してください）",
     summary,
   };
+}
+
+function snakeOf(pascalName: string): string {
+  return pascalName.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
 function boardCodeName(board: Board, id: string): string | undefined {
@@ -793,7 +910,7 @@ export function sampleBoard(): Board {
       s("h-resend", "hotspot", "期限切れの招待を再送できる？", 900, 150),
       s("x-mail", "external_system", "メール配信サービス", 1680, 300),
       s("p-welcome", "policy", "受諾されたら歓迎メールを送る", 1300, 150),
-      s("c-welcome", "command", "歓迎メールを送る", 1500, 150, { codeName: "send_welcome_mail" }),
+      s("c-welcome", "command", "歓迎メールを送る", 1500, 150, { codeName: "send_welcome_mail", creates: true }),
       s("e-welcome", "event", "歓迎メールが送られた", 1700, 150, { codeName: "WelcomeMailSent" }),
       s("ag-mail", "aggregate", "通知", 1500, 440, { codeName: "Notification" }),
       s("rm-list", "read_model", "未受諾の招待一覧", 900, 300),
