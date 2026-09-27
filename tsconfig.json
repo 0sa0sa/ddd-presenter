@@ -23,6 +23,9 @@
     "packages/cli/test",
     "packages/server/src",
     "packages/server/test",
-    "packages/web/test"
+    "packages/web/test",
+    "packages/lsp/src",
+    "packages/lsp/test",
+    "packages/vscode/src"
   ]
 }

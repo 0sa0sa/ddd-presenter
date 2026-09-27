@@ -1,0 +1,52 @@
+{
+  "name": "ddd-presenter",
+  "displayName": "DDD Presenter",
+  "description": "Completion, hover, go-to-definition, rename and diagnostics for DDD Presenter models (*.ddd.yaml)",
+  "version": "0.1.0",
+  "publisher": "ddd-presenter",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./dist/extension.cjs",
+  "activationEvents": ["onLanguage:ddd-yaml"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ddd-yaml",
+        "aliases": ["DDD Presenter model", "ddd-yaml"],
+        "extensions": [".ddd.yaml", ".ddd.yml"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ddd-yaml",
+        "scopeName": "source.ddd-yaml",
+        "path": "./syntaxes/ddd-yaml.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[ddd-yaml]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true,
+        "editor.quickSuggestions": {
+          "strings": true,
+          "other": true,
+          "comments": false
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun build ../lsp/src/server.ts --target=node --format=cjs --outfile=dist/server.cjs && bun build src/extension.ts --target=node --format=cjs --external vscode --outfile=dist/extension.cjs"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.85.0"
+  }
+}

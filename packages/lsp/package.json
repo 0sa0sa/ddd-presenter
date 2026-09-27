@@ -1,0 +1,11 @@
+{
+  "name": "@ddd/lsp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/server.ts",
+  "dependencies": {
+    "@ddd/core": "workspace:*",
+    "vscode-languageserver": "^10.1.2",
+    "vscode-languageserver-textdocument": "^1.0.15"
+  }
+}
