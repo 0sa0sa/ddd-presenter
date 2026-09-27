@@ -6,5 +6,8 @@
   "dependencies": {
     "@ddd/core": "workspace:*",
     "@ddd/generator": "workspace:*"
+  },
+  "bin": {
+    "ddd": "src/main.ts"
   }
 }

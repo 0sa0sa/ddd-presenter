@@ -91,6 +91,9 @@ const RESERVED_MEMBERS = new Set([
   "replace",
   "events",
   "aggregate",
+  "identity",
+  "identity_field",
+  "same_state_as",
 ]);
 const RESERVED_TYPES = new Set([
   "DomainError",
@@ -191,8 +194,14 @@ class ContextValidator {
       this.ctx.useCases.map((u) => ({ name: u.name, path: [...u.path, "name"] })),
       "use case",
     );
-    for (const ag of this.ctx.aggregates) for (const sc of ag.scenarios) this.checkAggregateScenario(ag, sc);
-    for (const uc of this.ctx.useCases) for (const sc of uc.scenarios) this.checkUseCaseScenario(uc, sc);
+    for (const ag of this.ctx.aggregates) {
+      this.checkDuplicateSnake(ag.scenarios.map((s) => ({ name: s.name, path: [...s.path, "name"] })), "scenario", this.el(ag.name));
+      for (const sc of ag.scenarios) this.checkAggregateScenario(ag, sc);
+    }
+    for (const uc of this.ctx.useCases) {
+      this.checkDuplicateSnake(uc.scenarios.map((s) => ({ name: s.name, path: [...s.path, "name"] })), "scenario", this.el(uc.name));
+      for (const sc of uc.scenarios) this.checkUseCaseScenario(uc, sc);
+    }
     return { ir: this.ctx, fieldTypes: this.fieldTypes, exprs: this.exprs, events: this.events, useCases: this.useCases };
   }
 
@@ -680,6 +689,13 @@ class ContextValidator {
           continue;
         }
         const t = pt ?? ft;
+        if (t && (unwrap(t).k === "entity" || unwrap(t).k === "aggregate")) {
+          this.bag.error("invalid-event-field", `Event field "${fd.name}" carries ${typeToString(t)}; events must carry values`, fd.path, {
+            element: el,
+            hint: "Put the identity or a value object in the event instead of an entity",
+          });
+          continue;
+        }
         if (!t) {
           this.bag.error("unknown-field", `Event field "${fd.name}" is neither a parameter of ${member} nor a field of ${ag.name}`, fd.path, {
             element: el,
@@ -1191,6 +1207,14 @@ class ContextValidator {
       else this.checkValue(then.returns, info.returnType, [...then.path, "returns"], el);
     } else if (info?.returnType && then.raises === undefined) {
       this.bag.warning("unchecked-return", `Scenario does not check the value returned by ${uc.name}`, then.path, { element: el });
+    }
+    for (const e of then.emits ?? []) {
+      if (info && this.events.has(e.event) && !info.publishes.includes(e.event)) {
+        this.bag.error("invalid-scenario", `Use case ${uc.name} never publishes ${e.event}`, e.path, {
+          element: el,
+          hint: info.publishes.length ? `It publishes: ${info.publishes.join(", ")}` : "Add a publish or publish_after_commit step",
+        });
+      }
     }
     if (Array.isArray(then.state)) {
       for (const s of then.state) {

@@ -1,0 +1,99 @@
+{
+  "generator": "ddd-presenter",
+  "generator_version": "0.1.0",
+  "schema_version": 1,
+  "project": "cleaning-platform",
+  "model_sha256": "70976be81eccbeee5e3991528f445042e26b355fbc0e70d13f0102c6c4924da1",
+  "files": [
+    {
+      "path": "src/cleaning_platform/generated/__init__.py",
+      "sha256": "9548a940bca40da12d0036590df64b2469820996812da4c6862b2bf2eded2c75"
+    },
+    {
+      "path": "src/cleaning_platform/generated/_runtime.py",
+      "sha256": "732e85a6fbf79026857ebe22c650a7434bcabcf96d1bf6b353fcf17f3d46ddb2"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/__init__.py",
+      "sha256": "1d244a2a525502efa3c67b6ad4503de67346d66477e523427dd73c722e28e19c"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/application/__init__.py",
+      "sha256": "eed0bb97aff5fa44a8e1bd44dd36680ac245120ff8fef16e90cf67c1db166dfb"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/application/ports.py",
+      "sha256": "229b6689362d9ce3c8b850fc1429ef3baeab1e30576535d3481f6eb6f3b1c30f"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/application/use_cases.py",
+      "sha256": "2740ccf0a32dbb47be00bf766f800ef1198bcec8ced9fb19b10c15c145575b6e"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/__init__.py",
+      "sha256": "cdb7e7c50390bf26d25b06f515066930eba43b0e59115bbace18fd19fa6234c3"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/aggregates.py",
+      "sha256": "e0b4b11fab2c987426f9257b31e09042709ed54929383a8728bc1978959d7890"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/commands.py",
+      "sha256": "0178413f192f126d67cc2b768d4374157c7b4f38776c352c81faa34332256f4e"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/entities.py",
+      "sha256": "2736d76fdfdfa6755e89024c39edb9d8738b4b199e141ec2ef291fc9186fdda9"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/enums.py",
+      "sha256": "345b6d7d947cf919a844e53c00e825fb7ec24cece28248507a5af6ce8e0adedf"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/errors.py",
+      "sha256": "fed43830e53b4f15c599f1d5c10cc3fd583460e7d026f70ab7543322cf6281ff"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/events.py",
+      "sha256": "65070611d7eb9304e1dc5f262c20b79e883d96febdf985fcb2ddd80677a7c28b"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/rules.py",
+      "sha256": "7e89141ede549f5758f84c4461f10bd4c903f540210fa451d7323de3960899c4"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/domain/value_objects.py",
+      "sha256": "c54040cf89322474ee717b82995127f44fe151d9057b6c1851bd079ba34fd3cf"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/README.md",
+      "sha256": "1ec39d604064b8674a6221b650031afec8f5d6cbe6b5cadaa7439530b1b3ad98"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
+      "sha256": "58a0f4167c438032d4c68dd2653c91b444f289005537e93c223514bd422f729c"
+    },
+    {
+      "path": "tests/generated/test_cleaning_staff_accept_invitation.py",
+      "sha256": "e8cb8c5bcf3fda6df3ac165cd724bf80ba175d9beeb6e9d6f132475d4c94f6fb"
+    },
+    {
+      "path": "tests/generated/test_cleaning_staff_cleaning_staff_invitation.py",
+      "sha256": "03942703c8dced5cb0bad59773bf1f9453d8564539183eb3c9648ecb25a32e14"
+    },
+    {
+      "path": "tests/generated/test_cleaning_staff_issue_invitation.py",
+      "sha256": "424ca18d6af4dcff0f9eb22a9491d3f5b207195ed7af97cb2ab79ea82f956ec7"
+    },
+    {
+      "path": "tests/generated/test_cleaning_staff_revoke_invitation.py",
+      "sha256": "6b6224d10f45ad6a03ede54cae0be1b83f057bdf2a8578ad6b1d6afc5865a81c"
+    }
+  ],
+  "scaffold": [
+    "src/cleaning_platform/__init__.py",
+    "src/cleaning_platform/extensions/__init__.py",
+    "src/cleaning_platform/extensions/cleaning_staff/__init__.py",
+    "src/cleaning_platform/extensions/cleaning_staff/extensions.py"
+  ]
+}
