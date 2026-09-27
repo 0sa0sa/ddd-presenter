@@ -1,0 +1,417 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ddd-presenter.dev/schema/model-v1.json",
+  "title": "DDD Presenter model (schema_version 1)",
+  "description": "Structural schema of *.ddd.yaml models. Semantic rules (references, types, rule expressions) are checked by `ddd validate`.",
+  "type": "object",
+  "required": ["schema_version", "project", "contexts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "package": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+        "src_dir": { "type": "string" },
+        "tests_dir": { "type": "string" }
+      }
+    },
+    "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } }
+  },
+  "$defs": {
+    "pascal": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+    "snake": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "expression": {
+      "description": "Rule expression: fields, parameters, literals, ==, !=, <, <=, >, >=, and, or, not, is_empty(), contains(), length(), null checks.",
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "typeExpr": {
+      "description": "String, Integer, Decimal, Boolean, UUID, DateTime, Date, an enum / value object / entity name, List[T] or Ref[Aggregate]. Quote bracketed types inside { }.",
+      "type": "string"
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_length": { "type": "integer", "minimum": 0 },
+        "max_length": { "type": "integer", "minimum": 0 },
+        "pattern": { "type": "string" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "max_digits": { "type": "integer", "minimum": 0 },
+        "decimal_places": { "type": "integer", "minimum": 0 },
+        "min_items": { "type": "integer", "minimum": 0 },
+        "max_items": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "type": { "$ref": "#/$defs/typeExpr" },
+        "required": { "type": "boolean", "default": true },
+        "description": { "type": "string" },
+        "constraints": { "$ref": "#/$defs/constraints" }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "type": { "$ref": "#/$defs/typeExpr" },
+        "required": { "type": "boolean" },
+        "description": { "type": "string" }
+      }
+    },
+    "invariant": {
+      "type": "object",
+      "required": ["name", "expression", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "description": { "type": "string" },
+        "expression": { "$ref": "#/$defs/expression" },
+        "error": { "$ref": "#/$defs/pascal" },
+        "check_on": { "type": "array", "items": { "enum": ["construct", "transition"] }, "minItems": 1 }
+      }
+    },
+    "emission": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/pascal" },
+        "when": { "$ref": "#/$defs/expression" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/snake" },
+              {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": { "name": { "$ref": "#/$defs/snake" }, "value": { "$ref": "#/$defs/expression" } }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "exprMap": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expression" } },
+    "require": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "entity": {
+      "type": "object",
+      "required": ["name", "identity", "fields"],
+      "properties": {
+        "name": { "$ref": "#/$defs/pascal" },
+        "description": { "type": "string" },
+        "identity": { "$ref": "#/$defs/snake" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+        "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } }
+      }
+    },
+    "aggregate": {
+      "allOf": [{ "$ref": "#/$defs/entity" }],
+      "unevaluatedProperties": false,
+      "properties": {
+        "entities": {
+          "type": "array",
+          "items": { "allOf": [{ "$ref": "#/$defs/entity" }], "unevaluatedProperties": false }
+        },
+        "state_guards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "expression", "error"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/snake" },
+              "description": { "type": "string" },
+              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
+              "expression": { "$ref": "#/$defs/expression" },
+              "error": { "$ref": "#/$defs/pascal" }
+            }
+          }
+        },
+        "factories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "fields"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/snake" },
+              "description": { "type": "string" },
+              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
+              "require": { "$ref": "#/$defs/require" },
+              "fields": { "$ref": "#/$defs/exprMap" },
+              "emits": { "type": "array", "items": { "$ref": "#/$defs/emission" } }
+            }
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/snake" },
+              "description": { "type": "string" },
+              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
+              "require": { "$ref": "#/$defs/require" },
+              "changes": { "$ref": "#/$defs/exprMap" },
+              "emits": { "type": "array", "items": { "$ref": "#/$defs/emission" } }
+            }
+          }
+        },
+        "scenarios": { "type": "array", "items": { "$ref": "#/$defs/aggregateScenario" } }
+      }
+    },
+    "then": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "raises": { "$ref": "#/$defs/pascal" },
+        "returns": {},
+        "state": {},
+        "emits": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/pascal" },
+              {
+                "type": "object",
+                "required": ["event"],
+                "additionalProperties": false,
+                "properties": { "event": { "$ref": "#/$defs/pascal" }, "fields": { "type": "object" } }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "aggregateScenario": {
+      "type": "object",
+      "required": ["name", "when", "then"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "description": { "type": "string" },
+        "given": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "aggregate": { "type": "object" } }
+        },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "construct": { "type": "object" },
+            "operation": { "$ref": "#/$defs/snake" },
+            "factory": { "$ref": "#/$defs/snake" },
+            "args": { "type": "object" }
+          }
+        },
+        "then": { "$ref": "#/$defs/then" }
+      }
+    },
+    "useCaseScenario": {
+      "type": "object",
+      "required": ["name", "when", "then"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "description": { "type": "string" },
+        "given": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clock": { "type": "string" },
+            "ids": { "type": "array", "items": { "type": "string" } },
+            "aggregates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["type", "fields"],
+                "additionalProperties": false,
+                "properties": { "type": { "$ref": "#/$defs/pascal" }, "fields": { "type": "object" } }
+              }
+            },
+            "extensions": { "type": "object" }
+          }
+        },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "input": { "type": "object" } }
+        },
+        "then": { "$ref": "#/$defs/then" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "load": {
+          "type": "object",
+          "required": ["aggregate", "by", "as"],
+          "additionalProperties": false,
+          "properties": {
+            "aggregate": { "$ref": "#/$defs/pascal" },
+            "by": { "$ref": "#/$defs/expression" },
+            "as": { "$ref": "#/$defs/snake" },
+            "not_found": { "$ref": "#/$defs/pascal" }
+          }
+        },
+        "create": {
+          "type": "object",
+          "required": ["aggregate", "factory", "as"],
+          "additionalProperties": false,
+          "properties": {
+            "aggregate": { "$ref": "#/$defs/pascal" },
+            "factory": { "$ref": "#/$defs/snake" },
+            "as": { "$ref": "#/$defs/snake" },
+            "args": { "$ref": "#/$defs/exprMap" }
+          }
+        },
+        "invoke": {
+          "type": "object",
+          "required": ["target", "operation"],
+          "additionalProperties": false,
+          "properties": {
+            "target": { "$ref": "#/$defs/snake" },
+            "operation": { "$ref": "#/$defs/snake" },
+            "args": { "$ref": "#/$defs/exprMap" }
+          }
+        },
+        "save": { "$ref": "#/$defs/snake" },
+        "publish": { "$ref": "#/$defs/pascal" },
+        "publish_after_commit": { "$ref": "#/$defs/pascal" },
+        "fail": { "$ref": "#/$defs/pascal" },
+        "return": { "$ref": "#/$defs/expression" },
+        "if": {
+          "type": "object",
+          "required": ["condition", "then"],
+          "additionalProperties": false,
+          "properties": {
+            "condition": { "$ref": "#/$defs/expression" },
+            "then": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+            "else": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/pascal" },
+        "description": { "type": "string" },
+        "glossary": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["term", "definition"],
+            "additionalProperties": false,
+            "properties": { "term": { "type": "string" }, "definition": { "type": "string" } }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/pascal" },
+              "code": { "$ref": "#/$defs/snake" },
+              "message": { "type": "string" },
+              "description": { "type": "string" },
+              "details": { "type": "array", "items": { "$ref": "#/$defs/field" } }
+            }
+          }
+        },
+        "enums": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "values"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/pascal" },
+              "description": { "type": "string" },
+              "values": { "type": "array", "items": { "$ref": "#/$defs/snake" }, "minItems": 1 }
+            }
+          }
+        },
+        "value_objects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "fields"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/pascal" },
+              "description": { "type": "string" },
+              "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+              "normalize": {
+                "type": "object",
+                "additionalProperties": { "type": "array", "items": { "enum": ["strip", "lower", "upper"] } }
+              },
+              "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } }
+            }
+          }
+        },
+        "aggregates": { "type": "array", "items": { "$ref": "#/$defs/aggregate" } },
+        "extension_points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "returns"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/snake" },
+              "description": { "type": "string" },
+              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
+              "returns": { "$ref": "#/$defs/typeExpr" },
+              "test_default": {}
+            }
+          }
+        },
+        "use_cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/snake" },
+              "description": { "type": "string" },
+              "actor": { "type": "string" },
+              "command": { "$ref": "#/$defs/pascal" },
+              "input": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+              "transaction": { "enum": ["required", "none"] },
+              "idempotency_key": { "$ref": "#/$defs/snake" },
+              "retry": { "type": "boolean" },
+              "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+              "scenarios": { "type": "array", "items": { "$ref": "#/$defs/useCaseScenario" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
