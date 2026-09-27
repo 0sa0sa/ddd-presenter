@@ -24,7 +24,10 @@ class CleaningStaffInvitationRepository(Protocol):
 
 
 class Clock(Protocol):
-    """Source of the current time. Rules never read a hidden global clock."""
+    """Source of the current time. Rules never read a hidden global clock.
+
+    Must return a timezone-aware datetime (see adapters.SystemClock); model DateTime fields reject naive values.
+    """
 
     def now(self) -> datetime: ...
 

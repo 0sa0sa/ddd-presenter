@@ -32,7 +32,9 @@ export function portsFile(L: Layout): PyFile {
   c.line().line();
   c.line("class Clock(Protocol):");
   c.indent(() => {
-    c.docstring("Source of the current time. Rules never read a hidden global clock.");
+    c.docstring(
+      "Source of the current time. Rules never read a hidden global clock.\n\nMust return a timezone-aware datetime (see adapters.SystemClock); model DateTime fields reject naive values.",
+    );
     c.line();
     c.line("def now(self) -> datetime: ...");
   });

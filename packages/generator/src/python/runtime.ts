@@ -136,3 +136,23 @@ class StateGuard:
     def __bool__(self) -> bool:
         raise TypeError(f"Use {self.name}(...).checks() or .assert_holds() instead of truth-testing a StateGuard")
 `;
+
+export const ADAPTERS_PY = `from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
+
+class SystemClock:
+    """Clock backed by the system time. Always returns an aware UTC datetime."""
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class RandomIds:
+    """IdGenerator producing random UUID4 identities."""
+
+    def new_id(self) -> UUID:
+        return uuid4()
+`;

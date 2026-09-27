@@ -14,6 +14,10 @@
       "sha256": "732e85a6fbf79026857ebe22c650a7434bcabcf96d1bf6b353fcf17f3d46ddb2"
     },
     {
+      "path": "src/cleaning_platform/generated/adapters.py",
+      "sha256": "f165e65ded98b3fd00f50ee04388ce5746bc28ad952adc2a65b16855935116bd"
+    },
+    {
       "path": "src/cleaning_platform/generated/cleaning_staff/__init__.py",
       "sha256": "1d244a2a525502efa3c67b6ad4503de67346d66477e523427dd73c722e28e19c"
     },
@@ -23,7 +27,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/application/ports.py",
-      "sha256": "229b6689362d9ce3c8b850fc1429ef3baeab1e30576535d3481f6eb6f3b1c30f"
+      "sha256": "3fd0a2405df15e19ebb4fb271240cacf88d4c39be7e501836143eb93d412003b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/application/use_cases.py",

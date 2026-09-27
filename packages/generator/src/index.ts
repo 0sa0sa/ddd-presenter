@@ -4,7 +4,7 @@ import { portsFile, resolveReturn, useCasesFile } from "./python/application.ts"
 import { contextReadme } from "./python/docs.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, paramTypes, rulesFile, valueObjectsFile } from "./python/domain.ts";
 import { assemble, header, Layout, ModuleImports } from "./python/layout.ts";
-import { RUNTIME_PY } from "./python/runtime.ts";
+import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
 
@@ -68,6 +68,7 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   scaffold(`${src}/${pkg}/__init__.py`, `"""${model.project}${model.description ? ` — ${model.description}` : ""}"""\n`);
   gen(`${src}/${pkg}/generated/__init__.py`, initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
   gen(`${src}/${pkg}/generated/_runtime.py`, `${header(model)}\n\n"""Base classes shared by the generated domain code (Pydantic v2 + stdlib only)."""\n\n${RUNTIME_PY}`);
+  gen(`${src}/${pkg}/generated/adapters.py`, `${header(model)}\n\n"""Reference adapters for the clock and id ports (structurally typed; usable in every context)."""\n\n${ADAPTERS_PY}`);
 
   for (const ca of analysis.contexts.values()) {
     const L = new Layout(model, ca);

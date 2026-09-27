@@ -169,3 +169,43 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     }
   }, 60_000);
 });
+
+describe("multiple bounded contexts", () => {
+  const TWO = `schema_version: 1
+project: shop
+contexts:
+  - name: Sales
+    errors: [{ name: Invalid, code: invalid, message: invalid }]
+    aggregates:
+      - name: Order
+        identity: id
+        fields: [{ name: id, type: UUID }, { name: total, type: Integer }]
+        invariants: [{ name: positive, expression: total > 0, error: Invalid }]
+    extension_points:
+      - { name: allowed, parameters: [{ name: total, type: Integer }], returns: Boolean, test_default: true }
+  - name: Billing
+    errors: [{ name: Invalid, code: invalid, message: invalid }]
+    aggregates:
+      - name: Invoice
+        identity: id
+        fields: [{ name: id, type: UUID }, { name: order_id, type: UUID }]
+    extension_points:
+      - { name: allowed, parameters: [], returns: Boolean, test_default: true }
+`;
+
+  test("shared runtime is emitted once, contexts get separate packages and scaffolds", () => {
+    const out = generate(TWO);
+    const paths = out.files.map((f) => f.path);
+    expect(paths.filter((p) => p.endsWith("_runtime.py"))).toEqual(["src/shop/generated/_runtime.py"]);
+    expect(paths.filter((p) => p === "src/shop/extensions/__init__.py").length).toBe(1);
+    expect(paths).toContain("src/shop/generated/sales/domain/aggregates.py");
+    expect(paths).toContain("src/shop/generated/billing/domain/aggregates.py");
+    expect(paths).toContain("src/shop/extensions/billing/extensions.py");
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  test("a type from another context cannot be referenced directly", () => {
+    const r = validateModelText(TWO.replace("{ name: order_id, type: UUID }", "{ name: order, type: Order }"));
+    expect(r.diagnostics.find((d) => d.severity === "error")?.code).toBe("unknown-type");
+  });
+});
