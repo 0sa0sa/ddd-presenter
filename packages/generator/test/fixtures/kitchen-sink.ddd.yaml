@@ -1,0 +1,192 @@
+schema_version: 1
+project: kitchen-sink
+generation:
+  package: kitchen_sink
+
+contexts:
+  - name: Ordering
+    errors:
+      - { name: InvalidOrder, code: invalid_order, message: invalid order }
+      - { name: OrderClosed, code: order_closed, message: order is closed }
+      - { name: OrderNotFound, code: order_not_found, message: not found }
+      - name: CreditRejected
+        code: credit_rejected
+        message: credit rejected
+        details: [{ name: limit, type: Decimal }]
+    enums:
+      - { name: OrderStatus, values: [open, placed, cancelled] }
+    value_objects:
+      - name: Money
+        fields:
+          - { name: amount, type: Decimal, constraints: { min: 0, max_digits: 12, decimal_places: 2 } }
+          - { name: currency, type: String, constraints: { min_length: 3, max_length: 3 } }
+        normalize: { currency: [strip, upper] }
+        invariants:
+          - { name: no_fractional_yen, expression: 'currency != "JPY" or amount >= 0', error: InvalidOrder }
+      - name: Address
+        fields:
+          - { name: lines, type: "List[String]", constraints: { min_items: 1, max_items: 3 } }
+          - { name: postal_code, type: String, required: false }
+    aggregates:
+      - name: Customer
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: name, type: String }
+      - name: Order
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: customer_id, type: "Ref[Customer]" }
+          - { name: status, type: OrderStatus }
+          - { name: lines, type: "List[OrderLine]" }
+          - { name: total, type: Money }
+          - { name: delivery_date, type: Date, required: false }
+          - { name: note, type: String, required: false }
+          - { name: revision, type: Integer }
+        entities:
+          - name: OrderLine
+            identity: line_id
+            fields:
+              - { name: line_id, type: Integer }
+              - { name: sku, type: String }
+              - { name: quantity, type: Integer, constraints: { min: 1 } }
+            invariants:
+              - { name: reasonable_quantity, expression: quantity <= 100, error: InvalidOrder }
+        invariants:
+          - { name: has_lines, expression: not is_empty(lines), error: InvalidOrder }
+          - name: revision_grows
+            expression: revision > 0
+            error: InvalidOrder
+            check_on: [transition]
+        state_guards:
+          - { name: is_open, expression: status == open, error: OrderClosed }
+          - name: deliverable_on
+            parameters: [{ name: day, type: Date }]
+            expression: delivery_date == null or delivery_date <= day
+            error: InvalidOrder
+        factories:
+          - name: start
+            parameters:
+              - { name: id, type: UUID }
+              - { name: customer_id, type: "Ref[Customer]" }
+              - { name: lines, type: "List[OrderLine]" }
+              - { name: total, type: Money }
+              - { name: note, type: String, required: false }
+            fields: { id: id, customer_id: customer_id, status: open, lines: lines, total: total, note: note, revision: 0 }
+            emits:
+              - name: OrderStarted
+                fields: [id, customer_id, { name: line_count, value: length(lines) }]
+        operations:
+          - name: place
+            require: [is_open]
+            changes: { status: placed }
+            emits:
+              - { name: OrderPlaced, fields: [id] }
+              - name: BigOrderPlaced
+                when: length(lines) > 1
+                fields: [id, { name: vip, value: length(lines) > 1 }]
+          - name: annotate
+            parameters: [{ name: text, type: String, required: false }]
+            changes: { note: text, revision: 1 }
+          - name: ping
+            emits: [{ name: OrderPinged, fields: [id, status] }]
+        scenarios:
+          - name: order_needs_lines
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [], total: { amount: 0, currency: jpy }, revision: 0 }
+            then: { raises: InvalidOrder }
+          - name: line_quantity_is_checked
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 101 }], total: { amount: 0, currency: jpy }, revision: 0 }
+            then: { raises: InvalidOrder }
+          - name: money_constraints_are_enforced
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: "1.234", currency: jpy }, revision: 0 }
+            then: { raises: ConstraintViolation }
+          - name: start_counts_lines
+            when:
+              factory: start
+              args: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", lines: [{ line_id: 1, sku: A, quantity: 2 }, { line_id: 2, sku: B, quantity: 1 }], total: { amount: "10.50", currency: " usd " } }
+            then:
+              state: { status: open, total: { amount: "10.50", currency: USD }, note: null }
+              emits: [{ event: OrderStarted, fields: { line_count: 2 } }]
+          - name: placing_a_big_order_emits_two_events
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }, { line_id: 2, sku: B, quantity: 1 }], total: { amount: 5, currency: USD }, revision: 1 }
+            when: { operation: place }
+            then:
+              state: { status: placed, revision: 1 }
+              emits: [{ event: OrderPlaced }, { event: BigOrderPlaced, fields: { vip: true } }]
+          - name: transition_only_invariant_blocks_bad_revision
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: 5, currency: USD }, revision: -5 }
+            when: { operation: place }
+            then: { raises: InvalidOrder }
+          - name: annotate_clears_note
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: placed, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: 5, currency: USD }, note: old, revision: 3 }
+            when: { operation: annotate }
+            then: { state: { note: null, revision: 1 } }
+          - name: ping_emits_status
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: cancelled, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: 5, currency: USD }, delivery_date: "2026-03-01", revision: 3 }
+            when: { operation: ping }
+            then: { emits: [{ event: OrderPinged, fields: { status: cancelled } }] }
+    extension_points:
+      - name: credit_ok
+        parameters: [{ name: amount, type: Money }]
+        returns: Boolean
+    use_cases:
+      - name: place_order
+        command: PlaceOrder
+        input:
+          - { name: order_id, type: UUID }
+          - { name: on, type: Date }
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order, not_found: OrderNotFound }
+          - if:
+              condition: not credit_ok(order.total) or not order.deliverable_on(on)
+              then: [{ fail: CreditRejected }]
+          - invoke: { target: order, operation: place }
+          - save: order
+          - publish: BigOrderPlaced
+          - publish_after_commit: OrderPlaced
+        scenarios:
+          - name: credit_rejection_stops_the_order
+            given:
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: 5, currency: USD }, revision: 1 } }]
+              extensions: { credit_ok: false }
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001", on: "2026-01-01" } }
+            then:
+              raises: CreditRejected
+              emits: []
+              state: [{ aggregate: Order, id: "00000000-0000-0000-0000-000000000001", fields: { status: open } }]
+          - name: big_order_publishes_immediately_then_after_commit
+            given:
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }, { line_id: 2, sku: B, quantity: 3 }], total: { amount: 5, currency: USD }, revision: 1 } }]
+              extensions: { credit_ok: true }
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001", on: "2026-01-01" } }
+            then:
+              state: [{ aggregate: Order, id: "00000000-0000-0000-0000-000000000001", fields: { status: placed } }]
+              emits: [{ event: BigOrderPlaced }, { event: OrderPlaced }]
+      - name: ping_order
+        command: PingOrder
+        transaction: none
+        input: [{ name: order_id, type: UUID }]
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order }
+          - invoke: { target: order, operation: ping }
+          - publish: OrderPinged
+          - return: order.revision
+        scenarios:
+          - name: ping_without_transaction
+            given:
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", customer_id: "00000000-0000-0000-0000-0000000000c1", status: open, lines: [{ line_id: 1, sku: A, quantity: 1 }], total: { amount: 5, currency: USD }, revision: 7 } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001" } }
+            then:
+              returns: 7
+              emits: [{ event: OrderPinged, fields: { status: open } }]
+          - name: missing_order_uses_generic_not_found
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000009" } }
+            then: { raises: AggregateNotFound }

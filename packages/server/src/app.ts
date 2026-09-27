@@ -165,15 +165,6 @@ export function createApp(db: Database, options: AppOptions = {}) {
     return c.json({ ok: true });
   });
 
-  // Stateless validation: same core function as the CLI (FR-030 / FR-034 parity).
-  app.post("/api/validate", async (c) => {
-    const { yaml } = await body<{ yaml?: string }>(c);
-    if (typeof yaml !== "string") fail(400, "yaml is required");
-    checkModelSize(yaml!);
-    const r = validateModelText(yaml!);
-    return c.json({ ok: r.ok, diagnostics: r.diagnostics, rules: r.analysis ? ruleUsage(r.analysis) : [] });
-  });
-
   app.use("/api/*", async (c, next) => {
     const token = getCookie(c, SESSION_COOKIE);
     const user = token
@@ -184,6 +175,15 @@ export function createApp(db: Database, options: AppOptions = {}) {
     if (!user) fail(401, "Not logged in");
     c.set("user", user!);
     await next();
+  });
+
+  // Stateless validation: same core function as the CLI (FR-030 / FR-034 parity).
+  app.post("/api/validate", async (c) => {
+    const { yaml } = await body<{ yaml?: string }>(c);
+    if (typeof yaml !== "string") fail(400, "yaml is required");
+    checkModelSize(yaml!);
+    const r = validateModelText(yaml!);
+    return c.json({ ok: r.ok, diagnostics: r.diagnostics, rules: r.analysis ? ruleUsage(r.analysis) : [] });
   });
 
   app.get("/api/me", (c) => {

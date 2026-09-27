@@ -215,8 +215,10 @@ describe("models", () => {
 
 describe("validation parity (FR-030 / FR-034)", () => {
   test("POST /api/validate returns exactly what the CLI's core returns", async () => {
+    expect((await app.request("/api/validate", { method: "POST", body: "{}" })).status).toBe(401);
+    const s = await login("alice");
     for (const text of [SAMPLE, SAMPLE.replace("error: InvalidInvitationWindow", "error: Nope"), "schema_version: 1\ncontexts: ["]) {
-      const res = await app.request("/api/validate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ yaml: text }) });
+      const res = await s.call("POST", "/api/validate", { yaml: text });
       const body = (await res.json()) as any;
       const local = validateModelText(text);
       expect(body.ok).toBe(local.ok);

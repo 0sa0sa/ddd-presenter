@@ -148,11 +148,16 @@ describe("expression emission", () => {
 
 const VENV = join(EXAMPLE, ".venv/bin/python");
 
+const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.ddd.yaml"), "utf8");
+
 describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
-  test("pytest and mypy --strict pass on a fresh generation", () => {
+  test.each([
+    ["the sample model", MODEL],
+    ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
+  ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-gen-"));
     try {
-      const out = generate();
+      const out = generate(modelText);
       for (const f of out.files) {
         mkdirSync(dirname(join(dir, f.path)), { recursive: true });
         writeFileSync(join(dir, f.path), f.content);

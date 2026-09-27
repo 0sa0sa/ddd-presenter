@@ -441,9 +441,6 @@ class ContextValidator {
       if (fields.has(inv.name)) this.bag.error("duplicate-name", `Invariant "${inv.name}" has the same name as a field`, [...inv.path, "name"], { element: iel });
       this.checkErrorRef(inv.error, [...inv.path, "error"], iel);
       if (inv.checkOn.length === 0) this.bag.error("invalid-value", "check_on must list at least one timing", [...inv.path, "check_on"], { element: iel });
-      if (valueObject && inv.checkOn.includes("transition")) {
-        this.bag.info("value-object-immutable", "Value objects never transition; the invariant is checked on construction", [...inv.path, "check_on"], { element: iel });
-      }
       if (!valueObject && inv.checkOn.length === 1 && inv.checkOn[0] === "construct") {
         this.bag.info(
           "construct-implies-transition",
@@ -897,7 +894,7 @@ class ContextValidator {
           }
           this.checkArgs(ag, op.name, op.parameters, step.args, [...step.path, "args"], state, info, el);
           for (const em of op.emits) state.produced.add(em.name);
-          state.dirty.set(step.target, step.path);
+          if (Object.keys(op.changes).length) state.dirty.set(step.target, step.path);
           (state.aggregatesTouched ??= new Set()).add(ag.name);
           break;
         }
@@ -1099,7 +1096,7 @@ class ContextValidator {
   }
 
   checkThenCommon(then: ScenarioThenIR, el: string): void {
-    if (then.raises !== undefined && then.raises !== "ConstraintViolation") this.checkErrorRef(then.raises, [...then.path, "raises"], el);
+    if (then.raises !== undefined && !["ConstraintViolation", "AggregateNotFound"].includes(then.raises)) this.checkErrorRef(then.raises, [...then.path, "raises"], el);
     const empty = then.raises === undefined && then.state === undefined && then.emits === undefined && !then.hasReturns;
     if (empty) {
       this.bag.error("ambiguous-scenario", "then states no expected result", then.path, {

@@ -1,4 +1,4 @@
-# Implementation Plan
+# Implementation Milestones (all completed)
 
 決定事項は docs/09-implementation-decisions.md。各マイルストーンは検証してからコミットする。
 

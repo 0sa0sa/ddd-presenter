@@ -237,7 +237,7 @@ export function aggregateTestFile(L: Layout, ag: AggregateIR): PyFile | undefine
 }
 
 function importError(L: Layout, imp: Imports, name: string): void {
-  if (name === "ConstraintViolation") imp.from(L.runtime, name);
+  if (name === "ConstraintViolation" || name === "AggregateNotFound") imp.from(L.runtime, name);
   else imp.from(L.mod("errors"), name);
 }
 
