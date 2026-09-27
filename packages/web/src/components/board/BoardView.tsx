@@ -303,7 +303,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.closest("input, textarea, select, [contenteditable=true], .cm-editor")) return;
+      if (t.closest("input, textarea, select, button, a, [role=tab], [contenteditable=true], .cm-editor, .modal")) return;
       if (!document.querySelector(".board-canvas")) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {

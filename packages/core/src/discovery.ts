@@ -566,7 +566,17 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
   const parsed = parseModel(currentYaml);
   if (!parsed.model) return { ok: false, names: allNames, missing: [], skipped, diagnostics: parsed.diagnostics, error: "現在のモデルを読み込めません（YAMLの構文エラーを直してから反映します）", summary };
   const model = parsed.model;
-  const isEmpty = model.contexts.every((c) => c.aggregates.length === 0 && c.useCases.length === 0);
+  // Only the untouched template may be replaced; anything the team already wrote is kept.
+  const isEmpty = model.contexts.every(
+    (c) =>
+      c.aggregates.length === 0 &&
+      c.useCases.length === 0 &&
+      c.errors.length === 0 &&
+      c.enums.length === 0 &&
+      c.valueObjects.length === 0 &&
+      c.extensionPoints.length === 0 &&
+      c.glossary.length === 0,
+  );
 
   const ops: EditOp[] = [];
   const doc = parseDocument(currentYaml);
@@ -689,6 +699,8 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
     }
     if (existingCtx) {
       const base = ctxPath(ctxIndex!);
+      const knownTerms = new Set(existingCtx.glossary.map((g) => g.term));
+      for (const g of dedupe(glossary)) if (!knownTerms.has(String(g.term))) ops.push({ op: "add", path: [...base, "glossary"], value: g });
       for (const e of errors) ops.push({ op: "add", path: [...base, "errors"], value: e });
       for (const a of aggregatesOut) ops.push({ op: "add", path: [...base, "aggregates"], value: a });
       for (const u of useCasesOut) ops.push({ op: "add", path: [...base, "use_cases"], value: clean(u) });

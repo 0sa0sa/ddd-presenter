@@ -74,6 +74,23 @@ describe("structural edits", () => {
     expect(validateModelText(text).ok).toBe(true);
   });
 
+  test("renames touch only the lines that mention the name (reviewable diffs)", () => {
+    for (const op of [
+      { op: "renameType", context: "CleaningStaff", from: "InvitationNotDeliverable", to: "InvitationClosed" },
+      { op: "renameGuard", context: "CleaningStaff", aggregate: "CleaningStaffInvitation", from: "is_open", to: "still_open" },
+    ] as const) {
+      const r = applyEdits(SAMPLE, [op]);
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      const before = SAMPLE.split("\n");
+      const after = r.text.split("\n");
+      expect(after.length).toBe(before.length);
+      const changed = before.filter((l, i) => l !== after[i]);
+      expect(changed.length).toBeGreaterThan(0);
+      expect(changed.every((l) => l.includes(op.from))).toBe(true);
+    }
+  });
+
   test("invalid operations report errors instead of corrupting the text", () => {
     const r = applyEdits(SAMPLE, [{ op: "renameType", context: "CleaningStaff", from: "Nope", to: "X" }]);
     expect(r.ok).toBe(false);

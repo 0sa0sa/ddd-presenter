@@ -17,16 +17,56 @@ export type EditOp =
 
 export type EditResult = { ok: true; text: string } | { ok: false; error: string };
 
+/**
+ * Applies operations in order. Renames only replace scalar values, so they are applied as
+ * minimal text replacements (the rest of the file is untouched, which keeps diffs reviewable).
+ * Structural operations (set / add / remove) round-trip the document through the YAML library.
+ */
 export function applyEdits(text: string, ops: EditOp[]): EditResult {
-  const doc = parseDocument(text, { keepSourceTokens: false });
-  if (doc.errors.length) return { ok: false, error: `The model has YAML syntax errors: ${doc.errors[0]!.message.split("\n")[0]}` };
+  let current = text;
   try {
-    for (const op of ops) apply(doc, op);
+    for (let i = 0; i < ops.length; ) {
+      const op = ops[i]!;
+      const doc = parseDocument(current, { keepSourceTokens: false });
+      if (doc.errors.length) return { ok: false, error: `The model has YAML syntax errors: ${doc.errors[0]!.message.split("\n")[0]}` };
+      if (op.op === "renameType" || op.op === "renameGuard") {
+        const edits: TextEdit[] = [];
+        const replace = (node: Scalar, value: string) => {
+          if (!node.range) throw new Error("Cannot locate a value to rename");
+          const raw = current.slice(node.range[0], node.range[1]);
+          const old = String(node.value);
+          // Plain scalars are replaced whole; quoted / block scalars keep their quoting.
+          edits.push({ from: node.range[0], to: node.range[1], text: raw === old ? value : raw.split(old).join(value) });
+        };
+        if (op.op === "renameType") renameType(doc, op.context, op.from, op.to, replace);
+        else renameGuard(doc, op.context, op.aggregate, op.from, op.to, replace);
+        current = applyTextEdits(current, edits);
+        i++;
+        continue;
+      }
+      // Batch consecutive structural operations into one round-trip.
+      while (i < ops.length && ops[i]!.op !== "renameType" && ops[i]!.op !== "renameGuard") apply(doc, ops[i++]!);
+      current = doc.toString({ lineWidth: 0, flowCollectionPadding: false });
+    }
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
-  return { ok: true, text: doc.toString({ lineWidth: 0, flowCollectionPadding: false }) };
+  return { ok: true, text: current };
 }
+
+interface TextEdit {
+  from: number;
+  to: number;
+  text: string;
+}
+
+function applyTextEdits(text: string, edits: TextEdit[]): string {
+  let out = text;
+  for (const e of [...edits].sort((a, b) => b.from - a.from)) out = out.slice(0, e.from) + e.text + out.slice(e.to);
+  return out;
+}
+
+type Replace = (node: Scalar, value: string) => void;
 
 function apply(doc: Document, op: EditOp): void {
   switch (op.op) {
@@ -55,9 +95,8 @@ function apply(doc: Document, op: EditOp): void {
       doc.deleteIn(op.path);
       return;
     case "renameType":
-      return renameType(doc, op.context, op.from, op.to);
     case "renameGuard":
-      return renameGuard(doc, op.context, op.aggregate, op.from, op.to);
+      throw new Error("renames are applied as text edits");
   }
 }
 
@@ -129,7 +168,7 @@ function nearestKeys(path: Ancestors): string[] {
   return path.filter(isPair).map((p) => keyOf(p) ?? "");
 }
 
-function renameType(doc: Document, context: string, from: string, to: string): void {
+function renameType(doc: Document, context: string, from: string, to: string, replace: Replace): void {
   if (!IDENT.test(to)) throw new Error(`"${to}" is not a valid name`);
   const ctx = findContext(doc, context);
   let definitions = 0;
@@ -143,27 +182,27 @@ function renameType(doc: Document, context: string, from: string, to: string): v
       if (key === "name" && v === from) {
         const collection = keys[keys.length - 2];
         if (["errors", "enums", "value_objects", "aggregates", "entities", "emits"].includes(collection ?? "")) {
-          node.value = to;
+          replace(node, to);
           definitions++;
         }
         return;
       }
       if (key === "type" || key === "returns") {
-        node.value = replaceToken(v, from, to);
+        if (replaceToken(v, from, to) !== v) replace(node, replaceToken(v, from, to));
         return;
       }
       if (["aggregate", "error", "not_found", "raises", "fail", "publish", "publish_after_commit", "event", "command"].includes(key ?? "") && v === from) {
-        node.value = to;
+        replace(node, to);
         if (key === "command") definitions++;
         return;
       }
-      if (isExpressionPosition(keys)) node.value = replaceToken(v, from, to);
+      if (isExpressionPosition(keys) && replaceToken(v, from, to) !== v) replace(node, replaceToken(v, from, to));
     },
   });
   if (definitions === 0) throw new Error(`No type named ${from} in context ${context}`);
 }
 
-function renameGuard(doc: Document, context: string, aggregate: string, from: string, to: string): void {
+function renameGuard(doc: Document, context: string, aggregate: string, from: string, to: string, replace: Replace): void {
   if (!/^[a-z][a-z0-9_]*$/.test(to)) throw new Error(`"${to}" must be snake_case`);
   const ctx = findContext(doc, context);
   const aggs = (ctx as unknown as { get: (k: string, keep: boolean) => unknown }).get("aggregates", true);
@@ -173,11 +212,14 @@ function renameGuard(doc: Document, context: string, aggregate: string, from: st
   const guards = agg.get("state_guards", true);
   const guard = isSeq(guards) ? guards.items.find((g) => isMap(g) && g.get("name") === from) : undefined;
   if (!isMap(guard)) throw new Error(`${aggregate} has no state guard ${from}`);
-  guard.set("name", to);
+  const nameNode = guard.get("name", true);
+  if (!isScalar(nameNode)) throw new Error(`${aggregate}.${from} has no name`);
+  replace(nameNode, to);
   // require lists of the aggregate's operations
   visit(agg, {
     Scalar(_k, node: Scalar, path) {
-      if (typeof node.value === "string" && nearestKeys(path).includes("require")) node.value = replaceToken(node.value, from, to);
+      if (node === nameNode) return;
+      if (typeof node.value === "string" && nearestKeys(path).includes("require") && replaceToken(node.value, from, to) !== node.value) replace(node, replaceToken(node.value, from, to));
     },
   });
   // use case conditions / returns / args in the same context (receiver.guard(...) syntax)
@@ -189,9 +231,10 @@ function renameGuard(doc: Document, context: string, aggregate: string, from: st
         const keys = nearestKeys(path);
         const key = keys[keys.length - 1] ?? "";
         if (["condition", "return"].includes(key) || keys[keys.length - 2] === "args") {
-          node.value = node.value.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\.([A-Za-z_][A-Za-z0-9_]*)\b/g, (m, str, name) =>
+          const next = node.value.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\.([A-Za-z_][A-Za-z0-9_]*)\b/g, (m, str, name) =>
             str ? m : name === from ? `.${to}` : m,
           );
+          if (next !== node.value) replace(node, next);
         }
       },
     });

@@ -175,6 +175,27 @@ describe("board → model", () => {
     expect(again.ok).toBe(true);
   });
 
+  test("vocabulary written before the board is kept (errors, enums, glossary)", () => {
+    const withVocabulary = EMPTY_MODEL.replace(
+      "    errors: []",
+      `    glossary:
+      - { term: 招待, definition: スタッフ候補への参加依頼 }
+    errors:
+      - { name: Blocked, code: blocked, message: blocked }
+    enums:
+      - { name: Channel, values: [email, sms] }`,
+    ).replace("  - name: Core", "  - name: StaffInvitation");
+    const r = boardToModel(sampleBoard(), withVocabulary);
+    expect(r.ok).toBe(true);
+    const ctx = validateModelText(r.yaml!).model!.contexts.find((c) => c.name === "StaffInvitation")!;
+    expect(ctx.errors.map((e) => e.name)).toEqual(["Blocked", "InvitationNotFound"]);
+    expect(ctx.enums.map((e) => e.name)).toEqual(["Channel"]);
+    // The team's own definition wins; new labels are still added to the glossary.
+    expect(ctx.glossary.find((g) => g.term === "招待")!.definition).toBe("スタッフ候補への参加依頼");
+    expect(ctx.glossary.map((g) => g.term)).toContain("招待が受諾された");
+    expect(ctx.aggregates.map((a) => a.name)).toEqual(["Invitation"]);
+  });
+
   test("a board without aggregates cannot be reflected", () => {
     const r = boardToModel({ ...emptyBoard(), items: [{ id: "e", kind: "event", text: "x happened", x: 0, y: 0, w: 1, h: 1 }] }, EMPTY_MODEL);
     expect(r.ok).toBe(false);
