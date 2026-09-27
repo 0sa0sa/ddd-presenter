@@ -7,3 +7,4 @@ __pycache__/
 *.sqlite-*
 dist/
 .DS_Store
+packages/server/data/

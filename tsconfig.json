@@ -6,11 +6,22 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
-    "types": ["bun-types"],
+    "types": [
+      "bun-types"
+    ],
     "jsx": "react-jsx",
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["packages/core/src", "packages/generator/src", "packages/cli/src", "packages/core/test", "packages/generator/test", "packages/cli/test"]
+  "include": [
+    "packages/core/src",
+    "packages/core/test",
+    "packages/generator/src",
+    "packages/generator/test",
+    "packages/cli/src",
+    "packages/cli/test",
+    "packages/server/src",
+    "packages/server/test"
+  ]
 }

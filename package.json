@@ -1,11 +1,15 @@
 {
   "name": "ddd-presenter",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "bun test packages",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "ddd": "bun packages/cli/src/main.ts"
+    "ddd": "bun packages/cli/src/main.ts",
+    "dev:server": "bun --watch packages/server/src/main.ts",
+    "start": "bun packages/server/src/main.ts"
   },
   "devDependencies": {
     "bun-types": "^1.4.2",
