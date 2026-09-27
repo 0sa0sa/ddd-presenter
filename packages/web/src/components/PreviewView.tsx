@@ -98,7 +98,7 @@ export function PreviewView({ projectId, version, dirty }: { projectId: string; 
 
   return (
     <div className="preview">
-      <div className="file-list" aria-label="生成されるファイル">
+      <div className="file-list" aria-label="生成されるファイル" data-tour="preview-files">
         <div className="stack" style={{ padding: 12, gap: 8 }}>
           <p className="small">
             v{preview.version} の生成結果{preview.base_version ? `（v${preview.base_version} との比較）` : "（初回）"}

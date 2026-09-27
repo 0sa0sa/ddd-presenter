@@ -2,7 +2,9 @@ import type { Board, ModelIR } from "@ddd/core";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.ts";
 import { href } from "../App.tsx";
+import { TOURS } from "../lib/tour.ts";
 import { nextStep, TUTORIAL_STEPS, tutorialProgress, tutorialStore, type TutorialTab } from "../lib/tutorial.ts";
+import { Spotlight } from "./Spotlight.tsx";
 
 const TAB_LABEL: Record<TutorialTab, string> = {
   discovery: "ディスカバリー",
@@ -37,6 +39,7 @@ export function TutorialCoach({
   const [store, setStore] = useState(() => tutorialStore.get());
   const [openId, setOpenId] = useState<string>();
   const [copied, setCopied] = useState<string>();
+  const [tour, setTour] = useState<{ stepId: string; index: number }>();
 
   // The board lives in its own view; poll it so progress follows what the learner does there.
   useEffect(() => {
@@ -67,6 +70,34 @@ export function TutorialCoach({
   const doneCount = TUTORIAL_STEPS.filter((s) => progress[s.id]).length;
   const shown = TUTORIAL_STEPS.find((s) => s.id === openId) ?? next;
   const collapsed = !!store.collapsed;
+  const autoTour = store.autoTour !== false;
+
+  // When a step becomes the next one, show its spotlight tour once (can be turned off).
+  useEffect(() => {
+    if (!next || tour || !autoTour || !TOURS[next.id] || (store.toured ?? []).includes(next.id)) return;
+    if (board === undefined) return; // wait for the first progress check, so a finished step does not flash its tour
+    tutorialStore.markToured(next.id);
+    setStore(tutorialStore.get());
+    setTour({ stepId: next.id, index: 0 });
+  }, [next, tour, autoTour, store.toured, board]);
+
+  const startTour = (stepId: string) => {
+    tutorialStore.markToured(stepId);
+    setStore(tutorialStore.get());
+    setTour({ stepId, index: 0 });
+  };
+
+  if (tour && TOURS[tour.stepId]) {
+    return (
+      <Spotlight
+        stops={TOURS[tour.stepId]!}
+        index={tour.index}
+        onIndex={(i) => setTour({ ...tour, index: Math.max(0, i) })}
+        onClose={() => setTour(undefined)}
+        onOpenTab={(t) => t !== currentTab && onOpenTab(t)}
+      />
+    );
+  }
   // On the board the right side holds the assist panel; elsewhere the right side is the inspector.
   const side = currentTab === "discovery" ? " is-left" : " is-right";
 
@@ -144,7 +175,12 @@ export function TutorialCoach({
               </div>
             )}
             <div className="row" style={{ flexWrap: "wrap" }}>
-              {currentTab !== shown.tab && (
+              {TOURS[shown.id] && (
+                <button className="primary small-button" onClick={() => startTour(shown.id)}>
+                  操作を見せる（ハイライト）
+                </button>
+              )}
+              {currentTab !== shown.tab && !TOURS[shown.id] && (
                 <button className="primary small-button" onClick={() => onOpenTab(shown.tab)}>
                   「{TAB_LABEL[shown.tab]}」を開く
                 </button>
@@ -172,6 +208,17 @@ export function TutorialCoach({
         )
       )}
 
+      <label className="small row coach-auto">
+        <input
+          type="checkbox"
+          checked={autoTour}
+          onChange={(e) => {
+            tutorialStore.setAutoTour(e.target.checked);
+            setStore(tutorialStore.get());
+          }}
+        />
+        次の手順に進んだら、操作ガイド（ハイライト）を自動で出す
+      </label>
       <ol className="coach-list">
         {TUTORIAL_STEPS.map((s) => (
           <li key={s.id}>

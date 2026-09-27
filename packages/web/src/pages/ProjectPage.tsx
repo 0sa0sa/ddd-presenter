@@ -203,7 +203,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             ガイド
           </button>
         )}
-        <a className="small" href={`/api/projects/${id}/export`} download>
+        <a className="small" data-tour="export-link" href={`/api/projects/${id}/export`} download>
           YAMLをエクスポート
         </a>
       </TopBar>
@@ -215,7 +215,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         <section className="main">
           <div className="tabs" role="tablist" aria-label="表示">
             {TABS.map((t) => (
-              <button key={t.id} className="tab" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+              <button key={t.id} className="tab" role="tab" data-tour={`tab-${t.id}`} aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
                 {t.label}
                 {t.id === "model" && errors > 0 && <span className="sev-error small"> ✕{errors}</span>}
               </button>
@@ -235,11 +235,11 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
               />
             )}
             {tab === "model" && (
-              <div className="editor-wrap">
+              <div className="editor-wrap" data-tour="editor">
                 <YamlEditor value={text} onChange={setText} diagnostics={diagnostics} readOnly={!canEdit} goto={goto} onCursorLine={onCursorLine} onMessage={setStatus} />
                 <p className="editor-help small muted">Ctrl+Space 補完・ホバーで説明・⌘/Ctrl+クリック または F12 で定義へ・F2 で名前を一括変更</p>
                 {diagnostics.length > 0 && (
-                  <div className="diagnostics" aria-label="診断">
+                  <div className="diagnostics" aria-label="診断" data-tour="diagnostics">
                     {diagnostics.map((d, i) => (
                       <button key={i} onClick={() => d.line && setGoto({ line: d.line, nonce: Date.now() })}>
                         <span className={`sev sev-${d.severity}`}>
@@ -283,9 +283,9 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           </div>
           <footer className="statusbar" aria-live="polite">
             {errors > 0 ? (
-              <span className="sev sev-error">✕ エラー {errors}</span>
+              <span className="sev sev-error" data-tour="status">✕ エラー {errors}</span>
             ) : (
-              <span className="sev" style={{ color: "var(--ok)" }}>
+              <span className="sev" data-tour="status" style={{ color: "var(--ok)" }}>
                 ✓ 検証OK
               </span>
             )}
@@ -296,7 +296,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             {canEdit && (
               <>
                 <input aria-label="変更の説明" placeholder="変更の説明（任意）" value={message} onChange={(e) => setMessage(e.target.value)} style={{ width: 220 }} />
-                <button className="primary" disabled={!dirty} onClick={() => void save()} title="Ctrl/Cmd + S">
+                <button className="primary" data-tour="save-button" disabled={!dirty} onClick={() => void save()} title="Ctrl/Cmd + S">
                   保存
                 </button>
               </>

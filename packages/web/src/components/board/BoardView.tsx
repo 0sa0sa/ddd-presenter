@@ -352,6 +352,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
             {PALETTE.map((k) => (
               <button
                 key={k}
+                data-tour={`palette-${k}`}
                 className={`palette-item sticky-swatch sticky-${k}`}
                 aria-pressed={tool === k}
                 title={`${STICKY_KINDS[k].label}: ${STICKY_KINDS[k].help}（クリックで追加・キャンバスをダブルクリックでその場所に追加）`}
@@ -366,6 +367,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
             ))}
             <button
               className="palette-item palette-frame"
+              data-tour="palette-frame"
               aria-pressed={tool === "frame"}
               title="コンテキスト（境界）のフレーム。中に置いた付箋はフレームと一緒に動きます"
               onClick={() => {
@@ -387,6 +389,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
         <div className="spacer" />
         {board.items.length === 0 && canEdit && (
           <button
+            data-tour="board-sample"
             onClick={() => {
               commit(sampleBoard());
               setTimeout(() => void rf.fitView({ padding: 0.1, duration: 300 }), 50);
@@ -400,7 +403,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
         </span>
       </div>
       <div className="board-body">
-        <div className="board-canvas" onDoubleClick={(e) => {
+        <div className="board-canvas" data-tour="board-canvas" onDoubleClick={(e) => {
           if (!(e.target as HTMLElement).classList.contains("react-flow__pane")) return;
           placeAt(rf.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
         }}>
@@ -436,6 +439,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
             minZoom={0.1}
             maxZoom={2.5}
             fitView
+            fitViewOptions={{ maxZoom: 1, padding: 0.2 }}
             proOptions={{ hideAttribution: true }}
           >
             <Background variant={BackgroundVariant.Dots} gap={24} size={1.2} color="var(--line-strong)" />

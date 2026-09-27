@@ -1609,3 +1609,236 @@ input[aria-invalid="true"] {
 .coach.is-right {
   width: min(330px, calc(100vw - 32px));
 }
+
+/* ------------------------------------------------------------------ spotlight tour */
+
+.spotlight {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none; /* the page stays usable: learners do the highlighted action themselves */
+}
+.spotlight-dim {
+  position: absolute;
+  inset: 0;
+  background: rgb(8 10 16 / 55%);
+}
+.spotlight-hole {
+  position: absolute;
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgb(8 10 16 / 55%);
+  outline: 3px solid #ffd54a;
+  outline-offset: 0;
+  transition: top 0.2s, left 0.2s, width 0.2s, height 0.2s;
+  animation: spotlight-pulse 1.6s ease-in-out infinite;
+}
+.spotlight-hole.is-big {
+  box-shadow: 0 0 0 9999px rgb(8 10 16 / 35%);
+}
+@keyframes spotlight-pulse {
+  0%,
+  100% {
+    outline-color: #ffd54a;
+    outline-offset: 0;
+  }
+  50% {
+    outline-color: #ffe99a;
+    outline-offset: 4px;
+  }
+}
+.spotlight-bubble {
+  position: absolute;
+  pointer-events: auto;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 35%);
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+.spotlight-bubble h3 {
+  font-size: 15px;
+}
+.spotlight-do {
+  color: #b58900;
+  font-weight: 500;
+}
+@media (prefers-color-scheme: dark) {
+  .spotlight-do {
+    color: #ffd54a;
+  }
+}
+.coach-auto {
+  gap: 6px;
+  padding: 8px 14px 0;
+  color: var(--ink-soft);
+}
+
+/* Gesture demos */
+.demo {
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+  background: var(--sunken);
+  border-radius: var(--radius-s);
+}
+.demo-cmd {
+  fill: var(--st-command);
+}
+.demo-evt {
+  fill: var(--st-event);
+}
+.demo-agg {
+  fill: var(--st-aggregate);
+}
+.demo-text {
+  font-size: 9px;
+  text-anchor: middle;
+  fill: var(--st-ink);
+  font-family: var(--font-ui);
+}
+.demo-handle {
+  fill: var(--surface);
+  stroke: var(--ink-soft);
+  stroke-width: 1.5;
+}
+.demo-cursor {
+  fill: #fff;
+  stroke: #111;
+  stroke-width: 1;
+}
+.demo-line {
+  stroke: var(--ink-soft);
+  stroke-width: 2;
+  stroke-dasharray: 82;
+  stroke-dashoffset: 82;
+  animation: demo-draw 2.4s ease-in-out infinite;
+}
+.demo-cursor-drag {
+  animation: demo-drag 2.4s ease-in-out infinite;
+}
+@keyframes demo-draw {
+  0%,
+  15% {
+    stroke-dashoffset: 82;
+  }
+  65%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes demo-drag {
+  0%,
+  15% {
+    transform: translate(76px, 44px);
+  }
+  65%,
+  85% {
+    transform: translate(170px, 44px);
+  }
+  100% {
+    transform: translate(170px, 44px);
+    opacity: 0;
+  }
+}
+.demo-ripple {
+  fill: none;
+  stroke: #ffd54a;
+  stroke-width: 2;
+  transform-origin: 125px 45px;
+  animation: demo-ripple 1.8s ease-out infinite;
+}
+.demo-ripple-2 {
+  animation-delay: 0.25s;
+}
+@keyframes demo-ripple {
+  0% {
+    transform: scale(0.3);
+    opacity: 1;
+  }
+  60%,
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+.demo-select {
+  fill: color-mix(in srgb, var(--focus) 15%, transparent);
+  stroke: var(--focus);
+  stroke-dasharray: 4 3;
+  transform-origin: 30px 16px;
+  animation: demo-select 2.4s ease-in-out infinite;
+}
+.demo-cursor-select {
+  animation: demo-cursor-select 2.4s ease-in-out infinite;
+}
+@keyframes demo-select {
+  0%,
+  10% {
+    transform: scale(0);
+  }
+  60%,
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes demo-cursor-select {
+  0%,
+  10% {
+    transform: translate(30px, 16px);
+  }
+  60%,
+  100% {
+    transform: translate(160px, 76px);
+  }
+}
+.demo-complete {
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.demo-complete code {
+  font-family: var(--font-code);
+}
+.demo-complete ul {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+  width: 140px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  font-family: var(--font-code);
+}
+.demo-complete li {
+  padding: 1px 8px;
+}
+.demo-complete li.is-active {
+  background: color-mix(in srgb, var(--k-aggregate) 22%, transparent);
+}
+.demo-caret {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  background: var(--ink);
+  vertical-align: text-bottom;
+  animation: demo-blink 1s steps(1) infinite;
+}
+@keyframes demo-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spotlight-hole,
+  .demo * {
+    animation: none !important;
+  }
+  .demo-line {
+    stroke-dashoffset: 0;
+  }
+}

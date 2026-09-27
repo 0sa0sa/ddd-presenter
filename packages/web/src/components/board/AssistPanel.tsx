@@ -40,21 +40,21 @@ export function AssistPanel({
   };
 
   return (
-    <section className="board-panel assist" aria-label="整理の補助">
+    <section className="board-panel assist" aria-label="整理の補助" data-tour="assist-panel">
       <div className="assist-head">
         <h3>整理の補助</h3>
-        <button className="primary small-button" onClick={onReflect} title="集約・コマンド・イベントをモデル（YAML）に反映します。適用前に差分を確認できます">
+        <button className="primary small-button" data-tour="assist-reflect" onClick={onReflect} title="集約・コマンド・イベントをモデル（YAML）に反映します。適用前に差分を確認できます">
           モデルに反映…
         </button>
       </div>
       <div className="tabs assist-tabs" role="tablist">
-        <button className="tab" role="tab" aria-selected={tab === "hints"} onClick={() => setTab("hints")}>
+        <button className="tab" role="tab" data-tour="assist-tab-hints" aria-selected={tab === "hints"} onClick={() => setTab("hints")}>
           ヒント{warnings ? ` ▲${warnings}` : ""}
         </button>
-        <button className="tab" role="tab" aria-selected={tab === "aggregates"} onClick={() => setTab("aggregates")}>
+        <button className="tab" role="tab" data-tour="assist-tab-aggregates" aria-selected={tab === "aggregates"} onClick={() => setTab("aggregates")}>
           集約の候補{unassigned.length ? ` (${unassigned.length})` : ""}
         </button>
-        <button className="tab" role="tab" aria-selected={tab === "contexts"} onClick={() => setTab("contexts")}>
+        <button className="tab" role="tab" data-tour="assist-tab-contexts" aria-selected={tab === "contexts"} onClick={() => setTab("contexts")}>
           コンテキスト
         </button>
       </div>
@@ -81,7 +81,7 @@ export function AssistPanel({
           <p className="small muted">
             矢印と配置から、同じものを変更するコマンドとイベントをまとめた候補です。集約にするか・どこで分けるかは皆さんで決めてください。一度の変更で必ず守るルールがあるまとまりが、集約の候補になります。
           </p>
-          <ul className="assist-list">
+          <ul className="assist-list" data-tour="assist-candidates">
             {shown.map((c) => (
               <li key={c.id} className="candidate">
                 <button className="assist-item" onClick={() => onFocus([...(c.aggregateItemId ? [c.aggregateItemId] : []), ...c.commandIds, ...c.eventIds])}>

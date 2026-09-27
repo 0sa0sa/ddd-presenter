@@ -37,7 +37,7 @@ export function ReflectDialog({ board, modelText, canEdit, onClose, onApply }: {
           <section className="stack" style={{ gap: 6 }}>
             <h3>モデルでの名前</h3>
             <p className="small muted">付箋のラベルはそのまま用語集に残ります。コードで使う英字の名前だけ決めてください（次回以降はボードに記憶されます）。</p>
-            <div className="reflect-names">
+            <div className="reflect-names" data-tour="reflect-names">
               {result.names.map((r) => (
                 <label key={r.id} className={`reflect-name${valid(r) ? "" : " is-invalid"}`}>
                   <span className="small muted">{kindLabel(r)}</span>
@@ -103,7 +103,7 @@ export function ReflectDialog({ board, modelText, canEdit, onClose, onApply }: {
         )}
 
         <div className="row">
-          <button className="primary" disabled={!canEdit || !result.ok || !result.yaml} onClick={() => onApply(result.yaml!, Object.fromEntries(result.names.map((r) => [r.id, names[r.id] ?? ""]).filter(([, v]) => v)))}>
+          <button className="primary" data-tour="reflect-apply" disabled={!canEdit || !result.ok || !result.yaml} onClick={() => onApply(result.yaml!, Object.fromEntries(result.names.map((r) => [r.id, names[r.id] ?? ""]).filter(([, v]) => v)))}>
             モデルに反映（未保存の変更として）
           </button>
           <button className="quiet" onClick={onClose}>

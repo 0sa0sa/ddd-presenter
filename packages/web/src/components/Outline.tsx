@@ -3,7 +3,7 @@ import { KIND_GLYPH, KIND_LABEL, type OutlineNode } from "../lib/outline.ts";
 
 export function Outline({ nodes, selected, onSelect }: { nodes: OutlineNode[]; selected?: string; onSelect: (n: OutlineNode) => void }) {
   return (
-    <nav className="outline" aria-label="モデル要素">
+    <nav className="outline" aria-label="モデル要素" data-tour="outline">
       {nodes.length === 0 && <p className="outline-group">モデルを読み込めません。YAMLの構文エラーを直すと要素が表示されます。</p>}
       <ul role="tree">
         {nodes.map((n) => (

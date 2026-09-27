@@ -206,6 +206,10 @@ interface Stored {
   visited: string[];
   manualDone: string[];
   collapsed?: boolean;
+  /** Steps whose spotlight tour has been shown automatically once. */
+  toured?: string[];
+  /** Show the spotlight tour automatically when a step becomes the next one (default on). */
+  autoTour?: boolean;
 }
 
 function read(): Stored {
@@ -228,7 +232,7 @@ function write(s: Stored): void {
 export const tutorialStore = {
   get: read,
   startWith(projectId: string) {
-    write({ ...read(), projectId, visited: [], manualDone: [], collapsed: false });
+    write({ ...read(), projectId, visited: [], manualDone: [], toured: [], autoTour: true, collapsed: false });
   },
   visit(tab: string) {
     const s = read();
@@ -237,6 +241,13 @@ export const tutorialStore = {
   toggleManual(id: string) {
     const s = read();
     write({ ...s, manualDone: s.manualDone.includes(id) ? s.manualDone.filter((x) => x !== id) : [...s.manualDone, id] });
+  },
+  markToured(id: string) {
+    const s = read();
+    if (!(s.toured ?? []).includes(id)) write({ ...s, toured: [...(s.toured ?? []), id] });
+  },
+  setAutoTour(autoTour: boolean) {
+    write({ ...read(), autoTour });
   },
   setCollapsed(collapsed: boolean) {
     write({ ...read(), collapsed });

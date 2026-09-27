@@ -500,6 +500,7 @@ function AddField({ path, onEdit }: { path: Path; onEdit: Props["onEdit"] }) {
   return (
     <form
       className="row"
+      data-tour="inspector-add-field"
       style={{ flexWrap: "wrap" }}
       onSubmit={(e) => {
         e.preventDefault();

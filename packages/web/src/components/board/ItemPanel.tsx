@@ -63,6 +63,7 @@ export function ItemPanel({ board, selectedIds, selectedEdgeId, canEdit, onChang
         {canEdit && (
           <div className="row" style={{ flexWrap: "wrap" }}>
             <button
+              data-tour="item-wrap-context"
               onClick={() => {
                 const pad = 40;
                 const minX = Math.min(...items.map((i) => i.x)) - pad;
