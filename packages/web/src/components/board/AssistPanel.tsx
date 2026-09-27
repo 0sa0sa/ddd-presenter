@@ -27,7 +27,9 @@ export function AssistPanel({
   const text = (id: string) => board.items.find((i) => i.id === id)?.text || "無題";
   const frameTitle = (id: string) => board.frames.find((f) => f.id === id)?.title || "無題";
   const warnings = findings.filter((f) => f.severity === "warning").length;
-  const unassigned = candidates.filter((c) => !c.aggregateItemId && (c.commandIds.length || c.eventIds.length));
+  // A group needs an aggregate only when it contains commands; a lone event may be an outside fact.
+  const shown = candidates.filter((c) => c.aggregateItemId || c.commandIds.length > 0);
+  const unassigned = shown.filter((c) => !c.aggregateItemId);
 
   const placeAggregate = (c: AggregateCandidate) => {
     const r = addItem(board, "aggregate", { x: c.position.x + 100, y: c.position.y + 60 }, c.name ?? "");
@@ -80,7 +82,7 @@ export function AssistPanel({
             矢印と配置から、同じものを変更するコマンドとイベントをまとめた候補です。集約にするか・どこで分けるかは皆さんで決めてください。一度の変更で必ず守るルールがあるまとまりが、集約の候補になります。
           </p>
           <ul className="assist-list">
-            {candidates.filter((c) => c.commandIds.length || c.eventIds.length).map((c) => (
+            {shown.map((c) => (
               <li key={c.id} className="candidate">
                 <button className="assist-item" onClick={() => onFocus([...(c.aggregateItemId ? [c.aggregateItemId] : []), ...c.commandIds, ...c.eventIds])}>
                   <span className="sticky-dot sticky-aggregate" aria-hidden />
@@ -104,7 +106,7 @@ export function AssistPanel({
                 )}
               </li>
             ))}
-            {candidates.filter((c) => c.commandIds.length || c.eventIds.length).length === 0 && <li className="small muted">コマンドとイベントを置いて矢印でつなぐと、候補が出ます。</li>}
+            {shown.length === 0 && <li className="small muted">コマンドとイベントを置いて矢印でつなぐと、候補が出ます。</li>}
           </ul>
           <details className="small">
             <summary>集約を決めるときの問い</summary>

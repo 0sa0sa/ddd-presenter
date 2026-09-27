@@ -7,9 +7,11 @@ Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）�
 - **検証**: 参照、型、Rule式、Aggregate境界、循環、シナリオの完全性を、位置と修正案つきで診断する。
 - **生成**: Python（Pydantic v2）のドメイン層・アプリケーション層と pytest を決定的に生成する。生成物は `mypy --strict` を通る。
 - **安全な再生成**: 手編集を検知して停止する。削除されたファイルは stale として報告し、顧客所有の拡張コードは上書きしない。
+- **ディスカバリー**: Miro のように自由に付箋を置ける EventStorming のボードで、イベント・コマンド・集約・コンテキストの境界を探る。抜けの指摘、集約とコンテキスト連携の候補を示し、決めた内容を差分を確認してからモデルに反映する（候補は提案のみで、決めるのはチーム）。
+- **書きやすさ**: YAML でも、キー・型・エラー・イベント・操作・変数・Rule 式のフィールドや Enum 値を補完し、説明の表示・定義へ移動・名前の一括変更ができる（Web のエディタと VS Code 拡張で同じ言語サービス）。
 - **Web**: モデルを編集・レビューする（YAML、フォーム、図、ルール追跡、シナリオ、生成プレビュー、履歴、メンバーと権限）。
 
-> 実装状況: 要件の Phase 1（ローカル CLI の MVP）と Phase 2（Web 編集・チームレビュー）。決定事項は [docs/09](docs/09-implementation-decisions.md)、DSL は [docs/10](docs/10-dsl-reference.md) を参照。
+> 実装状況: 要件の Phase 1（ローカル CLI の MVP）と Phase 2（Web 編集・チームレビュー）に加え、ディスカバリーボードと言語サービス（Web・VS Code）。決定事項は [docs/09](docs/09-implementation-decisions.md)、DSL は [docs/10](docs/10-dsl-reference.md) を参照。
 
 ## クイックスタート
 
@@ -50,6 +52,15 @@ cd ../.. && bun run verify:example   # diff --check → pytest → mypy --strict
 ```
 
 `examples/cleaning-platform` には、生成済みのコードと、顧客が書く拡張（`src/cleaning_platform/extensions/`）と手書きテスト（`tests/custom/`）が入っている。golden test は、このディレクトリの生成物がバイト単位で再現されることを確認する。
+
+### VS Code 拡張
+
+```sh
+bun run build:vscode
+code --install-extension packages/vscode/ddd-presenter-0.1.0.vsix
+```
+
+`*.ddd.yaml` で補完・ホバー・定義へ移動（F12）・名前の一括変更（F2）・診断が使える。使い方は [docs/11](docs/11-discovery-and-editing.md)。
 
 ### Web
 
@@ -97,11 +108,13 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 
 | パッケージ | 役割 |
 |---|---|
-| `packages/core` | YAML → IR、Rule式の parser / 型検査、意味検証、ルール追跡、構造編集、diff、[JSON Schema](packages/core/schema/model.schema.json)。ブラウザでも動く |
+| `packages/core` | YAML → IR、Rule式の parser / 型検査、意味検証、ルール追跡、構造編集、言語サービス（補完など）、ディスカバリーボードの整理とモデル化、diff、[JSON Schema](packages/core/schema/model.schema.json)。ブラウザでも動く |
 | `packages/generator` | Python / pytest の生成、マニフェスト、差分プラン、破壊的変更の検出 |
 | `packages/cli` | `ddd` コマンド。原子的な書き込み、lock、手編集の検知 |
 | `packages/server` | Hono + bun:sqlite。Workspace / 権限 / テナント分離 / モデル版（楽観排他）/ プレビュー / 監査ログ |
-| `packages/web` | React + Vite。YAML エディタ、アウトライン、インスペクタ、図（React Flow）、ルール、シナリオ、プレビュー、履歴 |
+| `packages/web` | React + Vite。ディスカバリーボード、YAML エディタ（補完つき）、アウトライン、インスペクタ、図（React Flow）、ルール、シナリオ、プレビュー、履歴 |
+| `packages/lsp` | Language Server（stdio / IPC）。core の言語サービスと検証を LSP で提供 |
+| `packages/vscode` | VS Code 拡張（`*.ddd.yaml`） |
 
 同じ `validateModelText` を CLI・サーバー・ブラウザが使う。一致はテストで確認している（FR-030 / FR-034）。
 
@@ -119,6 +132,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボードとエディタ補完の使い方 |
 
 ## 用語
 
