@@ -1,4 +1,4 @@
-import { analyzeBoard, contextMap, sampleBoard, STICKY_KINDS, suggestAggregates, type Board, type StickyKind } from "@ddd/core";
+import { analyzeBoard, boardGhosts, contextMap, sampleBoard, STICKY_KINDS, suggestAggregates, type Board, type BoardGhost, type StickyKind } from "@ddd/core";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -18,10 +18,10 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, describeError } from "../../api.ts";
-import { addConnector, addFrame, addItem, duplicate, frameContents, History, removeIds, updateItem } from "../../lib/boardOps.ts";
+import { acceptGhost, addConnector, addFrame, addItem, duplicate, frameContents, History, removeIds, updateItem, visibleGhosts } from "../../lib/boardOps.ts";
 import { AssistPanel } from "./AssistPanel.tsx";
 import { ItemPanel } from "./ItemPanel.tsx";
-import { nodeTypes, STICKY_GLYPH, type FrameData, type StickyData } from "./nodes.tsx";
+import { nodeTypes, STICKY_GLYPH, type FrameData, type GhostData, type StickyData } from "./nodes.tsx";
 import { ReflectDialog } from "./ReflectDialog.tsx";
 
 const NO_HIGHLIGHT: string[] = [];
@@ -34,6 +34,8 @@ interface Props {
   canEdit: boolean;
   modelText: string;
   onReflect: (yaml: string) => void;
+  /** AI (Claude) is enabled for the workspace: offer "ask AI for stickies". */
+  aiActive?: boolean;
 }
 
 export function BoardView(props: Props) {
@@ -46,7 +48,7 @@ export function BoardView(props: Props) {
 
 type Tool = StickyKind | "frame";
 
-function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
+function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive }: Props) {
   const rf = useReactFlow();
   const [board, setBoard] = useState<Board>();
   const [saved, setSaved] = useState<{ version: number; json: string }>({ version: 0, json: "" });
@@ -59,6 +61,10 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [reflecting, setReflecting] = useState(false);
+  const [llmGhosts, setLlmGhosts] = useState<BoardGhost[]>([]);
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
+  const [asking, setAsking] = useState(false);
+  const [showGhosts, setShowGhosts] = useState(true);
   const history = useRef(new History());
   const dragStart = useRef<{ frameId?: string; contents: string[]; origin: Record<string, { x: number; y: number }> }>(undefined);
   const boardRef = useRef<Board | undefined>(undefined);
@@ -162,6 +168,46 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
   );
   const stopEditing = useCallback(() => setEditingId(undefined), []);
 
+  // -- ghost stickies (predictions) ---------------------------------------------
+
+  const localGhosts = useMemo(() => (board && canEdit ? boardGhosts(board) : []), [board, canEdit]);
+  const ghosts = useMemo(
+    () => (board && showGhosts && !editingId ? visibleGhosts([...localGhosts, ...llmGhosts], board, selected, dismissed) : []),
+    [board, showGhosts, editingId, localGhosts, llmGhosts, selected, dismissed],
+  );
+  const ghostsRef = useRef(ghosts);
+  ghostsRef.current = ghosts;
+
+  const acceptGhostById = useCallback(
+    (id: string) => {
+      const b = boardRef.current;
+      const g = ghostsRef.current.find((x) => x.id === id);
+      if (!b || !g) return;
+      commit(acceptGhost(b, g).board);
+      setLlmGhosts((prev) => prev.filter((x) => x.id !== id));
+      setStatus(`「${g.text}」を追加しました（ダブルクリックで直せます）`);
+    },
+    [commit],
+  );
+  const dismissGhost = useCallback((id: string) => setDismissed((prev) => new Set([...prev, id])), []);
+
+  const askAi = async () => {
+    const b = boardRef.current;
+    if (!b) return;
+    setAsking(true);
+    try {
+      const r = await api.boardAssist(projectId, b, true);
+      const fresh = r.ghosts.filter((g) => g.source === "llm");
+      setLlmGhosts(fresh);
+      setShowGhosts(true);
+      setStatus(fresh.length ? `AI が ${fresh.length} 枚の付箋を提案しました。クリックで追加、× で消せます` : "AI からの提案はありませんでした");
+    } catch (e) {
+      setStatus(describeError(e));
+    } finally {
+      setAsking(false);
+    }
+  };
+
   // -- derive React Flow nodes / edges from the board --------------------------
 
   useEffect(() => {
@@ -190,7 +236,18 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
         draggable: canEdit && editingId !== i.id,
         data: { item: i, editing: editingId === i.id, highlighted: hl.has(i.id), onCommitText: commitText, onStopEditing: stopEditing } satisfies StickyData,
       }));
-      return [...frames, ...items];
+      const ghostNodes: Node[] = ghosts.map((g, i) => ({
+        id: g.id,
+        type: "ghost",
+        position: { x: g.x, y: g.y },
+        width: STICKY_KINDS[g.kind].w,
+        height: STICKY_KINDS[g.kind].h,
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        data: { ghost: g, first: i === 0, onAccept: acceptGhostById, onDismiss: dismissGhost } satisfies GhostData,
+      }));
+      return [...frames, ...items, ...ghostNodes];
     });
     setEdges((prev) => {
       const sel = new Set(prev.filter((e) => e.selected).map((e) => e.id));
@@ -202,9 +259,22 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
         selected: sel.has(c.id),
         markerEnd: { type: MarkerType.ArrowClosed, color: "var(--ink-soft)" },
         style: { stroke: "var(--ink-soft)", strokeWidth: 1.5 },
-      }));
+      })).concat(
+        ghosts
+          .filter((g) => g.connect)
+          .map((g) => ({
+            id: `edge-${g.id}`,
+            source: g.connect!.from,
+            target: g.connect!.to,
+            label: undefined,
+            selected: false,
+            selectable: false,
+            markerEnd: { type: MarkerType.ArrowClosed, color: "var(--ink-faint)" },
+            style: { stroke: "var(--ink-faint)", strokeWidth: 1.2, strokeDasharray: "5 4" },
+          })),
+      );
     });
-  }, [board, editingId, highlight, canEdit, commitText, stopEditing]);
+  }, [board, editingId, highlight, canEdit, commitText, stopEditing, ghosts, acceptGhostById, dismissGhost]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -319,6 +389,12 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
       } else if ((e.key === "Delete" || e.key === "Backspace") && canEdit) {
         e.preventDefault();
         deleteSelected();
+      } else if (e.key === "Tab" && !mod && canEdit && ghostsRef.current.length) {
+        e.preventDefault();
+        acceptGhostById(ghostsRef.current[0]!.id);
+      } else if (e.key === "Escape" && ghostsRef.current.length) {
+        const ids = ghostsRef.current.map((g) => g.id);
+        setDismissed((prev) => new Set([...prev, ...ids]));
       } else if (e.key === "Enter" && selected.length === 1 && canEdit) {
         e.preventDefault();
         setEditingId(selected[0]);
@@ -326,7 +402,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, duplicateSelected, deleteSelected, selected, canEdit]);
+  }, [undo, redo, duplicateSelected, deleteSelected, selected, canEdit, acceptGhostById]);
 
   const findings = useMemo(() => (board ? analyzeBoard(board) : []), [board]);
   const candidates = useMemo(() => (board ? suggestAggregates(board) : []), [board]);
@@ -387,6 +463,17 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
           </>
         )}
         <div className="spacer" />
+        {canEdit && (
+          <label className="small row" style={{ gap: 4 }} title="付箋の並びから、次に置きそうな付箋を半透明で表示します（Tab で追加・Esc で消す）">
+            <input type="checkbox" checked={showGhosts} onChange={(e) => setShowGhosts(e.target.checked)} />
+            予測を表示
+          </label>
+        )}
+        {canEdit && aiActive && board.items.length > 0 && (
+          <button data-tour="board-ai" onClick={() => void askAi()} disabled={asking} title="ボードの内容を Claude に送り、足りなさそうな付箋を提案してもらいます">
+            {asking ? "AI が考えています…" : "AI に付箋を提案してもらう"}
+          </button>
+        )}
         {board.items.length === 0 && canEdit && (
           <button
             data-tour="board-sample"
@@ -444,7 +531,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
           >
             <Background variant={BackgroundVariant.Dots} gap={24} size={1.2} color="var(--line-strong)" />
             <Controls showInteractive={false} />
-            <MiniMap pannable zoomable nodeColor={(n) => (n.type === "frame" ? "transparent" : `var(--st-${(n.data as StickyData).item.kind})`)} nodeStrokeColor="var(--ink-faint)" maskColor="rgb(0 0 0 / 8%)" />
+            <MiniMap pannable zoomable nodeColor={(n) => (n.type === "sticky" ? `var(--st-${(n.data as StickyData).item.kind})` : "transparent")} nodeStrokeColor="var(--ink-faint)" maskColor="rgb(0 0 0 / 8%)" />
           </ReactFlow>
           {board.items.length === 0 && (
             <div className="board-empty">
@@ -453,7 +540,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect }: Props) {
             </div>
           )}
           <p className="board-help small muted">
-            ダブルクリック: 追加・編集／ドラッグ: 範囲選択／ホイール・右ドラッグ: 移動／付箋の端から矢印／Delete: 削除／⌘D: 複製／⌘Z: 元に戻す
+            半透明の付箋は予測（Tab・クリックで追加／Esc で消す）／ダブルクリック: 追加・編集／ドラッグ: 範囲選択／ホイール・右ドラッグ: 移動／付箋の端から矢印／Delete: 削除／⌘D: 複製／⌘Z: 元に戻す
           </p>
         </div>
         <aside className="board-side" aria-label="付箋の詳細と整理の補助">

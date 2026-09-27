@@ -10,6 +10,7 @@ import {
   proposeLocally,
   sampleBoard,
   suggestInline,
+  unifiedDiff,
   validateModelText,
   verbFromState,
   type Board,
@@ -117,6 +118,12 @@ describe("local proposals", () => {
     expect(validateModelText(p.yaml).ok).toBe(true);
     expect(p.assumptions.length).toBeGreaterThan(0);
     expect(p.source).toBe("local");
+  });
+
+  test("proposals keep the author's layout, so the diff only adds lines", () => {
+    const p = proposeLocally(SAMPLE, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!;
+    const removed = unifiedDiff("m", SAMPLE, p.yaml).split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---"));
+    expect(removed).toEqual([]);
   });
 
   test("next-operation: proposes revoke with its reasoning separated into facts, assumptions and questions", () => {

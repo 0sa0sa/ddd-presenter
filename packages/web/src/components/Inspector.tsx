@@ -1,6 +1,7 @@
 import { formatPath, templates, type Analysis, type Diagnostic, type EditOp, type ModelIR, type Path, type RuleUsage } from "@ddd/core";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { describeSteps, KIND_GLYPH, KIND_LABEL, scenarioCards, type OutlineNode } from "../lib/outline.ts";
+import { PROPOSE_KINDS, type ProposeKind } from "./ProposeDialog.tsx";
 import { ScenarioCardView } from "./ScenariosView.tsx";
 
 interface Props {
@@ -13,6 +14,8 @@ interface Props {
   onEdit: (ops: EditOp[]) => string | undefined;
   onGoto: (path: Path) => void;
   onSelectId: (id: string) => void;
+  /** Opens the proposal dialog for an aggregate (local rules, or Claude when AI is on). */
+  onPropose?: (context: string, aggregate: string, kind: ProposeKind) => void;
 }
 
 const TYPE_KINDS = new Set(["aggregate", "entity", "valueObject", "enum", "error", "event"]);
@@ -60,6 +63,19 @@ export function Inspector(props: Props) {
               {d.hint && <div className="diag-hint">{d.hint}</div>}
             </div>
           ))}
+        </section>
+      )}
+      {props.canEdit && props.onPropose && node.kind === "aggregate" && node.context && (
+        <section className="propose-actions" data-tour="propose">
+          <h3>提案してもらう</h3>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            {PROPOSE_KINDS.map((k) => (
+              <button key={k.kind} className="small" title={k.help} onClick={() => props.onPropose!(node.context!, node.name, k.kind)}>
+                {k.label}
+              </button>
+            ))}
+          </div>
+          <p className="small muted">差分を見てから適用します。適用するまでモデルは変わりません。</p>
         </section>
       )}
       {ctx && <Details {...props} node={node} />}

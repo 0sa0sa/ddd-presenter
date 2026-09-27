@@ -76,6 +76,8 @@ bun run dev:web          # http://localhost:5173
 bun run build:web && bun run start   # http://localhost:4870
 ```
 
+AI の予測・提案（Claude）を使うには、サーバーを `ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
+
 ログインは開発用の簡易方式（ユーザー名のみ。docs/09 の決定）。初回ログインでアカウントと個人ワークスペースを作る。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
 
 ## 生成されるもの
@@ -134,7 +136,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボードとエディタ補完の使い方 |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード、エディタ補完、Tab で確定する予測と AI の提案 |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語

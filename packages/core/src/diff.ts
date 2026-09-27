@@ -71,3 +71,31 @@ function diffLines(a: string[], b: string[]): Op[] {
   for (let k = 0; k < suf; k++) ops.push({ t: "=", line: a[a.length - suf + k]!, ai: a.length - suf + k, bi: b.length - suf + k });
   return ops;
 }
+
+/** Spacing inside flow collections that YAML serializers do not preserve. */
+function layoutKey(line: string): string {
+  return line
+    .replace(/\s+$/, "")
+    .replace(/([{[])\s+/g, "$1")
+    .replace(/\s+([}\]])/g, "$1")
+    .replace(/,\s*/g, ", ");
+}
+
+/**
+ * Puts the author's original lines back wherever a re-serialized document differs only in layout
+ * (e.g. `{ name: x }` vs `{name: x}`), so a structural edit shows up as a minimal diff.
+ * `sameData` confirms the result still means the same as `after`; otherwise `after` is returned.
+ */
+export function keepLayout(before: string, after: string, sameData: (a: string, b: string) => boolean): string {
+  if (before === after) return after;
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const ops = diffLines(a.map(layoutKey), b.map(layoutKey));
+  const out: string[] = [];
+  for (const o of ops) {
+    if (o.t === "=") out.push(a[o.ai]!);
+    else if (o.t === "+") out.push(b[o.bi]!);
+  }
+  const merged = out.join("\n");
+  return merged !== after && sameData(merged, after) ? merged : after;
+}

@@ -1842,3 +1842,123 @@ input[aria-invalid="true"] {
     stroke-dashoffset: 0;
   }
 }
+
+/* ------------------------------------------------------------------ ghost text (AI / local predictions) */
+
+.cm-ghost {
+  color: var(--ink-faint);
+  opacity: 0.8;
+  white-space: pre;
+  font-style: italic;
+}
+.cm-ghost-llm {
+  color: color-mix(in srgb, var(--k-usecase) 70%, var(--ink-faint));
+}
+.cm-ghost-badge {
+  display: inline-block;
+  margin-left: 12px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-style: normal;
+  font-family: var(--font-ui);
+  background: var(--sunken);
+  color: var(--ink-soft);
+  vertical-align: 1px;
+}
+.editor-help {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ai-on {
+  color: var(--k-usecase);
+  font-weight: 500;
+}
+
+.warn-note {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--k-hotspot, #e6a23c) 14%, transparent);
+}
+.propose-actions h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.propose-notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+.propose-note {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--sunken);
+}
+.propose-note h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+.propose-note ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.propose-note-warn {
+  background: color-mix(in srgb, var(--k-hotspot, #e6a23c) 14%, var(--sunken));
+}
+.propose-note-ask {
+  background: color-mix(in srgb, var(--k-usecase) 12%, var(--sunken));
+}
+
+/* ghost stickies (predictions on the board) */
+.sticky-ghost {
+  opacity: 0.55;
+  border: 1.5px dashed var(--ink-faint);
+  box-shadow: none;
+  position: relative;
+  padding: 0;
+  transition: opacity 120ms;
+}
+.sticky-ghost:hover {
+  opacity: 0.9;
+}
+.sticky-ghost-llm {
+  border-color: var(--k-usecase);
+}
+.sticky-ghost-body {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.sticky-ghost-body:focus-visible {
+  outline: 2px solid var(--k-usecase);
+}
+.sticky-ghost-hint {
+  margin-top: auto;
+  font-size: 10px;
+  color: var(--ink-soft);
+}
+.sticky-ghost-dismiss {
+  all: unset;
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-soft);
+  padding: 0 4px;
+}
+.modal-actions {
+  position: sticky;
+  bottom: -20px;
+  margin: 0 -20px -20px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}

@@ -7,6 +7,7 @@ import { DiffView } from "../components/DiffView.tsx";
 import { HistoryView } from "../components/HistoryView.tsx";
 import { Inspector } from "../components/Inspector.tsx";
 import { Outline } from "../components/Outline.tsx";
+import { ProposeDialog, type ProposeKind } from "../components/ProposeDialog.tsx";
 import { PreviewView } from "../components/PreviewView.tsx";
 import { RulesView } from "../components/RulesView.tsx";
 import { ScenariosView } from "../components/ScenariosView.tsx";
@@ -49,11 +50,17 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [conflict, setConflict] = useState<Conflict>();
   const lastGoodModel = useRef<ModelIR>(undefined);
   const [coach, setCoach] = useState(() => tutorialStore.get().projectId === id);
+  const [ai, setAi] = useState<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>();
+  const [aiBusy, setAiBusy] = useState(false);
+  const [propose, setPropose] = useState<{ context: string; aggregate: string; kind: ProposeKind }>();
+  const aiActive = useRef(false);
+  aiActive.current = !!ai?.active && role !== "viewer";
 
   const canEdit = role !== "viewer";
   const dirty = saved !== undefined && text !== saved.yaml;
 
   useEffect(() => {
+    api.assistStatus(id).then(setAi, () => setAi(undefined));
     Promise.all([api.project(id), api.model(id), api.layout(id)]).then(
       ([p, m, l]) => {
         setProject(p.project);
@@ -227,6 +234,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 projectId={id}
                 canEdit={canEdit}
                 modelText={text}
+                aiActive={!!ai?.active}
                 onReflect={(yaml) => {
                   setText(yaml);
                   setStatus("ボードの内容をモデルに反映しました。差分を確認して保存してください");
@@ -236,8 +244,34 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             )}
             {tab === "model" && (
               <div className="editor-wrap" data-tour="editor">
-                <YamlEditor value={text} onChange={setText} diagnostics={diagnostics} readOnly={!canEdit} goto={goto} onCursorLine={onCursorLine} onMessage={setStatus} />
-                <p className="editor-help small muted">Ctrl+Space 補完・ホバーで説明・⌘/Ctrl+クリック または F12 で定義へ・F2 で名前を一括変更</p>
+                <YamlEditor
+                  value={text}
+                  onChange={setText}
+                  diagnostics={diagnostics}
+                  readOnly={!canEdit}
+                  goto={goto}
+                  onCursorLine={onCursorLine}
+                  onMessage={setStatus}
+                  ghost={
+                    canEdit
+                      ? {
+                          llmEnabled: () => aiActive.current,
+                          fetchLlm: async (t, o) => {
+                            const r = await api.assistInline(id, t, o);
+                            return r.suggestion ?? undefined;
+                          },
+                          onBusy: setAiBusy,
+                        }
+                      : undefined
+                  }
+                />
+                <p className="editor-help small muted" data-tour="editor-help">
+                  グレーの予測は Tab で確定・Esc で消す・⌥\ で今すぐ予測・Ctrl+Space 補完・F12 定義へ・F2 名前を一括変更
+                  <span className="spacer" />
+                  <span className={ai?.active ? "ai-on" : "muted"}>
+                    {ai?.active ? `AI: オン（${ai.model}）${aiBusy ? " 考えています…" : ""}` : ai?.available ? "AI: オフ（ワークスペースの設定で有効化）" : "予測: ローカルのみ"}
+                  </span>
+                </p>
                 {diagnostics.length > 0 && (
                   <div className="diagnostics" aria-label="診断" data-tour="diagnostics">
                     {diagnostics.map((d, i) => (
@@ -304,9 +338,25 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           </footer>
         </section>
         {tab !== "preview" && tab !== "history" && tab !== "discovery" && (
-          <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} />
+          <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} onPropose={(context, aggregate, kind) => setPropose({ context, aggregate, kind })} />
         )}
       </div>
+      {propose && (
+        <ProposeDialog
+          projectId={id}
+          text={text}
+          context={propose.context}
+          aggregate={propose.aggregate}
+          initialKind={propose.kind}
+          aiActive={!!ai?.active}
+          onClose={() => setPropose(undefined)}
+          onApply={(yaml) => {
+            setText(yaml);
+            setPropose(undefined);
+            setStatus("提案をモデルに適用しました（未保存）。確認して保存してください。");
+          }}
+        />
+      )}
       {coach && (
         <TutorialCoach
           projectId={id}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { emptyBoard, sampleBoard } from "@ddd/core";
-import { addConnector, addFrame, addItem, duplicate, frameContents, History, moveBy, removeIds, updateItem } from "../src/lib/boardOps.ts";
+import { boardGhosts, emptyBoard, sampleBoard, type Board, type BoardGhost } from "@ddd/core";
+import { acceptGhost, addConnector, addFrame, addItem, duplicate, frameContents, History, moveBy, removeIds, updateItem, visibleGhosts } from "../src/lib/boardOps.ts";
 
 describe("board operations", () => {
   test("add a sticky centered on the click point", () => {
@@ -58,5 +58,43 @@ describe("board operations", () => {
     expect(h.undo(b)).toBe(a);
     expect(h.redo(a)).toBe(b);
     expect(h.canRedo).toBe(false);
+  });
+});
+
+describe("ghost stickies", () => {
+  const base = (): Board => ({
+    version: 1,
+    frames: [],
+    items: [
+      { id: "c1", kind: "command", text: "招待を受諾する", x: 0, y: 0, w: 160, h: 90 },
+      { id: "e2", kind: "event", text: "招待が取り消された", x: 600, y: 300, w: 160, h: 90 },
+    ],
+    connectors: [],
+  });
+
+  test("shows ghosts tied to the selection, else to the newest sticky", () => {
+    const b = base();
+    const all = boardGhosts(b);
+    expect(visibleGhosts(all, b, ["c1"], new Set()).map((g) => g.id)).toEqual(["ghost-evt-c1"]);
+    expect(visibleGhosts(all, b, [], new Set()).map((g) => g.id)).toEqual(["ghost-cmd-e2"]);
+    expect(visibleGhosts(all, b, ["c1"], new Set(["ghost-evt-c1"]))).toEqual([]);
+  });
+
+  test("AI ghosts are always shown; ghosts for deleted stickies are not", () => {
+    const b = base();
+    const llm: BoardGhost = { id: "ghost-llm-0-c1", kind: "actor", text: "スタッフ候補", x: -200, y: 0, connect: { from: "ghost-llm-0-c1", to: "c1" }, reason: "", source: "llm" };
+    expect(visibleGhosts([llm], b, ["e2"], new Set()).map((g) => g.id)).toEqual([llm.id]);
+    const gone = { ...b, items: b.items.filter((i) => i.id !== "c1") };
+    expect(visibleGhosts([llm], gone, [], new Set())).toEqual([]);
+  });
+
+  test("accepting adds the sticky and its connector", () => {
+    const b = base();
+    const g = boardGhosts(b).find((x) => x.id === "ghost-evt-c1")!;
+    const r = acceptGhost(b, g);
+    const item = r.board.items.find((i) => i.id === r.id)!;
+    expect(item).toMatchObject({ kind: "event", text: "招待が受諾された", x: g.x, y: g.y });
+    expect(r.board.connectors).toEqual([expect.objectContaining({ from: "c1", to: r.id })]);
+    expect(boardGhosts(r.board).some((x) => x.id === "ghost-evt-c1")).toBe(false);
   });
 });

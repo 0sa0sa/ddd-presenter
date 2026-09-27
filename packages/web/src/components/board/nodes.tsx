@@ -1,4 +1,4 @@
-import { STICKY_KINDS, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
+import { STICKY_KINDS, type BoardFrame, type BoardGhost, type BoardItem, type StickyKind } from "@ddd/core";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { useEffect, useRef, useState } from "react";
 
@@ -33,6 +33,14 @@ export interface FrameData extends Record<string, unknown> {
 
 export type StickyNodeType = Node<StickyData, "sticky">;
 export type FrameNodeType = Node<FrameData, "frame">;
+
+export interface GhostData extends Record<string, unknown> {
+  ghost: BoardGhost;
+  first: boolean;
+  onAccept: (id: string) => void;
+  onDismiss: (id: string) => void;
+}
+export type GhostNodeType = Node<GhostData, "ghost">;
 
 function InlineText({ value, onCommit, onCancel, multiline }: { value: string; onCommit: (v: string) => void; onCancel: () => void; multiline: boolean }) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -111,4 +119,42 @@ export function FrameNode({ data, selected }: NodeProps<FrameNodeType>) {
   );
 }
 
-export const nodeTypes = { sticky: StickyNode, frame: FrameNode };
+/** A predicted sticky: click (or Tab for the first one) to add it, × to dismiss. */
+export function GhostNode({ data }: NodeProps<GhostNodeType>) {
+  const { ghost } = data;
+  const meta = STICKY_KINDS[ghost.kind];
+  return (
+    <div className={`sticky sticky-${ghost.kind} sticky-ghost sticky-ghost-${ghost.source}`} title={`${ghost.reason}（クリックで追加）`}>
+      <button
+        className="nodrag sticky-ghost-body"
+        onClick={(e) => {
+          e.stopPropagation();
+          data.onAccept(ghost.id);
+        }}
+        aria-label={`提案「${ghost.text}」を追加`}
+      >
+        <span className="sticky-kind">
+          <span aria-hidden>{STICKY_GLYPH[ghost.kind]}</span> {meta.label}
+          <span className="sticky-flag">{ghost.source === "llm" ? "AI" : "予測"}</span>
+        </span>
+        <span className="sticky-text">{ghost.text}</span>
+        <span className="sticky-ghost-hint">{data.first ? "Tab またはクリックで追加" : "クリックで追加"}</span>
+      </button>
+      <button
+        className="nodrag sticky-ghost-dismiss"
+        aria-label="この提案を消す"
+        title="この提案を消す"
+        onClick={(e) => {
+          e.stopPropagation();
+          data.onDismiss(ghost.id);
+        }}
+      >
+        ×
+      </button>
+      <Handle type="target" position={Position.Left} className="board-handle" isConnectable={false} />
+      <Handle type="source" position={Position.Right} className="board-handle" isConnectable={false} />
+    </div>
+  );
+}
+
+export const nodeTypes = { sticky: StickyNode, frame: FrameNode, ghost: GhostNode };

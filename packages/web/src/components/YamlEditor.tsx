@@ -8,6 +8,7 @@ import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutt
 import type { Diagnostic } from "@ddd/core";
 import { useEffect, useRef } from "react";
 import { dddLanguage } from "../lib/languageExtension.ts";
+import { ghostText, type GhostOptions } from "../lib/ghostText.ts";
 
 export interface GotoRequest {
   line: number;
@@ -41,6 +42,7 @@ export function YamlEditor({
   goto,
   onCursorLine,
   onMessage,
+  ghost,
 }: {
   value: string;
   onChange: (text: string) => void;
@@ -49,12 +51,14 @@ export function YamlEditor({
   goto?: GotoRequest;
   onCursorLine?: (line: number) => void;
   onMessage?: (message: string) => void;
+  /** Copilot-style predictions (omit to disable, e.g. for viewers). */
+  ghost?: GhostOptions;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
   const readOnlyCompartment = useRef(new Compartment());
-  const callbacks = useRef({ onChange, onCursorLine, onMessage });
-  callbacks.current = { onChange, onCursorLine, onMessage };
+  const callbacks = useRef({ onChange, onCursorLine, onMessage, ghost });
+  callbacks.current = { onChange, onCursorLine, onMessage, ghost };
 
   useEffect(() => {
     const v = new EditorView({
@@ -80,6 +84,11 @@ export function YamlEditor({
             },
             askName: (current) => window.prompt(`「${current}」の新しい名前（参照している箇所もまとめて変更します）`, current) ?? undefined,
             onMessage: (m) => callbacks.current.onMessage?.(m),
+          }),
+          ghostText({
+            llmEnabled: () => !!callbacks.current.ghost?.llmEnabled(),
+            fetchLlm: (t, o, sig) => callbacks.current.ghost?.fetchLlm(t, o, sig) ?? Promise.resolve(undefined),
+            onBusy: (b) => callbacks.current.ghost?.onBusy?.(b),
           }),
           keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
           theme,

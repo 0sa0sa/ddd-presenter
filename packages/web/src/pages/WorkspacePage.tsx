@@ -18,10 +18,13 @@ const ACTION_LABEL: Record<string, string> = {
   "project.import": "モデルをインポート",
   "project.export": "モデルをエクスポート",
   "project.delete": "プロジェクトを削除",
+  "ai.enable": "AI の提案を有効化",
+  "ai.disable": "AI の提案を無効化",
 };
 
 export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: string; onLogout: () => void; onChanged: () => void }) {
-  const [tab, setTab] = useState<"projects" | "members" | "audit">("projects");
+  const [tab, setTab] = useState<"projects" | "members" | "audit" | "settings">("projects");
+  const [ai, setAi] = useState<{ enabled: boolean; available: boolean; model: string | null }>();
   const [name, setName] = useState<string>();
   const [role, setRole] = useState<Role>();
   const [error, setError] = useState<string>();
@@ -31,6 +34,7 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
       (r) => {
         setName(r.workspace.name);
         setRole(r.role);
+        setAi({ enabled: r.workspace.ai_enabled, available: r.ai_available, model: r.ai_model });
       },
       (e) => setError(e instanceof ApiError && e.status === 404 ? "このワークスペースは存在しないか、参加していません。" : describeError(e)),
     );
@@ -71,14 +75,70 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
                   監査ログ
                 </button>
               )}
+              {role === "owner" && (
+                <button className="tab" role="tab" aria-selected={tab === "settings"} onClick={() => setTab("settings")}>
+                  設定
+                </button>
+              )}
             </div>
             {tab === "projects" && <Projects ws={ws} role={role} />}
             {tab === "members" && <Members ws={ws} role={role} me={me} onChanged={onChanged} />}
             {tab === "audit" && <Audit ws={ws} />}
+            {tab === "settings" && ai && <Settings ws={ws} ai={ai} onAi={setAi} />}
           </>
         )}
       </main>
     </>
+  );
+}
+
+function Settings({
+  ws,
+  ai,
+  onAi,
+}: {
+  ws: string;
+  ai: { enabled: boolean; available: boolean; model: string | null };
+  onAi: (ai: { enabled: boolean; available: boolean; model: string | null }) => void;
+}) {
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const toggle = async (enabled: boolean) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const r = await api.setAi(ws, enabled);
+      onAi({ ...ai, enabled: r.ai_enabled });
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>AI の提案</h2>
+      </div>
+      <div className="panel-body stack">
+        {error && <p className="error-banner">{error}</p>}
+        <p className="small">
+          オンにすると、モデルの編集中に Claude（Anthropic）が続きを予測したり（Tab で確定）、操作・ルール・シナリオ・イベントの内容、ボードの付箋を提案したりします。
+          提案のたびに、このワークスペースのモデル（YAML）やボードの内容が Anthropic の API に送られます。提案は差分として表示され、確定するまでモデルは変わりません。
+        </p>
+        <p className="small muted">オフのときも、送信なしで動くローカルの予測と提案は使えます。切り替えは監査ログに残ります。</p>
+        {ai.available ? (
+          <label className="row">
+            <input type="checkbox" checked={ai.enabled} disabled={busy} onChange={(e) => void toggle(e.target.checked)} />
+            <span>このワークスペースで AI の提案を使う（モデル: {ai.model}）</span>
+          </label>
+        ) : (
+          <p className="small warn-note">
+            サーバーに Claude の API キーが設定されていないため使えません。サーバーを <code>ANTHROPIC_API_KEY</code> を設定して起動してください（<code>DDD_AI_MODEL</code> でモデルを変更できます）。
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 

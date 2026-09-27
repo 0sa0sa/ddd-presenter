@@ -2,8 +2,9 @@
  * Structural edits on the YAML model text. Forms and the diagram produce these operations,
  * so every view edits the same document and comments / key order are preserved.
  */
-import { isMap, isPair, isScalar, isSeq, parseDocument, visit, type Document, type Node, type Pair, type Scalar } from "yaml";
+import { isMap, isPair, isScalar, isSeq, parse, parseDocument, visit, type Document, type Node, type Pair, type Scalar } from "yaml";
 import type { Path } from "./diagnostics.ts";
+import { keepLayout } from "./diff.ts";
 
 export type EditOp =
   | { op: "set"; path: Path; value: unknown }
@@ -46,12 +47,20 @@ export function applyEdits(text: string, ops: EditOp[]): EditResult {
       }
       // Batch consecutive structural operations into one round-trip.
       while (i < ops.length && ops[i]!.op !== "renameType" && ops[i]!.op !== "renameGuard") apply(doc, ops[i++]!);
-      current = doc.toString({ lineWidth: 0, flowCollectionPadding: false });
+      current = keepLayout(current, doc.toString({ lineWidth: 0, flowCollectionPadding: false }), sameYaml);
     }
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
   return { ok: true, text: current };
+}
+
+function sameYaml(a: string, b: string): boolean {
+  try {
+    return JSON.stringify(parse(a)) === JSON.stringify(parse(b));
+  } catch {
+    return false;
+  }
 }
 
 interface TextEdit {

@@ -1,5 +1,5 @@
 /** Immutable board operations used by the canvas (framework-free, unit-tested). */
-import { itemsInFrame, STICKY_KINDS, type Board, type BoardConnector, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
+import { itemsInFrame, STICKY_KINDS, type Board, type BoardConnector, type BoardGhost, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
 
 let counter = 0;
 export function newId(prefix: string): string {
@@ -135,4 +135,32 @@ export class History {
   get canRedo(): boolean {
     return this.future.length > 0;
   }
+}
+
+/**
+ * Which ghost stickies to show: ghosts tied to the selection, otherwise to the most recently added sticky,
+ * plus every ghost from the AI (the user asked for those). Dismissed ghosts stay hidden.
+ */
+export function visibleGhosts(ghosts: BoardGhost[], board: Board, selected: string[], dismissed: ReadonlySet<string>, limit = 3): BoardGhost[] {
+  const live = ghosts.filter((g) => !dismissed.has(g.id) && (!g.connect || [g.connect.from, g.connect.to].every((id) => id === g.id || board.items.some((i) => i.id === id))));
+  const llm = live.filter((g) => g.source === "llm");
+  const local = live.filter((g) => g.source === "local");
+  const anchors = new Set(selected.length ? selected : board.items.slice(-1).map((i) => i.id));
+  const related = local.filter((g) => g.connect && (anchors.has(g.connect.from) || anchors.has(g.connect.to)));
+  const pick = related.length ? related : selected.length ? [] : local.filter((g) => g.kind === "aggregate");
+  return [...pick.slice(0, limit), ...llm];
+}
+
+/** Turns a ghost into a real sticky (and its connector). */
+export function acceptGhost(board: Board, ghost: BoardGhost): { board: Board; id: string } {
+  const meta = STICKY_KINDS[ghost.kind];
+  const id = newId("s");
+  const item: BoardItem = { id, kind: ghost.kind, text: ghost.text, x: Math.round(ghost.x), y: Math.round(ghost.y), w: meta.w, h: meta.h };
+  let next: Board = { ...board, items: [...board.items, item] };
+  if (ghost.connect) {
+    const from = ghost.connect.from === ghost.id ? id : ghost.connect.from;
+    const to = ghost.connect.to === ghost.id ? id : ghost.connect.to;
+    next = addConnector(next, from, to);
+  }
+  return { board: next, id };
 }

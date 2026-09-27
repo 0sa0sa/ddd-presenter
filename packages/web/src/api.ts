@@ -1,4 +1,4 @@
-import type { Board, Diagnostic, RuleUsage } from "@ddd/core";
+import type { Board, BoardGhost, Diagnostic, Proposal, RuleUsage } from "@ddd/core";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -115,7 +115,16 @@ export const api = {
   logout: () => request("POST", "/api/logout"),
   me: () => request<Me>("GET", "/api/me"),
   createWorkspace: (name: string) => request<{ id: string }>("POST", "/api/workspaces", { name }),
-  workspace: (ws: string) => request<{ workspace: { id: string; name: string }; role: Role }>("GET", `/api/workspaces/${ws}`),
+  workspace: (ws: string) =>
+    request<{ workspace: { id: string; name: string; ai_enabled: boolean }; role: Role; ai_available: boolean; ai_model: string | null }>("GET", `/api/workspaces/${ws}`),
+  setAi: (ws: string, enabled: boolean) => request<{ ai_enabled: boolean }>("PATCH", `/api/workspaces/${ws}/settings`, { ai_enabled: enabled }),
+  assistStatus: (id: string) => request<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>("GET", `/api/projects/${id}/assist`),
+  assistInline: (id: string, yaml: string, offset: number) =>
+    request<{ suggestion: { text: string; label: string; source: "llm" } | null }>("POST", `/api/projects/${id}/assist/inline`, { yaml, offset }),
+  propose: (id: string, body: { yaml: string; context: string; aggregate?: string; kind: string; instruction?: string }) =>
+    request<{ proposal: Proposal | null; diagnostics?: Diagnostic[]; message?: string }>("POST", `/api/projects/${id}/assist/propose`, body),
+  boardAssist: (id: string, board: Board, llm: boolean, instruction?: string) =>
+    request<{ ghosts: BoardGhost[]; ai: boolean }>("POST", `/api/projects/${id}/assist/board`, { board, llm, instruction }),
   members: (ws: string) => request<{ members: Member[] }>("GET", `/api/workspaces/${ws}/members`),
   addMember: (ws: string, username: string, role: Role) => request("POST", `/api/workspaces/${ws}/members`, { username, role }),
   setRole: (ws: string, userId: string, role: Role) => request("PATCH", `/api/workspaces/${ws}/members/${userId}`, { role }),
