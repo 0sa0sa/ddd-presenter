@@ -43,7 +43,8 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "ddd-server-"));
   port = await freePort();
   base = `http://localhost:${port}`;
-  proc = Bun.spawn(["bun", MAIN], { env: { ...process.env, PORT: String(port), DDD_DB: join(dir, "db.sqlite") }, stdout: "pipe", stderr: "pipe" });
+  // The database directory does not exist yet, as on a fresh checkout.
+  proc = Bun.spawn(["bun", MAIN], { env: { ...process.env, PORT: String(port), DDD_DB: join(dir, "not", "yet", "db.sqlite") }, stdout: "pipe", stderr: "pipe" });
   await waitFor(`${base}/api/health`);
 });
 

@@ -1,15 +1,12 @@
-import { existsSync } from "node:fs";
-import { join, normalize } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join, normalize } from "node:path";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db.ts";
 
 /** Default port; 8787 is commonly taken by other local dev servers. Override with PORT or DDD_PORT. */
 const port = Number(process.env.PORT ?? process.env.DDD_PORT ?? 4870);
 const dbPath = process.env.DDD_DB ?? join(import.meta.dir, "../data/ddd.sqlite");
-if (dbPath !== ":memory:") {
-  const dir = join(dbPath, "..");
-  if (!existsSync(dir)) await Bun.write(join(dir, ".keep"), "");
-}
+if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 const db = openDatabase(dbPath);
 const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1" });
 
