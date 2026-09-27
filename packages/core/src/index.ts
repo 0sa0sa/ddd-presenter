@@ -11,3 +11,5 @@ export * from "./diff.ts";
 export * from "./language.ts";
 export * from "./discovery.ts";
 export * from "./assist.ts";
+export * from "./workshop.ts";
+export * from "./sync.ts";

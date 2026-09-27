@@ -667,15 +667,28 @@ export function createApp(db: Database, options: AppOptions = {}) {
 
   const MAX_BOARD_BYTES = 2_000_000;
 
-  app.get("/api/projects/:projectId/board", (c) => {
-    const { project, role } = loadProject(c);
-    const row = db
-      .query("SELECT b.version, b.json, b.updated_at, u.username AS updated_by FROM boards b LEFT JOIN users u ON u.id = b.updated_by WHERE b.project_id = ?")
-      .get(project.id) as { version: number; json: string; updated_at: string; updated_by: string | null } | null;
-    return c.json({ version: row?.version ?? 0, board: row ? JSON.parse(row.json) : emptyBoard(), updated_at: row?.updated_at ?? null, updated_by: row?.updated_by ?? null, role });
-  });
+  const MAIN_BOARD = "main";
+  const MAX_BOARDS = 20;
 
-  app.put("/api/projects/:projectId/board", async (c) => {
+  type BoardRow = { board_id: string; name: string; position: number; version: number; json: string; updated_at: string | null; updated_by: string | null };
+  const boardRow = (projectId: string, boardId: string) =>
+    db
+      .query("SELECT b.board_id, b.name, b.position, b.version, b.json, b.updated_at, u.username AS updated_by FROM project_boards b LEFT JOIN users u ON u.id = b.updated_by WHERE b.project_id = ? AND b.board_id = ?")
+      .get(projectId, boardId) as BoardRow | null;
+  /** The main board always exists (it is created on first save); other boards must have been created. */
+  const requireBoard = (projectId: string, boardId: string) => {
+    const row = boardRow(projectId, boardId);
+    if (!row && boardId !== MAIN_BOARD) fail(404, "Board not found");
+    return row;
+  };
+
+  const getBoard = (c: Context<Env>, boardId: string) => {
+    const { project, role } = loadProject(c);
+    const row = requireBoard(project.id, boardId);
+    return c.json({ id: boardId, name: row?.name ?? "メイン", version: row?.version ?? 0, board: row ? JSON.parse(row.json) : emptyBoard(), updated_at: row?.updated_at ?? null, updated_by: row?.updated_by ?? null, role });
+  };
+
+  const putBoard = async (c: Context<Env>, boardId: string) => {
     const { project } = loadProject(c, "editor");
     const raw = await c.req.text();
     if (raw.length > MAX_BOARD_BYTES) fail(413, "The board is larger than 2 MB");
@@ -692,7 +705,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
     const json = JSON.stringify(board);
     let version = 0;
     db.transaction(() => {
-      const row = db.query("SELECT version, json FROM boards WHERE project_id = ?").get(project.id) as { version: number; json: string } | null;
+      const row = requireBoard(project.id, boardId);
       const current = row?.version ?? 0;
       if (current !== b.base_version) fail(409, "The board was changed by someone else", { current_version: current, board: row ? JSON.parse(row.json) : emptyBoard() });
       if (row && row.json === json) {
@@ -700,12 +713,66 @@ export function createApp(db: Database, options: AppOptions = {}) {
         return;
       }
       version = current + 1;
-      db.query(
-        "INSERT INTO boards (project_id, version, json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET version = excluded.version, json = excluded.json, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
-      ).run(project.id, version, json, c.get("user").id, now());
+      if (row) db.query("UPDATE project_boards SET version = ?, json = ?, updated_by = ?, updated_at = ? WHERE project_id = ? AND board_id = ?").run(version, json, c.get("user").id, now(), project.id, boardId);
+      else
+        db.query("INSERT INTO project_boards (project_id, board_id, name, position, created_at, version, json, updated_by, updated_at) VALUES (?, ?, 'メイン', 0, ?, ?, ?, ?, ?)").run(project.id, boardId, now(), version, json, c.get("user").id, now());
     })();
     return c.json({ version, board });
+  };
+
+  // The project's main board (kept for existing clients).
+  app.get("/api/projects/:projectId/board", (c) => getBoard(c, MAIN_BOARD));
+  app.put("/api/projects/:projectId/board", (c) => putBoard(c, MAIN_BOARD));
+
+  app.get("/api/projects/:projectId/boards", (c) => {
+    const { project } = loadProject(c);
+    const rows = db
+      .query("SELECT b.board_id AS id, b.name, b.position, b.version, b.json, b.updated_at, u.username AS updated_by FROM project_boards b LEFT JOIN users u ON u.id = b.updated_by WHERE b.project_id = ? ORDER BY b.position, b.created_at")
+      .all(project.id) as (Omit<BoardRow, "board_id"> & { id: string })[];
+    const boards = rows.map(({ json, ...r }) => ({ ...r, stickies: (JSON.parse(json) as { items: unknown[] }).items.length }));
+    if (!boards.some((b) => b.id === MAIN_BOARD)) boards.unshift({ id: MAIN_BOARD, name: "メイン", position: 0, version: 0, updated_at: null, updated_by: null, stickies: 0 });
+    return c.json({ boards });
   });
+
+  app.post("/api/projects/:projectId/boards", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const { name } = await body<{ name?: string }>(c);
+    const title = str(name, "name", 80);
+    const count = (db.query("SELECT COUNT(*) AS n FROM project_boards WHERE project_id = ?").get(project.id) as { n: number }).n;
+    if (count >= MAX_BOARDS) fail(413, `A project can have up to ${MAX_BOARDS} boards`);
+    const id = `b${newId().replace(/-/g, "").slice(0, 12)}`;
+    const position = (db.query("SELECT COALESCE(MAX(position), 0) + 1 AS p FROM project_boards WHERE project_id = ?").get(project.id) as { p: number }).p;
+    db.query("INSERT INTO project_boards (project_id, board_id, name, position, created_at, version, json) VALUES (?, ?, ?, ?, ?, 0, ?)").run(project.id, id, title, position, now(), JSON.stringify(emptyBoard()));
+    audit(project.workspace_id, c.get("user").id, "board.create", title, { project: project.id, board: id });
+    return c.json({ id, name: title }, 201);
+  });
+
+  app.patch("/api/projects/:projectId/boards/:boardId", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const boardId = c.req.param("boardId");
+    const { name } = await body<{ name?: string }>(c);
+    const title = str(name, "name", 80);
+    if (!boardRow(project.id, boardId)) {
+      if (boardId !== MAIN_BOARD) fail(404, "Board not found");
+      db.query("INSERT INTO project_boards (project_id, board_id, name, position, created_at, version, json) VALUES (?, ?, ?, 0, ?, 0, ?)").run(project.id, boardId, title, now(), JSON.stringify(emptyBoard()));
+    } else db.query("UPDATE project_boards SET name = ? WHERE project_id = ? AND board_id = ?").run(title, project.id, boardId);
+    audit(project.workspace_id, c.get("user").id, "board.rename", title, { project: project.id, board: boardId });
+    return c.json({ id: boardId, name: title });
+  });
+
+  app.delete("/api/projects/:projectId/boards/:boardId", (c) => {
+    const { project } = loadProject(c, "editor");
+    const boardId = c.req.param("boardId");
+    if (boardId === MAIN_BOARD) fail(400, "The main board cannot be deleted");
+    const row = boardRow(project.id, boardId);
+    if (!row) fail(404, "Board not found");
+    db.query("DELETE FROM project_boards WHERE project_id = ? AND board_id = ?").run(project.id, boardId);
+    audit(project.workspace_id, c.get("user").id, "board.delete", row!.name, { project: project.id, board: boardId });
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/projects/:projectId/boards/:boardId", (c) => getBoard(c, c.req.param("boardId")));
+  app.put("/api/projects/:projectId/boards/:boardId", (c) => putBoard(c, c.req.param("boardId")));
 
   return app;
 }

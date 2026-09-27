@@ -23,9 +23,40 @@ export interface BoardItem {
   codeName?: string;
   /** Commands only: this command creates the aggregate (becomes a factory). */
   creates?: boolean;
+  /** Events only: a pivotal event that marks a turning point (and often a context boundary). */
+  pivotal?: boolean;
+  /** Hotspots only: the team reached a conclusion (kept on the board as a record). */
+  resolved?: boolean;
+  resolution?: string;
+  /** Usernames that dot-voted for this sticky (one entry per vote). */
+  votes?: string[];
+  comments?: BoardComment[];
   x: number;
   y: number;
   w: number;
+  h: number;
+}
+
+export interface BoardComment {
+  id: string;
+  author: string;
+  text: string;
+  at: string;
+}
+
+export type Subdomain = "core" | "supporting" | "generic";
+
+export const SUBDOMAIN_LABEL: Record<Subdomain, { label: string; help: string }> = {
+  core: { label: "コア", help: "競争力の源。いちばん力を入れて作り込む" },
+  supporting: { label: "支援", help: "業務に必要だが差別化にはならない。シンプルに作る" },
+  generic: { label: "汎用", help: "どこでも同じ。既製品や外部サービスを使う" },
+};
+
+/** A horizontal band (e.g. one actor's or one process's lane) spanning the board. */
+export interface BoardLane {
+  id: string;
+  title: string;
+  y: number;
   h: number;
 }
 
@@ -33,6 +64,7 @@ export interface BoardFrame {
   id: string;
   title: string;
   codeName?: string;
+  subdomain?: Subdomain;
   x: number;
   y: number;
   w: number;
@@ -51,6 +83,17 @@ export interface Board {
   items: BoardItem[];
   frames: BoardFrame[];
   connectors: BoardConnector[];
+  lanes?: BoardLane[];
+  /** Shared workshop state (everyone on the board sees the same step and timer). */
+  workshop?: WorkshopState;
+}
+
+export interface WorkshopState {
+  phase: string;
+  /** ISO time the current timebox ends. */
+  timerEndsAt?: string;
+  /** Dot votes each person may place (default 3). */
+  votesPerPerson?: number;
 }
 
 export interface StickyMeta {
@@ -94,6 +137,20 @@ export function normalizeBoard(raw: unknown): Board | undefined {
         const item: BoardItem = { id: str(x.id, 64), kind: x.kind, text: str(x.text, 500), x: num(x.x, 0), y: num(x.y, 0), w: Math.max(40, num(x.w, meta.w)), h: Math.max(30, num(x.h, meta.h)) };
         if (typeof x.codeName === "string" && x.codeName) item.codeName = str(x.codeName, 80);
         if (x.creates === true) item.creates = true;
+        if (x.pivotal === true && x.kind === "event") item.pivotal = true;
+        if (x.resolved === true && x.kind === "hotspot") item.resolved = true;
+        if (typeof x.resolution === "string" && x.resolution && x.kind === "hotspot") item.resolution = str(x.resolution, 1000);
+        if (Array.isArray(x.votes)) {
+          const votes = x.votes.filter((v: unknown) => typeof v === "string" && v).slice(0, 200).map((v: string) => v.slice(0, 64));
+          if (votes.length) item.votes = votes;
+        }
+        if (Array.isArray(x.comments)) {
+          const comments = x.comments
+            .filter((c: any) => c && typeof c.id === "string" && typeof c.text === "string" && c.text.trim())
+            .slice(0, 200)
+            .map((c: any) => ({ id: str(c.id, 64), author: str(c.author, 64), text: str(c.text, 2000), at: str(c.at, 40) }));
+          if (comments.length) item.comments = comments;
+        }
         return [item];
       })
     : [];
@@ -102,6 +159,7 @@ export function normalizeBoard(raw: unknown): Board | undefined {
         if (!f || typeof f.id !== "string") return [];
         const frame: BoardFrame = { id: str(f.id, 64), title: str(f.title, 120), x: num(f.x, 0), y: num(f.y, 0), w: Math.max(120, num(f.w, 600)), h: Math.max(80, num(f.h, 400)) };
         if (typeof f.codeName === "string" && f.codeName) frame.codeName = str(f.codeName, 80);
+        if (f.subdomain === "core" || f.subdomain === "supporting" || f.subdomain === "generic") frame.subdomain = f.subdomain;
         return [frame];
       })
     : [];
@@ -114,7 +172,19 @@ export function normalizeBoard(raw: unknown): Board | undefined {
         return [conn];
       })
     : [];
-  return { version: 1, items, frames, connectors };
+  const lanes: BoardLane[] = Array.isArray(r.lanes)
+    ? r.lanes.flatMap((l: any) => (l && typeof l.id === "string" ? [{ id: str(l.id, 64), title: str(l.title, 120), y: num(l.y, 0), h: Math.max(60, num(l.h, 220)) }] : [])).slice(0, 50)
+    : [];
+  const board: Board = { version: 1, items, frames, connectors };
+  if (lanes.length) board.lanes = lanes;
+  const w = r.workshop as Record<string, unknown> | undefined;
+  if (w && typeof w === "object" && typeof w.phase === "string") {
+    const workshop: WorkshopState = { phase: str(w.phase, 40) };
+    if (typeof w.timerEndsAt === "string" && !Number.isNaN(Date.parse(w.timerEndsAt))) workshop.timerEndsAt = w.timerEndsAt;
+    if (typeof w.votesPerPerson === "number" && w.votesPerPerson >= 1 && w.votesPerPerson <= 20) workshop.votesPerPerson = Math.round(w.votesPerPerson);
+    board.workshop = workshop;
+  }
+  return board;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +303,7 @@ export function analyzeBoard(board: Board): Finding[] {
     });
   }
 
-  const hotspots = of("hotspot");
+  const hotspots = of("hotspot").filter((h) => !h.resolved);
   if (hotspots.length) {
     out.push({ severity: "warning", code: "open-hotspots", message: `未解決の論点が ${hotspots.length} 件あります`, hint: "モデルに反映する前に、ドメインエキスパートと結論を出します", itemIds: hotspots.map((h) => h.id) });
   }

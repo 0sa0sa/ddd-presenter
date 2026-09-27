@@ -71,6 +71,22 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE workspaces ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0;`,
   // Which assistant the workspace uses (api / claude-code / codex); NULL = the first the server offers.
   `ALTER TABLE workspaces ADD COLUMN ai_provider TEXT;`,
+  // Several boards per project (e.g. one per workshop or per process). The existing board becomes "main".
+  `CREATE TABLE project_boards (
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     board_id TEXT NOT NULL,
+     name TEXT NOT NULL,
+     position INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL,
+     version INTEGER NOT NULL DEFAULT 0,
+     json TEXT NOT NULL,
+     updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+     updated_at TEXT,
+     PRIMARY KEY (project_id, board_id)
+   );
+   INSERT INTO project_boards (project_id, board_id, name, position, created_at, version, json, updated_by, updated_at)
+     SELECT project_id, 'main', 'メイン', 0, updated_at, version, json, updated_by, updated_at FROM boards;
+   DROP TABLE boards;`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

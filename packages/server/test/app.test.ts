@@ -287,6 +287,29 @@ describe("health", () => {
 describe("discovery board", () => {
   const board = (text: string) => ({ version: 1, frames: [], connectors: [], items: [{ id: "e1", kind: "event", text, x: 10, y: 20, w: 160, h: 100 }] });
 
+  test("a project can hold several boards; the main one always exists and cannot be deleted", async () => {
+    const s = await login("multi");
+    const project = await newProject(s);
+    expect((await s.json("GET", `/api/projects/${project}/boards`)).body.boards).toEqual([expect.objectContaining({ id: "main", name: "メイン", stickies: 0 })]);
+    await s.json("PUT", `/api/projects/${project}/board`, { base_version: 0, board: board("招待が送られた") });
+    const created = await s.json("POST", `/api/projects/${project}/boards`, { name: "支払いワークショップ" });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    expect((await s.json("GET", `/api/projects/${project}/boards/${id}`)).body).toMatchObject({ id, name: "支払いワークショップ", version: 0, board: { items: [] } });
+    const saved = await s.json("PUT", `/api/projects/${project}/boards/${id}`, { base_version: 0, board: board("支払われた") });
+    expect(saved.body.version).toBe(1);
+    expect((await s.json("GET", `/api/projects/${project}/board`)).body.board.items[0].text).toBe("招待が送られた"); // boards are independent
+    expect((await s.json("PATCH", `/api/projects/${project}/boards/${id}`, { name: "支払い" })).body.name).toBe("支払い");
+    const list = (await s.json("GET", `/api/projects/${project}/boards`)).body.boards;
+    expect(list.map((b: any) => [b.id, b.name, b.stickies])).toEqual([["main", "メイン", 1], [id, "支払い", 1]]);
+    expect((await s.json("DELETE", `/api/projects/${project}/boards/main`)).status).toBe(400);
+    expect((await s.json("DELETE", `/api/projects/${project}/boards/${id}`)).status).toBe(200);
+    expect((await s.json("GET", `/api/projects/${project}/boards/${id}`)).status).toBe(404);
+    expect((await s.json("PUT", `/api/projects/${project}/boards/nope`, { base_version: 0, board: board("x") })).status).toBe(404);
+    const stranger = await login("stranger2");
+    expect((await stranger.json("GET", `/api/projects/${project}/boards`)).status).toBe(404);
+  });
+
   test("starts empty, saves with optimistic concurrency and normalizes input", async () => {
     const s = await login("alice");
     const project = await newProject(s);
