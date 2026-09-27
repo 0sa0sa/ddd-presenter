@@ -1,4 +1,4 @@
-import { LineCounter, parseDocument, isNode, type Document } from "yaml";
+import { LineCounter, parseDocument, isMap, isNode, isScalar, type Document } from "yaml";
 import { DiagnosticBag, type Diagnostic, type Path } from "./diagnostics.ts";
 import type {
   AggregateIR,
@@ -32,6 +32,10 @@ export interface ParseResult {
   diagnostics: Diagnostic[];
   /** Resolves a YAML path to a 1-based line/column. */
   locate: (path: Path) => { line: number; column: number } | undefined;
+  /** Character offsets [start, end) of the YAML node at `path` (value node), if it exists. */
+  rangeOf: (path: Path) => [number, number] | undefined;
+  /** Offsets [start, end) of the key scalar for a mapping entry at `path`, if it exists. */
+  keyRangeOf: (path: Path) => [number, number] | undefined;
 }
 
 type Obj = Record<string, unknown>;
@@ -657,6 +661,26 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
   };
 }
 
+function makeRange(doc: Document) {
+  return (path: Path): [number, number] | undefined => {
+    const node = path.length === 0 ? doc.contents : doc.getIn(path, true);
+    if (isNode(node) && node.range) return [node.range[0], node.range[1]];
+    return undefined;
+  };
+}
+
+function makeKeyRange(doc: Document) {
+  return (path: Path): [number, number] | undefined => {
+    if (path.length === 0) return undefined;
+    const parent = path.length === 1 ? doc.contents : doc.getIn(path.slice(0, -1), true);
+    if (!isMap(parent)) return undefined;
+    const key = path[path.length - 1];
+    const pair = parent.items.find((p) => isScalar(p.key) && String(p.key.value) === String(key));
+    if (pair && isScalar(pair.key) && pair.key.range) return [pair.key.range[0], pair.key.range[1]];
+    return undefined;
+  };
+}
+
 function makeLocator(doc: Document, lc: LineCounter) {
   return (path: Path) => {
     // Walk up the path until a node with a range is found.
@@ -677,6 +701,8 @@ export function parseModel(text: string): ParseResult {
   const lc = new LineCounter();
   const doc = parseDocument(text, { lineCounter: lc, uniqueKeys: true, prettyErrors: false });
   const locate = makeLocator(doc, lc);
+  const rangeOf = makeRange(doc);
+  const keyRangeOf = makeKeyRange(doc);
 
   for (const err of doc.errors) {
     const pos = err.linePos?.[0] ?? lc.linePos(err.pos[0]);
@@ -686,7 +712,7 @@ export function parseModel(text: string): ParseResult {
       hint: /flow-seq-start/.test(err.message) ? 'Type expressions with brackets must be quoted inside { ... }, e.g. type: "List[EmailAddress]"' : undefined,
     });
   }
-  if (doc.errors.length > 0) return { diagnostics: bag.items, locate };
+  if (doc.errors.length > 0) return { diagnostics: bag.items, locate, rangeOf, keyRangeOf };
 
   const data: unknown = doc.toJS({ maxAliasCount: 50 });
   const r = new Reader(bag);
@@ -725,5 +751,5 @@ export function parseModel(text: string): ParseResult {
       if (loc) Object.assign(d, loc);
     }
   }
-  return { model, diagnostics: bag.items, locate };
+  return { model, diagnostics: bag.items, locate, rangeOf, keyRangeOf };
 }
