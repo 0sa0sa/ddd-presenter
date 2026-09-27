@@ -7,3 +7,4 @@ export * from "./parse.ts";
 export * from "./validate.ts";
 export * from "./usage.ts";
 export * from "./edit.ts";
+export * from "./diff.ts";
