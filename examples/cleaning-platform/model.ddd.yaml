@@ -1,0 +1,353 @@
+schema_version: 1
+project: cleaning-platform
+description: 清掃スタッフの招待と受諾を扱うサンプルモデル
+generation:
+  package: cleaning_platform
+  src_dir: src
+  tests_dir: tests
+
+contexts:
+  - name: CleaningStaff
+    description: 清掃スタッフの招待・受諾・取り消しを扱う
+    glossary:
+      - term: Invitation
+        definition: 清掃会社がスタッフ候補へ送る参加依頼。期限内に受諾できる。
+      - term: 受諾
+        definition: 招待を受けたスタッフが参加を確定すること。
+
+    errors:
+      - name: InvalidInvitationWindow
+        code: invalid_invitation_window
+        message: 招待の有効期限は作成日時より後である必要があります
+      - name: InvitationNotDeliverable
+        code: invitation_not_deliverable
+        message: この招待は受諾できません（受諾済み・取り消し済み・期限切れ）
+      - name: InvitationAlreadyClosed
+        code: invitation_already_closed
+        message: この招待はすでに終了しています
+      - name: InvitationNotFound
+        code: invitation_not_found
+        message: 招待が見つかりません
+      - name: EmailBlocked
+        code: email_blocked
+        message: このメールアドレスには招待を送れません
+
+    extension_points:
+      - name: is_blocked_email
+        description: 配信停止・ブロック済みのメールアドレスか（顧客実装）
+        parameters:
+          - { name: email, type: EmailAddress }
+        returns: Boolean
+        test_default: false
+
+    enums:
+      - name: InvitationStatus
+        values: [pending, accepted, revoked]
+
+    value_objects:
+      - name: EmailAddress
+        description: 招待先のメールアドレス
+        fields:
+          - name: value
+            type: String
+            constraints: { min_length: 3, max_length: 254, pattern: "^[^@\\s]+@[^@\\s]+$" }
+        normalize:
+          value: [strip, lower]
+
+    aggregates:
+      - name: CleaningStaffInvitation
+        description: スタッフ候補への招待
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: email, type: EmailAddress }
+          - { name: status, type: InvitationStatus }
+          - { name: created_at, type: DateTime }
+          - { name: expires_at, type: DateTime }
+          - { name: accepted_at, type: DateTime, required: false }
+        invariants:
+          - name: expiry_after_creation
+            description: 有効期限は作成日時より後
+            expression: expires_at > created_at
+            error: InvalidInvitationWindow
+            check_on: [construct, transition]
+          - name: accepted_invitation_has_accepted_at
+            description: 受諾済みなら受諾日時を持つ
+            expression: status != accepted or accepted_at != null
+            error: InvalidInvitationWindow
+            check_on: [construct, transition]
+        state_guards:
+          - name: pending_until_expiry
+            description: 保留中かつ期限前
+            parameters:
+              - { name: at, type: DateTime }
+            expression: status == pending and at < expires_at
+            error: InvitationNotDeliverable
+          - name: is_open
+            description: まだ終了していない
+            expression: status == pending
+            error: InvitationAlreadyClosed
+        factories:
+          - name: issue
+            description: 新しい招待を発行する
+            parameters:
+              - { name: id, type: UUID }
+              - { name: email, type: EmailAddress }
+              - { name: at, type: DateTime }
+              - { name: expires_at, type: DateTime }
+            fields:
+              id: id
+              email: email
+              status: pending
+              created_at: at
+              expires_at: expires_at
+            emits:
+              - name: InvitationIssued
+                fields: [id, email, expires_at]
+        operations:
+          - name: accept
+            description: 招待を受諾する
+            parameters:
+              - { name: at, type: DateTime }
+            require: [pending_until_expiry(at)]
+            changes:
+              status: accepted
+              accepted_at: at
+            emits:
+              - name: InvitationAccepted
+                fields: [id, at]
+          - name: revoke
+            description: 招待を取り消す
+            require: [is_open]
+            changes:
+              status: revoked
+            emits:
+              - name: InvitationRevoked
+                fields: [id]
+        scenarios:
+          - name: invitation_window_must_be_positive
+            description: 期限が作成日時以前の招待は作れない
+            when:
+              construct:
+                id: "00000000-0000-0000-0000-000000000001"
+                email: { value: "staff@example.com" }
+                status: pending
+                created_at: "2026-01-01T10:00:00+00:00"
+                expires_at: "2026-01-01T09:00:00+00:00"
+            then:
+              raises: InvalidInvitationWindow
+          - name: email_is_normalized
+            when:
+              construct:
+                id: "00000000-0000-0000-0000-000000000001"
+                email: { value: "  Staff@Example.COM " }
+                status: pending
+                created_at: "2026-01-01T10:00:00+00:00"
+                expires_at: "2026-01-08T10:00:00+00:00"
+            then:
+              state:
+                email: { value: "staff@example.com" }
+          - name: revoked_invitation_cannot_be_revoked_again
+            given:
+              aggregate:
+                id: "00000000-0000-0000-0000-000000000001"
+                email: { value: "staff@example.com" }
+                status: revoked
+                created_at: "2026-01-01T10:00:00+00:00"
+                expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              operation: revoke
+            then:
+              raises: InvitationAlreadyClosed
+              emits: []
+
+    use_cases:
+      - name: issue_invitation
+        actor: 清掃会社の管理者
+        description: スタッフ候補へ招待を発行する
+        command: IssueInvitation
+        transaction: required
+        input:
+          - { name: email, type: EmailAddress }
+          - { name: valid_until, type: DateTime }
+        steps:
+          - if:
+              condition: is_blocked_email(email)
+              then:
+                - fail: EmailBlocked
+          - create:
+              aggregate: CleaningStaffInvitation
+              factory: issue
+              as: invitation
+              args: { id: ids.new, email: email, at: clock.now, expires_at: valid_until }
+          - save: invitation
+          - publish_after_commit: InvitationIssued
+          - return: invitation.id
+        scenarios:
+          - name: invitation_is_issued
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              ids: ["00000000-0000-0000-0000-0000000000aa"]
+            when:
+              input:
+                email: { value: "new@example.com" }
+                valid_until: "2026-01-08T10:00:00+00:00"
+            then:
+              returns: "00000000-0000-0000-0000-0000000000aa"
+              state:
+                - aggregate: CleaningStaffInvitation
+                  id: "00000000-0000-0000-0000-0000000000aa"
+                  fields: { status: pending, expires_at: "2026-01-08T10:00:00+00:00" }
+              emits:
+                - event: InvitationIssued
+                  fields: { email: { value: "new@example.com" } }
+          - name: blocked_email_is_rejected
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              extensions:
+                is_blocked_email: true
+            when:
+              input:
+                email: { value: "blocked@example.com" }
+                valid_until: "2026-01-08T10:00:00+00:00"
+            then:
+              raises: EmailBlocked
+              emits: []
+          - name: past_expiry_is_rejected
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              ids: ["00000000-0000-0000-0000-0000000000aa"]
+            when:
+              input:
+                email: { value: "new@example.com" }
+                valid_until: "2026-01-01T09:00:00+00:00"
+            then:
+              raises: InvalidInvitationWindow
+              emits: []
+
+      - name: accept_invitation
+        actor: スタッフ候補
+        description: 招待を受諾する
+        command: AcceptInvitation
+        transaction: required
+        input:
+          - { name: invitation_id, type: UUID }
+        steps:
+          - load:
+              aggregate: CleaningStaffInvitation
+              by: invitation_id
+              as: invitation
+              not_found: InvitationNotFound
+          - invoke:
+              target: invitation
+              operation: accept
+              args: { at: clock.now }
+          - save: invitation
+          - publish_after_commit: InvitationAccepted
+        scenarios:
+          - name: pending_invitation_is_accepted
+            given:
+              clock: "2026-01-02T10:00:00+00:00"
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              state:
+                - aggregate: CleaningStaffInvitation
+                  id: "00000000-0000-0000-0000-000000000001"
+                  fields: { status: accepted, accepted_at: "2026-01-02T10:00:00+00:00" }
+              emits:
+                - event: InvitationAccepted
+                  fields: { id: "00000000-0000-0000-0000-000000000001", at: "2026-01-02T10:00:00+00:00" }
+          - name: expired_invitation_is_rejected
+            given:
+              clock: "2026-01-08T10:00:00+00:00"
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              raises: InvitationNotDeliverable
+              emits: []
+              state:
+                - aggregate: CleaningStaffInvitation
+                  id: "00000000-0000-0000-0000-000000000001"
+                  fields: { status: pending }
+          - name: unknown_invitation_is_not_found
+            given:
+              clock: "2026-01-02T10:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000099" }
+            then:
+              raises: InvitationNotFound
+              emits: []
+
+      - name: revoke_invitation
+        actor: 清掃会社の管理者
+        command: RevokeInvitation
+        transaction: required
+        input:
+          - { name: invitation_id, type: UUID }
+        steps:
+          - load: { aggregate: CleaningStaffInvitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - if:
+              condition: invitation.is_open
+              then:
+                - invoke: { target: invitation, operation: revoke }
+                - save: invitation
+                - publish_after_commit: InvitationRevoked
+                - return: true
+              else:
+                - return: false
+        scenarios:
+          - name: open_invitation_is_revoked
+            given:
+              clock: "2026-01-02T10:00:00+00:00"
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              returns: true
+              state:
+                - aggregate: CleaningStaffInvitation
+                  id: "00000000-0000-0000-0000-000000000001"
+                  fields: { status: revoked }
+              emits:
+                - event: InvitationRevoked
+          - name: closed_invitation_is_left_untouched
+            given:
+              clock: "2026-01-02T10:00:00+00:00"
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: accepted
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+                    accepted_at: "2026-01-02T09:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              returns: false
+              emits: []

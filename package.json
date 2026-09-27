@@ -1,0 +1,14 @@
+{
+  "name": "ddd-presenter",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "bun test packages",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "ddd": "bun packages/cli/src/main.ts"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
