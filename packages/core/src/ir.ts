@@ -27,9 +27,14 @@ interface Located {
   path: Path;
 }
 
+export const SUBDOMAIN_KINDS = ["core", "supporting", "generic"] as const;
+export type SubdomainKind = (typeof SUBDOMAIN_KINDS)[number];
+
 export interface ContextIR extends Located {
   name: string;
   description?: string;
+  /** Strategic classification: core (where to invest), supporting, generic (buy or reuse). */
+  subdomain?: SubdomainKind;
   glossary: GlossaryEntryIR[];
   errors: ErrorIR[];
   enums: EnumIR[];

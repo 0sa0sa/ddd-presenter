@@ -28,7 +28,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
-import { RELATIONSHIP_PATTERNS, SCHEMA_VERSION } from "./ir.ts";
+import { RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -568,7 +568,7 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
   if (!o) return undefined;
   r.keys(
     o,
-    ["name", "description", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases", "policies"],
+    ["name", "description", "subdomain", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases", "policies"],
     path,
     "context",
   );
@@ -650,9 +650,14 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
       },
     ];
   });
+  const subdomain = r.str(o, "subdomain", path, false);
+  if (subdomain !== undefined && !(SUBDOMAIN_KINDS as readonly string[]).includes(subdomain)) {
+    r.bag.error("invalid-value", `Unknown subdomain "${subdomain}"`, [...path, "subdomain"], { hint: `Use one of ${SUBDOMAIN_KINDS.join(", ")}` });
+  }
   return {
     name,
     description: r.str(o, "description", path, false),
+    ...(subdomain && (SUBDOMAIN_KINDS as readonly string[]).includes(subdomain) ? { subdomain: subdomain as SubdomainKind } : {}),
     glossary,
     errors,
     enums,

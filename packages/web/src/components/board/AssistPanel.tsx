@@ -19,7 +19,11 @@ export function AssistPanel({
   user,
   voting,
   onVoting,
+  modelText,
+  onModelYaml,
 }: {
+  modelText: string;
+  onModelYaml: (yaml: string, message: string) => void;
   model?: ModelIR;
   user: string;
   voting: boolean;
@@ -76,7 +80,7 @@ export function AssistPanel({
       </div>
 
       {tab === "workshop" && <WorkshopPanel board={board} user={user} canEdit={canEdit} voting={voting} onVoting={onVoting} onChange={onChange} onFocus={onFocus} />}
-      {tab === "model" && <SyncPanel board={board} model={model} canEdit={canEdit} onChange={onChange} onFocus={onFocus} onReflect={onReflect} />}
+      {tab === "model" && <SyncPanel board={board} model={model} modelText={modelText} onModelYaml={onModelYaml} canEdit={canEdit} onChange={onChange} onFocus={onFocus} onReflect={onReflect} />}
 
       {tab === "hints" && (
         <ul className="assist-list">

@@ -412,7 +412,8 @@
             }
           }
         },
-        "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } }
+        "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } },
+        "subdomain": { "enum": ["core", "supporting", "generic"] }
       }
     },
     "policy": {

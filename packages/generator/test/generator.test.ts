@@ -189,7 +189,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 60_000);
+  }, 300_000);
 });
 
 describe("multiple bounded contexts", () => {

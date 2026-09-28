@@ -14,6 +14,7 @@ generation:
 contexts:
   - name: CleaningStaff             # Bounded context（PascalCase）
     description: ...
+    subdomain: core                 # 任意。core（競争力の源）| supporting（支援）| generic（汎用・既製品で済む）
     glossary: [{ term, definition }]
     errors: [...]
     enums: [...]

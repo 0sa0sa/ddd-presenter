@@ -4,10 +4,10 @@
  * what the model has that the board does not, stickies whose element disappeared or was renamed,
  * and placing model elements on the board.
  */
-import { frameOf, STICKY_KINDS, type Board, type BoardFrame, type BoardItem } from "./discovery.ts";
+import { frameOf, STICKY_KINDS, type Board, type BoardFrame, type BoardItem, type Subdomain } from "./discovery.ts";
 import type { ContextIR, ModelIR } from "./ir.ts";
 
-export type SyncKind = "context" | "aggregate" | "command" | "event";
+export type SyncKind = "context" | "aggregate" | "command" | "event" | "policy";
 
 /** A model element, identified the way board stickies refer to it (their code name). */
 export interface ModelElementRef {
@@ -18,6 +18,9 @@ export interface ModelElementRef {
   aggregate?: string;
   /** Text for a new sticky (description or glossary term when there is one). */
   label: string;
+  /** Policies: the event they react to (without its context) and the operations their use case runs. */
+  when?: string;
+  runs?: string[];
 }
 
 export interface StaleSticky {
@@ -39,6 +42,8 @@ export interface BoardModelComparison {
   unreflected: string[];
   /** Stickies and frames that match a model element. */
   linked: string[];
+  /** Context frames whose subdomain classification differs from the model's. */
+  subdomains: { frameId: string; context: string; board?: Subdomain; model?: Subdomain }[];
 }
 
 /** Every element a sticky can stand for, per context. */
@@ -58,6 +63,11 @@ export function modelElements(model: ModelIR): ModelElementRef[] {
         }
       }
     }
+    for (const p of ctx.policies ?? []) {
+      const uc = ctx.useCases.find((u) => u.name === p.run);
+      const runs = uc ? [...JSON.stringify(uc.steps).matchAll(/"(?:operation|factory)":"(\w+)"/g)].map((m) => m[1]!) : [];
+      out.push({ kind: "policy", context: ctx.name, name: p.name, label: p.description?.split("\n")[0] || p.name, when: p.when.split(".").pop(), runs });
+    }
   }
   return out;
 }
@@ -67,7 +77,7 @@ function termFor(ctx: ContextIR, name: string): string | undefined {
   return ctx.glossary.find((g) => g.definition.includes(name) || g.term.toLowerCase() === lower)?.term;
 }
 
-const STICKY_SYNC: Partial<Record<BoardItem["kind"], SyncKind>> = { aggregate: "aggregate", command: "command", event: "event" };
+const STICKY_SYNC: Partial<Record<BoardItem["kind"], SyncKind>> = { aggregate: "aggregate", command: "command", event: "event", policy: "policy" };
 
 export function compareBoardWithModel(board: Board, model: ModelIR): BoardModelComparison {
   const elements = modelElements(model);
@@ -106,7 +116,11 @@ export function compareBoardWithModel(board: Board, model: ModelIR): BoardModelC
       .map((m) => m.name)
       .sort((a, b) => similarity(s.codeName, b) - similarity(s.codeName, a)),
   }));
-  return { missing, stale, unreflected, linked };
+  const subdomains = board.frames.flatMap((f) => {
+    const ctx = f.codeName ? model.contexts.find((c) => c.name === f.codeName) : undefined;
+    return ctx && (f.subdomain ?? undefined) !== (ctx.subdomain ?? undefined) ? [{ frameId: f.id, context: ctx.name, board: f.subdomain, model: ctx.subdomain }] : [];
+  });
+  return { missing, stale, unreflected, linked, subdomains };
 }
 
 /** Shared word parts (PascalCase / snake_case) — enough to rank rename candidates. */
@@ -119,7 +133,7 @@ function similarity(a: string, b: string): number {
 }
 
 /** Points the stickies (and frames) that used `from` at `to`, e.g. after a rename in the model. */
-export function renameOnBoard(board: Board, from: string, to: string, kinds: SyncKind[] = ["aggregate", "event", "command", "context"]): Board {
+export function renameOnBoard(board: Board, from: string, to: string, kinds: SyncKind[] = ["aggregate", "event", "command", "context", "policy"]): Board {
   let changed = false;
   const items = board.items.map((i) => {
     const kind = STICKY_SYNC[i.kind];
@@ -163,9 +177,11 @@ export function addModelElementsToBoard(board: Board, model: ModelIR, elements: 
     if (!inCtx.length) continue;
     let frame: BoardFrame | undefined = b.frames.find((f) => f.codeName === ctx.name);
     const rows: { y: number; x: number }[] = [];
-    // New rows go below the frame's existing content, or start a new frame below the board.
-    const baseY = frame ? Math.max(frame.y + 60, ...b.items.filter((i) => frameOf(b, i)?.id === frame!.id).map((i) => i.y + i.h + 40)) : nextY + 60;
-    const baseX = frame ? frame.x + 40 : left + 40;
+    // New stickies go to the right of the frame's existing content (the timeline runs left to right, and
+    // growing sideways does not run into frames stacked below), or into a new frame below the board.
+    const inFrame = frame ? b.items.filter((i) => frameOf(b, i)?.id === frame!.id) : [];
+    const baseY = frame ? frame.y + 60 : nextY + 60;
+    const baseX = frame ? (inFrame.length ? Math.max(...inFrame.map((i) => i.x + i.w)) + 80 : frame.x + 40) : left + 40;
     let y = baseY;
     for (const ag of ctx.aggregates) {
       const ops = [...ag.factories, ...ag.operations];
@@ -206,7 +222,7 @@ export function addModelElementsToBoard(board: Board, model: ModelIR, elements: 
     const placed = b.items.filter((i) => i.y >= baseY - 10 && i.y < y && i.x >= baseX - 10);
     if (!frame && (want.has(`context:${ctx.name}:${ctx.name}`) || placed.length)) {
       const right = placed.length ? Math.max(...placed.map((i) => i.x + i.w)) + 40 : baseX + 600;
-      frame = { id: newId("f"), title: ctx.description?.split("\n")[0] || ctx.name, codeName: ctx.name, x: baseX - 40, y: baseY - 60, w: Math.max(600, right - baseX + 40), h: Math.max(240, y - baseY + 60) };
+      frame = { id: newId("f"), title: ctx.description?.split("\n")[0] || ctx.name, codeName: ctx.name, ...(ctx.subdomain ? { subdomain: ctx.subdomain } : {}), x: baseX - 40, y: baseY - 60, w: Math.max(600, right - baseX + 40), h: Math.max(240, y - baseY + 60) };
       b.frames.push(frame);
       added.push(frame.id);
     } else if (frame && placed.length) {
@@ -216,6 +232,19 @@ export function addModelElementsToBoard(board: Board, model: ModelIR, elements: 
       b.frames = b.frames.map((f) => (f.id === frame!.id ? { ...f, w: right - f.x, h: bottom - f.y } : f));
     }
     nextY = Math.max(nextY, y + 40);
+  }
+  // Policies: "event → policy → command", next to the command their use case runs.
+  for (const p of elements.filter((e) => e.kind === "policy")) {
+    if (linkedItem("policy", p.name)) continue;
+    const event = p.when ? linkedItem("event", p.when) : undefined;
+    const command = p.runs?.map((r) => linkedItem("command", r)).find(Boolean);
+    const frame = b.frames.find((f) => f.codeName === p.context);
+    const at = command ? { x: command.x - 200, y: command.y } : event ? { x: event.x + event.w + 40, y: event.y } : frame ? { x: frame.x + 40, y: frame.y + frame.h - 140 } : { x: left + 40, y: nextY + 60 };
+    const item = sticky("policy", p.label, p.name, at.x, at.y);
+    b.items.push(item);
+    added.push(item.id);
+    if (event) connect(event.id, item.id);
+    if (command) connect(item.id, command.id);
   }
   if (!added.length) return { board, added };
   b = { ...b };

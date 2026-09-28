@@ -276,6 +276,10 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 canEdit={canEdit}
                 modelText={text}
                 aiActive={!!ai?.active}
+                onModelYaml={(yaml, msg) => {
+                  setText(yaml);
+                  setStatus(msg);
+                }}
                 onReflect={(yaml) => {
                   setText(yaml);
                   setStatus("ボードの内容をモデルに反映しました。差分を確認して保存してください");

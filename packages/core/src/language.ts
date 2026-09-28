@@ -200,6 +200,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
   context: [
     K("name", "コンテキスト名（PascalCase）"),
     K("description", "責務の説明"),
+    K("subdomain", "サブドメインの分類: core（競争力の源）/ supporting（支援）/ generic（汎用・既製品で済む）"),
     K("glossary", "ユビキタス言語の用語集"),
     K("errors", "業務上の失敗（Domain Error）"),
     K("enums", "列挙型"),
@@ -688,6 +689,12 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     scope.useCase ? [...bindingsBefore(scope.useCase.steps, s)].map(([v, a]) => ({ label: v, kind: "variable" as const, detail: a })) : [];
 
   if (c === "relationship") return relationshipCompletions(s, pos);
+  if (c === "context" && key === "subdomain")
+    return [
+      { label: "core", kind: "value" as const, detail: "コア: 競争力の源。いちばん力を入れて作り込む", sortRank: 0 },
+      { label: "supporting", kind: "value" as const, detail: "支援: 業務に必要だが差別化にはならない", sortRank: 1 },
+      { label: "generic", kind: "value" as const, detail: "汎用: どこでも同じ。既製品や外部サービスを使う", sortRank: 2 },
+    ];
   if (c === "policy" && key === "when" && ctx) return policyEventCompletions(s, ctx, pos);
   if (c === "policy" && key === "run") return (ctx?.useCases ?? []).map((u) => ({ label: u.name, kind: "useCase" as const, detail: u.command, documentation: u.description }));
   if (c === "exprMap:policyArgs") return policyArgCompletions(s, scope, pos);

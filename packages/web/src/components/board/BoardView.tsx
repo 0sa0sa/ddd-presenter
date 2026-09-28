@@ -43,6 +43,8 @@ interface Props {
   user: string;
   /** The model from the editor, for the board ↔ model comparison. */
   model?: ModelIR;
+  /** Puts an edited model into the editor without leaving the board. */
+  onModelYaml?: (yaml: string, message: string) => void;
 }
 
 export function BoardView(props: Props) {
@@ -55,7 +57,7 @@ export function BoardView(props: Props) {
 
 type Tool = StickyKind | "frame";
 
-function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, boardId = "main", boardName, user, model }: Props) {
+function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, boardId = "main", boardName, user, model, onModelYaml }: Props) {
   const rf = useReactFlow();
   const [board, setBoard] = useState<Board>();
   const [saved, setSaved] = useState<{ version: number; json: string }>({ version: 0, json: "" });
@@ -658,6 +660,8 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
             user={user}
             voting={voting}
             onVoting={setVoting}
+            modelText={modelText}
+            onModelYaml={(yaml, message) => (onModelYaml ? onModelYaml(yaml, message) : onReflect(yaml))}
             findings={findings}
             candidates={candidates}
             links={links}

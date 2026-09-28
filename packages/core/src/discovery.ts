@@ -815,8 +815,11 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
         errors.push({ name: errName, code: `${agg.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()}_not_found`, message: `${agg} が見つかりません` });
       }
     }
+    const ctxFrame = board.frames.find((f) => f.id === c.frameId);
     if (existingCtx) {
       const base = ctxPath(ctxIndex!);
+      // The board's classification fills a gap; it never overrides what the model already says.
+      if (ctxFrame?.subdomain && !existingCtx.subdomain) ops.push({ op: "set", path: [...base, "subdomain"], value: ctxFrame.subdomain });
       const knownTerms = new Set(existingCtx.glossary.map((g) => g.term));
       for (const g of dedupe(glossary)) if (!knownTerms.has(String(g.term))) ops.push({ op: "add", path: [...base, "glossary"], value: g });
       for (const e of errors) ops.push({ op: "add", path: [...base, "errors"], value: e });
@@ -830,6 +833,7 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
         value: clean({
           name: ctxName,
           description: frame?.title && !/^[\x20-\x7e]+$/.test(frame.title) ? frame.title : undefined,
+          subdomain: frame?.subdomain,
           ...(dedupe(glossary).length ? { glossary: dedupe(glossary) } : {}),
           ...(errors.length ? { errors } : {}),
           aggregates: aggregatesOut,
