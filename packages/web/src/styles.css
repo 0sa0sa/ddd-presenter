@@ -2262,3 +2262,32 @@ input[aria-invalid="true"] {
 .export-menu-body button {
   text-align: left;
 }
+
+/* draw.io import */
+.drawio-colors {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.drawio-colors th,
+.drawio-colors td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+.drawio-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  vertical-align: -3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+}
+.drawio-examples {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

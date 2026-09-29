@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, describeError, type BoardSummary } from "../../api.ts";
 
 /** The project's boards (e.g. one per workshop or per process) as tabs above the canvas. */
-export function BoardTabs({ projectId, current, canEdit, onSelect }: { projectId: string; current: string; canEdit: boolean; onSelect: (id: string, name: string) => void }) {
+export function BoardTabs({ projectId, current, canEdit, onSelect, refreshKey = 0 }: { projectId: string; current: string; canEdit: boolean; onSelect: (id: string, name: string) => void; refreshKey?: number }) {
   const [boards, setBoards] = useState<BoardSummary[]>();
   const [error, setError] = useState<string>();
   const load = useCallback(
@@ -17,7 +17,7 @@ export function BoardTabs({ projectId, current, canEdit, onSelect }: { projectId
         (e) => setError(describeError(e)),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId],
+    [projectId, refreshKey],
   );
   useEffect(() => {
     void load();

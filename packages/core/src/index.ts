@@ -13,3 +13,4 @@ export * from "./discovery.ts";
 export * from "./assist.ts";
 export * from "./workshop.ts";
 export * from "./sync.ts";
+export * from "./drawio.ts";

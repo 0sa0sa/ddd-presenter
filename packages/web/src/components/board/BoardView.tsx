@@ -1,4 +1,4 @@
-import { analyzeBoard, boardGhosts, boardToSvg, contextMap, phaseOf, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type ModelIR, type StickyKind } from "@ddd/core";
+import { analyzeBoard, boardGhosts, boardToDrawio, boardToSvg, contextMap, parseDrawio, phaseOf, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type DrawioPage, type ModelIR, type StickyKind } from "@ddd/core";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, describeError } from "../../api.ts";
 import { acceptGhost, addConnector, addFrame, addItem, addLane, duplicate, frameContents, History, removeIds, updateItem, updateLane, visibleGhosts } from "../../lib/boardOps.ts";
 import { AssistPanel } from "./AssistPanel.tsx";
+import { DrawioImportDialog } from "./DrawioImportDialog.tsx";
 import { ItemPanel } from "./ItemPanel.tsx";
 import { nodeTypes, STICKY_GLYPH, type FrameData, type GhostData, type LaneData, type StickyData } from "./nodes.tsx";
 import { ReflectDialog } from "./ReflectDialog.tsx";
@@ -45,6 +46,8 @@ interface Props {
   model?: ModelIR;
   /** Puts an edited model into the editor without leaving the board. */
   onModelYaml?: (yaml: string, message: string) => void;
+  /** Creates a board from an imported draw.io page and opens it. */
+  onImportNewBoard?: (name: string, board: Board) => Promise<void>;
 }
 
 export function BoardView(props: Props) {
@@ -57,7 +60,7 @@ export function BoardView(props: Props) {
 
 type Tool = StickyKind | "frame";
 
-function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, boardId = "main", boardName, user, model, onModelYaml }: Props) {
+function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, boardId = "main", boardName, user, model, onModelYaml, onImportNewBoard }: Props) {
   const rf = useReactFlow();
   const [board, setBoard] = useState<Board>();
   const [saved, setSaved] = useState<{ version: number; json: string }>({ version: 0, json: "" });
@@ -75,6 +78,8 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
   const [asking, setAsking] = useState(false);
   const [showGhosts, setShowGhosts] = useState(true);
   const [voting, setVoting] = useState(false);
+  const [drawio, setDrawio] = useState<{ fileName: string; pages: DrawioPage[] }>();
+  const drawioInput = useRef<HTMLInputElement>(null);
   const history = useRef(new History());
   const dragStart = useRef<{ frameId?: string; contents: string[]; origin: Record<string, { x: number; y: number }> }>(undefined);
   const boardRef = useRef<Board | undefined>(undefined);
@@ -457,7 +462,17 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
 
   const phaseKinds = new Set<StickyKind>(board?.workshop ? phaseOf(board).kinds : []);
 
-  const exportImage = (format: "svg" | "png") => {
+  const openDrawio = async (file: File) => {
+    try {
+      const r = parseDrawio(await file.text());
+      if (!r.ok) setStatus(r.error);
+      else setDrawio({ fileName: file.name, pages: r.pages });
+    } catch (e) {
+      setStatus(`読み込めませんでした: ${describeError(e)}`);
+    }
+  };
+
+  const exportImage = (format: "svg" | "png" | "drawio") => {
     const b = boardRef.current;
     if (!b) return;
     const title = `${boardName ?? "ボード"}（${new Date().toLocaleDateString()}）`;
@@ -471,6 +486,7 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     };
     const svgBlob = new Blob([svg], { type: "image/svg+xml" });
+    if (format === "drawio") return download(new Blob([boardToDrawio(b, boardName ?? "Board")], { type: "application/xml" }), "drawio");
     if (format === "svg") return download(svgBlob, "svg");
     const img = new Image();
     img.onload = () => {
@@ -546,9 +562,30 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
         )}
         <div className="spacer" />
         {voting && <span className="vote-banner">投票中: 付箋をクリックで1票（Shift+クリックで取り消し）</span>}
+        {canEdit && (
+          <>
+            <button className="quiet" data-tour="drawio-import" title="draw.io（diagrams.net）の図を付箋として読み込みます（.drawio / .xml / 図を含む .drawio.svg）" onClick={() => drawioInput.current?.click()}>
+              draw.io を読み込む
+            </button>
+            <input
+              ref={drawioInput}
+              type="file"
+              accept=".drawio,.xml,.svg,application/xml,image/svg+xml"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (f) void openDrawio(f);
+              }}
+            />
+          </>
+        )}
         <details className="export-menu">
-          <summary className="quiet">画像で保存</summary>
+          <summary className="quiet">書き出し</summary>
           <div className="export-menu-body">
+            <button className="quiet" onClick={() => exportImage("drawio")}>
+              draw.io（.drawio。draw.io で開いて編集できる）
+            </button>
             <button className="quiet" onClick={() => exportImage("svg")}>
               SVG（拡大しても鮮明）
             </button>
@@ -672,6 +709,24 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
           />
         </aside>
       </div>
+      {drawio && board && (
+        <DrawioImportDialog
+          fileName={drawio.fileName}
+          pages={drawio.pages}
+          board={board}
+          onClose={() => setDrawio(undefined)}
+          onImportHere={(next, added) => {
+            commit(next);
+            setDrawio(undefined);
+            setStatus(`draw.io から ${added.length} 個を読み込みました（元に戻す: ⌘Z）`);
+            setTimeout(() => void rf.fitView({ nodes: added.map((id) => ({ id })), padding: 0.2, duration: 300, maxZoom: 1 }), 80);
+          }}
+          onImportNewBoard={(name, next) => {
+            setDrawio(undefined);
+            if (onImportNewBoard) void onImportNewBoard(name, next).catch((e) => setStatus(`新しいボードを作れませんでした: ${describeError(e)}`));
+          }}
+        />
+      )}
       {reflecting && (
         <ReflectDialog
           board={board}

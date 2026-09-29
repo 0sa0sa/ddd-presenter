@@ -63,6 +63,18 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
       return { id: "main", name: "" };
     }
   });
+  const [boardsVersion, setBoardsVersion] = useState(0);
+  const selectBoard = useCallback(
+    (bid: string, name: string) => {
+      setBoard((prev) => (prev.id === bid && prev.name === name ? prev : { id: bid, name }));
+      try {
+        localStorage.setItem(`ddd.board.${id}`, bid);
+      } catch {
+        // Private mode: the choice is not remembered.
+      }
+    },
+    [id],
+  );
   /** Type renames since the last save; applied to the boards' stickies once the model is saved. */
   const pendingRenames = useRef<Rename[]>([]);
   const noteRename = useCallback((from: string, to: string) => {
@@ -257,14 +269,8 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 projectId={id}
                 current={board.id}
                 canEdit={canEdit}
-                onSelect={(bid, name) => {
-                  setBoard((prev) => (prev.id === bid && prev.name === name ? prev : { id: bid, name }));
-                  try {
-                    localStorage.setItem(`ddd.board.${id}`, bid);
-                  } catch {
-                    // Private mode: the choice is not remembered.
-                  }
-                }}
+                refreshKey={boardsVersion}
+                onSelect={selectBoard}
               />
               <BoardView
                 key={board.id}
@@ -276,6 +282,13 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 canEdit={canEdit}
                 modelText={text}
                 aiActive={!!ai?.active}
+                onImportNewBoard={async (name, imported) => {
+                  const created = await api.createBoard(id, name);
+                  await api.saveBoard(id, imported, 0, created.id);
+                  selectBoard(created.id, created.name);
+                  setBoardsVersion((v) => v + 1);
+                  setStatus(`draw.io の図を新しいボード「${created.name}」に読み込みました`);
+                }}
                 onModelYaml={(yaml, msg) => {
                   setText(yaml);
                   setStatus(msg);

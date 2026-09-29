@@ -139,7 +139,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード、ワークショップの進行、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案 |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案 |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語
