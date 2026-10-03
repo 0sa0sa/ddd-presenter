@@ -8,7 +8,10 @@ import { describe, expect, test } from "vitest";
 import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
 import { RegisterStaffUseCase } from "../../src/cleaning_platform/generated/staffing/application/use-cases.js";
 import { RegisterStaff } from "../../src/cleaning_platform/generated/staffing/domain/commands.js";
-import { StaffRegistered } from "../../src/cleaning_platform/generated/staffing/domain/events.js";
+import {
+  parseStaffingEvent,
+  StaffRegistered,
+} from "../../src/cleaning_platform/generated/staffing/domain/events.js";
 import {
   CapturingEventPublisher,
   expectEvent,
@@ -17,6 +20,7 @@ import {
   InMemoryStaffMemberRepository,
   plain,
   SequentialIds,
+  viaJson,
 } from "../../src/cleaning_platform/generated/staffing/testing.js";
 
 describe("register_staff", () => {
@@ -49,14 +53,18 @@ describe("register_staff", () => {
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000bb");
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
-      await staffMemberRepository.get(id("StaffMember", "00000000-0000-0000-0000-0000000000bb")),
+      staffMemberRepository.get(id("StaffMember", "00000000-0000-0000-0000-0000000000bb")),
       "stored StaffMember",
     );
     expect(String(stored0.invitationId)).toBe("00000000-0000-0000-0000-000000000001");
     expect(plain(stored0.joinedAt)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
-    expect(
-      eventPublisher.published.map((event) => event.type)
-    ).toEqual(["Staffing.StaffRegistered"]);
+    expect(eventPublisher.published.map((event) => event.type)).toEqual([
+      "Staffing.StaffRegistered",
+    ]);
+    // Every event survives JSON (e.g. an outbox): parsing its JSON gives an equal event.
+    expect(viaJson(eventPublisher.published, parseStaffingEvent)).toEqual(
+      eventPublisher.published.map(plain),
+    );
     const event0 = expectEvent(eventPublisher.published, 0, StaffRegistered);
     expect(String(event0.invitationId)).toBe("00000000-0000-0000-0000-000000000001");
   });

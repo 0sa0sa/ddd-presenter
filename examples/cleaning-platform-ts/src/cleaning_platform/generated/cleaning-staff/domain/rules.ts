@@ -5,7 +5,8 @@
 
 import type { Rule } from "../../runtime.js";
 
-export const RULES: ReadonlyArray<Rule> = [
+// `satisfies` checks every entry against Rule while keeping the literal types (rule names, kinds).
+export const RULES = [
   {
     name: "expiry_after_creation",
     kind: "invariant",
@@ -42,4 +43,4 @@ export const RULES: ReadonlyArray<Rule> = [
     checkOn: [],
     appliedBy: ["revoke"],
   },
-];
+] as const satisfies ReadonlyArray<Rule>;

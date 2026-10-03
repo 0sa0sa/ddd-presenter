@@ -10,8 +10,12 @@ export class InvalidInvitationWindow extends DomainError {
   static override readonly code = "invalid_invitation_window";
   override readonly code = "invalid_invitation_window";
 
-  constructor(details: ErrorDetails = {}, message = "招待の有効期限は作成日時より後である必要があります") {
-    super(details, message);
+  constructor(
+    details: ErrorDetails = {},
+    message = "招待の有効期限は作成日時より後である必要があります",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
   }
 }
 
@@ -20,8 +24,12 @@ export class InvitationNotDeliverable extends DomainError {
   static override readonly code = "invitation_not_deliverable";
   override readonly code = "invitation_not_deliverable";
 
-  constructor(details: ErrorDetails = {}, message = "この招待は受諾できません（受諾済み・取り消し済み・期限切れ）") {
-    super(details, message);
+  constructor(
+    details: ErrorDetails = {},
+    message = "この招待は受諾できません（受諾済み・取り消し済み・期限切れ）",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
   }
 }
 
@@ -30,8 +38,12 @@ export class InvitationAlreadyClosed extends DomainError {
   static override readonly code = "invitation_already_closed";
   override readonly code = "invitation_already_closed";
 
-  constructor(details: ErrorDetails = {}, message = "この招待はすでに終了しています") {
-    super(details, message);
+  constructor(
+    details: ErrorDetails = {},
+    message = "この招待はすでに終了しています",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
   }
 }
 
@@ -40,8 +52,12 @@ export class InvitationNotFound extends DomainError {
   static override readonly code = "invitation_not_found";
   override readonly code = "invitation_not_found";
 
-  constructor(details: ErrorDetails = {}, message = "招待が見つかりません") {
-    super(details, message);
+  constructor(
+    details: ErrorDetails = {},
+    message = "招待が見つかりません",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
   }
 }
 
@@ -50,8 +66,12 @@ export class EmailBlocked extends DomainError {
   static override readonly code = "email_blocked";
   override readonly code = "email_blocked";
 
-  constructor(details: ErrorDetails = {}, message = "このメールアドレスには招待を送れません") {
-    super(details, message);
+  constructor(
+    details: ErrorDetails = {},
+    message = "このメールアドレスには招待を送れません",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
   }
 }
 

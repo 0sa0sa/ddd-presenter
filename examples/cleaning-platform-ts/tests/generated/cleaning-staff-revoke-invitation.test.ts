@@ -8,11 +8,14 @@ import { describe, expect, test } from "vitest";
 import { RevokeInvitationUseCase } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
 import { CleaningStaffInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
 import { RevokeInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
+import { parseCleaningStaffEvent } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import {
   CapturingEventPublisher,
   expectPresent,
   FakeUnitOfWork,
   InMemoryCleaningStaffInvitationRepository,
+  plain,
+  viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { id } from "../../src/cleaning_platform/generated/runtime.js";
 
@@ -29,7 +32,7 @@ describe("revoke_invitation", () => {
   test("open_invitation_is_revoked", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
@@ -38,7 +41,7 @@ describe("revoke_invitation", () => {
         status: "pending",
         createdAt: "2026-01-01T10:00:00+00:00",
         expiresAt: "2026-01-08T10:00:00+00:00",
-      })
+      }),
     );
     const eventPublisher = new CapturingEventPublisher();
     const useCase = new RevokeInvitationUseCase({
@@ -47,21 +50,25 @@ describe("revoke_invitation", () => {
       unitOfWork,
     });
     const command = RevokeInvitation.create({
-      invitationId: "00000000-0000-0000-0000-000000000001"
+      invitationId: "00000000-0000-0000-0000-000000000001",
     });
     const result = await useCase.execute(command);
     expect(result).toBe(true);
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
-      await cleaningStaffInvitationRepository.get(
-        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001")
+      cleaningStaffInvitationRepository.get(
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("revoked");
-    expect(
-      eventPublisher.published.map((event) => event.type)
-    ).toEqual(["CleaningStaff.InvitationRevoked"]);
+    expect(eventPublisher.published.map((event) => event.type)).toEqual([
+      "CleaningStaff.InvitationRevoked",
+    ]);
+    // Every event survives JSON (e.g. an outbox): parsing its JSON gives an equal event.
+    expect(viaJson(eventPublisher.published, parseCleaningStaffEvent)).toEqual(
+      eventPublisher.published.map(plain),
+    );
   });
 
   /**
@@ -74,7 +81,7 @@ describe("revoke_invitation", () => {
   test("closed_invitation_is_left_untouched", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
@@ -84,7 +91,7 @@ describe("revoke_invitation", () => {
         createdAt: "2026-01-01T10:00:00+00:00",
         expiresAt: "2026-01-08T10:00:00+00:00",
         acceptedAt: "2026-01-02T09:00:00+00:00",
-      })
+      }),
     );
     const eventPublisher = new CapturingEventPublisher();
     const useCase = new RevokeInvitationUseCase({
@@ -93,7 +100,7 @@ describe("revoke_invitation", () => {
       unitOfWork,
     });
     const command = RevokeInvitation.create({
-      invitationId: "00000000-0000-0000-0000-000000000001"
+      invitationId: "00000000-0000-0000-0000-000000000001",
     });
     const result = await useCase.execute(command);
     expect(result).toBe(false);

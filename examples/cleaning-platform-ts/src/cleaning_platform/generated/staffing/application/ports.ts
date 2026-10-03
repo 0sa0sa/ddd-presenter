@@ -14,6 +14,3 @@ export interface StaffMemberRepository {
   get(id: Id<"StaffMember">): Awaitable<StaffMember | null>;
   save(aggregate: StaffMember): Awaitable<void>;
 }
-
-/** This context declares no extension points. */
-export interface Extensions {}

@@ -4,9 +4,10 @@ import { GENERATOR_NAME, GENERATOR_VERSION } from "../python/support.ts";
 import { extensionSignature, portsFile, useCasesFile } from "./application.ts";
 import { assemble, Code, docLines, header, relativeSpecifier, SCAFFOLD_HEADER, TsImports, tsString } from "./code.ts";
 import { contextReadme } from "./docs.ts";
+import { PRINT_WIDTH } from "./format.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, rulesFile, valueObjectsFile } from "./domain.ts";
 import { TsLayout, TsPaths } from "./layout.ts";
-import { ident, toSnake } from "./names.ts";
+import { ident, prop, toSnake } from "./names.ts";
 import { policiesFile, policyTestFile, translatorScaffold } from "./policies.ts";
 import ADAPTERS_TS from "./templates/adapters.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
@@ -88,6 +89,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
   }
   scaffold("package.json", packageJson(model));
   scaffold("tsconfig.json", tsconfigJson(model));
+  // The generated code is Prettier-clean at this width (Prettier's default is 80).
+  scaffold(".prettierrc.json", `${JSON.stringify({ printWidth: PRINT_WIDTH }, null, 2)}\n`);
 
   files.sort((a, b) => a.path.localeCompare(b.path));
   const manifestPath = `${P.generated}/model_manifest.json`;
@@ -140,8 +143,10 @@ function extensionsScaffold(L: TsLayout): { path: string; content: string } {
   c.block(`export class ${cls} implements Extensions`, () => {
     L.ca.ir.extensionPoints.forEach((x, i) => {
       if (i) c.line();
-      c.doc(x.description ?? x.name);
-      c.block(`${extensionSignature(L, x, imp)}: ${tsType(L.resolve(x.returns), imp, L)}`, () => {
+      // The stub takes no parameters (still assignable to the interface); add the ones you use.
+      const signature = extensionSignature(L, x, new TsImports(module));
+      c.doc(`${x.description ?? x.name}\n\nInterface: \`${signature}\``);
+      c.block(`${prop(x.name)}(): ${tsType(L.resolve(x.returns), imp, L)}`, () => {
         c.line(`throw new Error(${tsString(`${x.name} is not implemented yet`)});`);
       });
     });
@@ -180,9 +185,12 @@ function tsconfigJson(model: ModelIR): string {
       exactOptionalPropertyTypes: true,
       noImplicitOverride: true,
       noUnusedLocals: true,
+      noUnusedParameters: true,
+      noImplicitReturns: true,
       noFallthroughCasesInSwitch: true,
       verbatimModuleSyntax: true,
       isolatedModules: true,
+      erasableSyntaxOnly: true,
       skipLibCheck: true,
       noEmit: true,
       types: [model.generation.typescript.testRunner === "bun" ? "bun" : "node"],

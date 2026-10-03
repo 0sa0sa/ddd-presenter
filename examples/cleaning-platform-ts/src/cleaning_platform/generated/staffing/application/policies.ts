@@ -35,9 +35,11 @@ export class RegisterStaffOnAcceptancePolicy {
 
   /** Event bus entry point (EventHandler). */
   readonly onEvent: EventHandler = async (event) => {
-    if (!cleaningStaffEvents.InvitationAccepted.is(event)) throw new TypeError(
-      "RegisterStaffOnAcceptancePolicy handles CleaningStaff.InvitationAccepted, not " + event.type
-    );
+    if (!cleaningStaffEvents.InvitationAccepted.is(event))
+      throw new TypeError(
+        "RegisterStaffOnAcceptancePolicy handles CleaningStaff.InvitationAccepted, not " +
+          event.type,
+      );
     await this.handle(event);
   };
 }
@@ -46,9 +48,9 @@ export class RegisterStaffOnAcceptancePolicy {
  * Event type → policies of Staffing. Register them with your event bus, or call
  * `dispatch(subscriptions({...}), events)` (runtime.ts) for in-process delivery.
  */
-export function subscriptions(
-  policies: { readonly registerStaffOnAcceptance: RegisterStaffOnAcceptancePolicy }
-): Subscriptions {
+export function subscriptions(policies: {
+  readonly registerStaffOnAcceptance: RegisterStaffOnAcceptancePolicy;
+}): Subscriptions {
   return new Map<string, ReadonlyArray<EventHandler>>([
     [cleaningStaffEvents.InvitationAccepted.type, [policies.registerStaffOnAcceptance.onEvent]],
   ]);

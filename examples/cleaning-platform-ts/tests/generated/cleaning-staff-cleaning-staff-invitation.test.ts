@@ -25,13 +25,14 @@ describe("CleaningStaffInvitation", () => {
    */
   test("invitation_window_must_be_positive", () => {
     expectThrows(
-      () => CleaningStaffInvitation.from({
-        id: "00000000-0000-0000-0000-000000000001",
-        email: { value: "staff@example.com" },
-        status: "pending",
-        createdAt: "2026-01-01T10:00:00+00:00",
-        expiresAt: "2026-01-01T09:00:00+00:00",
-      }),
+      () =>
+        CleaningStaffInvitation.from({
+          id: "00000000-0000-0000-0000-000000000001",
+          email: { value: "staff@example.com" },
+          status: "pending",
+          createdAt: "2026-01-01T10:00:00+00:00",
+          expiresAt: "2026-01-01T09:00:00+00:00",
+        }),
       InvalidInvitationWindow,
     );
   });

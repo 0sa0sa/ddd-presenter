@@ -12,7 +12,10 @@ import {
   InvitationNotDeliverable,
   InvitationNotFound,
 } from "../../src/cleaning_platform/generated/cleaning-staff/domain/errors.js";
-import { InvitationAccepted } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
+import {
+  InvitationAccepted,
+  parseCleaningStaffEvent,
+} from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import {
   CapturingEventPublisher,
   expectEvent,
@@ -22,6 +25,7 @@ import {
   FixedClock,
   InMemoryCleaningStaffInvitationRepository,
   plain,
+  viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
 
@@ -38,7 +42,7 @@ describe("accept_invitation", () => {
   test("pending_invitation_is_accepted", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
@@ -47,7 +51,7 @@ describe("accept_invitation", () => {
         status: "pending",
         createdAt: "2026-01-01T10:00:00+00:00",
         expiresAt: "2026-01-08T10:00:00+00:00",
-      })
+      }),
     );
     const clock = new FixedClock(dateTime("2026-01-02T10:00:00+00:00"));
     const eventPublisher = new CapturingEventPublisher();
@@ -58,21 +62,25 @@ describe("accept_invitation", () => {
       unitOfWork,
     });
     const command = AcceptInvitation.create({
-      invitationId: "00000000-0000-0000-0000-000000000001"
+      invitationId: "00000000-0000-0000-0000-000000000001",
     });
     await useCase.execute(command);
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
-      await cleaningStaffInvitationRepository.get(
-        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001")
+      cleaningStaffInvitationRepository.get(
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("accepted");
     expect(plain(stored0.acceptedAt)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
-    expect(
-      eventPublisher.published.map((event) => event.type)
-    ).toEqual(["CleaningStaff.InvitationAccepted"]);
+    expect(eventPublisher.published.map((event) => event.type)).toEqual([
+      "CleaningStaff.InvitationAccepted",
+    ]);
+    // Every event survives JSON (e.g. an outbox): parsing its JSON gives an equal event.
+    expect(viaJson(eventPublisher.published, parseCleaningStaffEvent)).toEqual(
+      eventPublisher.published.map(plain),
+    );
     const event0 = expectEvent(eventPublisher.published, 0, InvitationAccepted);
     expect(String(event0.id)).toBe("00000000-0000-0000-0000-000000000001");
     expect(plain(event0.at)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
@@ -89,7 +97,7 @@ describe("accept_invitation", () => {
   test("expired_invitation_is_rejected", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
@@ -98,7 +106,7 @@ describe("accept_invitation", () => {
         status: "pending",
         createdAt: "2026-01-01T10:00:00+00:00",
         expiresAt: "2026-01-08T10:00:00+00:00",
-      })
+      }),
     );
     const clock = new FixedClock(dateTime("2026-01-08T10:00:00+00:00"));
     const eventPublisher = new CapturingEventPublisher();
@@ -109,14 +117,14 @@ describe("accept_invitation", () => {
       unitOfWork,
     });
     const command = AcceptInvitation.create({
-      invitationId: "00000000-0000-0000-0000-000000000001"
+      invitationId: "00000000-0000-0000-0000-000000000001",
     });
     await expectRejects(() => useCase.execute(command), InvitationNotDeliverable);
     expect(unitOfWork.committed).toBe(false);
     expect(unitOfWork.rolledBack).toBe(true);
     const stored0 = expectPresent(
-      await cleaningStaffInvitationRepository.get(
-        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001")
+      cleaningStaffInvitationRepository.get(
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
     );
@@ -134,7 +142,7 @@ describe("accept_invitation", () => {
   test("unknown_invitation_is_not_found", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     const clock = new FixedClock(dateTime("2026-01-02T10:00:00+00:00"));
     const eventPublisher = new CapturingEventPublisher();
@@ -145,7 +153,7 @@ describe("accept_invitation", () => {
       unitOfWork,
     });
     const command = AcceptInvitation.create({
-      invitationId: "00000000-0000-0000-0000-000000000099"
+      invitationId: "00000000-0000-0000-0000-000000000099",
     });
     await expectRejects(() => useCase.execute(command), InvitationNotFound);
     expect(unitOfWork.committed).toBe(false);

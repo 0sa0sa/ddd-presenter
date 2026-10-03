@@ -1,4 +1,5 @@
 import type { ModelIR } from "@ddd/core";
+import { formatSource } from "./format.ts";
 
 /** Maximum length of a generated line (code is wrapped by `wrapLongLines`, doc comments by `docLines`). */
 export const MAX_LINE = 100;
@@ -12,8 +13,16 @@ export function header(model: ModelIR): string {
 
 export const SCAFFOLD_HEADER = "// Created by DDD Presenter as a starting point. This file is yours to edit.";
 
+/**
+ * A string literal as Prettier prints it: double quotes, unless the text holds more double than single quotes
+ * (then single quotes, so fewer characters need escaping).
+ */
 export function tsString(s: string): string {
-  return JSON.stringify(s);
+  const json = JSON.stringify(s);
+  const doubles = (s.match(/"/g) ?? []).length;
+  const singles = (s.match(/'/g) ?? []).length;
+  if (doubles <= singles) return json;
+  return `'${json.slice(1, -1).replace(/\\"/g, '"').replace(/'/g, "\\'")}'`;
 }
 
 /** `x` for `(x)` when the outer parentheses enclose the whole expression (e.g. before putting it in `if (…)`). */
@@ -216,237 +225,11 @@ export function relativeSpecifier(from: string, to: string): string {
   return `${up === 0 ? "./" : "../".repeat(up)}${rest}.js`;
 }
 
-/** File header, imports and body, with over-long lines wrapped. */
+/** File header, imports and body; over-long lines are re-printed with Prettier's rules (format.ts). */
 export function assemble(head: string, doc: string | undefined, imports: TsImports, body: string): string {
   const parts = [head];
   if (doc) parts.push(docLines(doc, "").join("\n"));
   const imp = imports.render();
   if (imp) parts.push(imp);
-  return wrapLongLines(parts.join("\n\n") + "\n\n" + body.trim() + "\n");
-}
-
-// ---------------------------------------------------------------------------
-// Line wrapping
-//
-// Generated code stays within MAX_LINE characters. Over-long lines are split only inside brackets (and never before
-// `=>` or right after `return` / `throw`, where a line break changes the meaning through automatic semicolon
-// insertion). A trailing comma is added only to groups that already hold several comma-separated elements
-// (arguments, array and object literals), never to a grouping parenthesis.
-// ---------------------------------------------------------------------------
-
-export function wrapLongLines(src: string, max = MAX_LINE): string {
-  const out: string[] = [];
-  let inDoc = false;
-  for (const line of src.split("\n")) {
-    const t = line.trimStart();
-    if (t.startsWith("/**") && !t.includes("*/")) inDoc = true;
-    if (inDoc || t.startsWith("/**") || t.startsWith("*") || line.length <= max) {
-      if (inDoc && t.includes("*/")) inDoc = false;
-      out.push(line);
-      continue;
-    }
-    if (/^(import|export) (type )?(\{ [\w$]+ \}|\* as [\w$]+) from "[^"]+";$/.test(t)) {
-      out.push(line);
-      continue;
-    }
-    if (t.startsWith("//")) {
-      const indent = /^ */.exec(line)![0];
-      out.push(...wrapWords(t.replace(/^\/\/\s?/, ""), max - indent.length - 3).map((l) => `${indent}// ${l}`));
-      continue;
-    }
-    out.push(...wrapLine(line, max));
-  }
-  return out.join("\n");
-}
-
-interface Group {
-  open: number;
-  close: number;
-}
-
-/** Bracket groups at nesting depth 0 (string literals are skipped). */
-function topGroups(line: string): Group[] {
-  const groups: Group[] = [];
-  let depth = 0;
-  let open = -1;
-  let quote: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]!;
-    if (quote) {
-      if (ch === "\\") i++;
-      else if (ch === quote) quote = undefined;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if ("([{".includes(ch)) {
-      if (depth === 0) open = i;
-      depth++;
-    } else if (")]}".includes(ch)) {
-      depth--;
-      if (depth === 0 && open !== -1) groups.push({ open, close: i });
-    }
-  }
-  return groups;
-}
-
-/** Offsets of `needle` at nesting depth 0, outside string literals. */
-function topLevel(s: string, needle: string): number[] {
-  const out: number[] = [];
-  let depth = 0;
-  let quote: string | undefined;
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i]!;
-    if (quote) {
-      if (ch === "\\") i++;
-      else if (ch === quote) quote = undefined;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if ("([{".includes(ch)) depth++;
-    else if (")]}".includes(ch)) depth--;
-    else if (depth === 0 && s.startsWith(needle, i)) out.push(i);
-  }
-  return out;
-}
-
-/** Splits a boolean expression before its top-level `||` (else `&&`) operators; the operator leads the next line. */
-function splitBoolean(expr: string): string[] {
-  for (const op of [" || ", " && "]) {
-    const at = topLevel(expr, op);
-    if (!at.length) continue;
-    const parts: string[] = [];
-    let start = 0;
-    for (const i of at) {
-      parts.push(expr.slice(start, i));
-      start = i + 1;
-    }
-    parts.push(expr.slice(start));
-    return parts.map((p) => p.trim());
-  }
-  return [expr.trim()];
-}
-
-/** `return …;`, `const x = …;`, `x = …;` and `key: …,` lines whose value may be a bare boolean expression. */
-const STATEMENT = /^(return |(?:const |let )?[A-Za-z_$][\w$.]*(?:: [\w<>[\]| ".]+)? = |[A-Za-z_$][\w$]*: )(.*?)(;|,)?$/;
-
-function wrapLine(line: string, max: number): string[] {
-  if (line.length <= max) return [line];
-  const indent = /^ */.exec(line)![0];
-  const inner = indent + "  ";
-  const rewrap = (lines: string[]) => lines.flatMap((l) => wrapLine(l, max));
-
-  // A boolean value outside any bracket: put it in grouping parentheses (opened on this line), one operand per line.
-  const m = STATEMENT.exec(line.slice(indent.length));
-  if (m) {
-    const lead = m[1]!;
-    const value = m[2]!;
-    const end = m[3] ?? "";
-    if (!topLevel(value, ",").length && !topLevel(value, "=>").length && (topLevel(value, " || ").length || topLevel(value, " && ").length)) {
-      return [`${indent}${lead}(`, ...rewrap(splitBoolean(value).map((p) => inner + p)), `${indent})${end}`];
-    }
-  }
-
-  // A union type alias: one member per line (`| A`).
-  const union = /^((?:export )?type [\w$]+ = )(.*);$/.exec(line.slice(indent.length));
-  if (union && topLevel(union[2]!, " | ").length) {
-    return [`${indent}${union[1]!.trimEnd()}`, ...splitAt(union[2]!, " | ").map((p, i, all) => `${inner}| ${p}${i === all.length - 1 ? ";" : ""}`)];
-  }
-
-  // An element of a wrapped bracket group (an argument, a property value) that is a long boolean: split before its
-  // operators. The enclosing brackets make the line break safe.
-  const body = line.slice(indent.length).replace(/,$/, "");
-  if (!topLevel(body, ",").length && (topLevel(body, " || ").length || topLevel(body, " && ").length)) {
-    const parts = splitBoolean(body);
-    const comma = line.endsWith(",") ? "," : "";
-    return rewrap([`${indent}${parts[0]}`, ...parts.slice(1).map((p, i) => `${inner}${p}${i === parts.length - 2 ? comma : ""}`)]);
-  }
-
-  // Otherwise break up the longest top-level bracket group.
-  const groups = topGroups(line);
-  if (!groups.length) return splitString(line, max);
-  return splitGroup(line, groups.reduce((a, b) => (b.close - b.open > a.close - a.open ? b : a)), max);
-}
-
-function splitGroup(line: string, g: Group, max: number): string[] {
-  const indent = /^ */.exec(line)![0];
-  const inner = indent + "  ";
-  const rewrap = (lines: string[]) => lines.flatMap((l) => wrapLine(l, max));
-  const content = line.slice(g.open + 1, g.close);
-  if (!content.trim()) return [line];
-  const head = line.slice(0, g.open + 1).trimEnd();
-  const tail = `${indent}${line.slice(g.close)}`;
-  const elements = splitTopLevel(content, ",");
-  if (elements.length < 2 && !content.trimEnd().endsWith(",")) {
-    const t = content.trim();
-    // A single object / array literal argument hugs the parentheses: `f({` … `})`.
-    const only = topGroups(t);
-    if ("{[".includes(t[0]!) && only.length === 1 && only[0]!.open === 0 && only[0]!.close === t.length - 1) {
-      const at = g.open + 1 + content.indexOf(t);
-      return splitGroup(line, { open: at, close: at + t.length - 1 }, max);
-    }
-    // A type literal: one member per line.
-    const members = line[g.open] === "{" ? splitTopLevel(content, ";") : [];
-    if (members.length > 1) return [head, ...members.flatMap((m) => wrapLine(`${inner}${m.trim()};`, max)), tail];
-    // One element: a grouping parenthesis, a single argument or an arrow function. Never add a comma.
-    return [head, ...rewrap(splitBoolean(content).map((p) => inner + p)), tail];
-  }
-  const body = elements.flatMap((el) => {
-    const parts = wrapLine(`${inner}${el.trim()}`, max - 1);
-    parts[parts.length - 1] += ",";
-    return parts;
-  });
-  return [head, ...body, tail];
-}
-
-/** Top-level parts of `s` separated by `separator` (trimmed). */
-function splitAt(s: string, separator: string): string[] {
-  const out: string[] = [];
-  let start = 0;
-  for (const i of topLevel(s, separator)) {
-    out.push(s.slice(start, i).trim());
-    start = i + separator.length;
-  }
-  out.push(s.slice(start).trim());
-  return out;
-}
-
-/**
- * A line that is just a (`key: `) string literal, e.g. a property on its own line: split it at spaces into literals
- * joined with `+`. Anything else is returned unchanged.
- */
-function splitString(line: string, max: number): string[] {
-  const m = /^( *)((?:[\w$]+: )?)"((?:[^"\\]|\\.)*)"(,?)$/.exec(line);
-  if (!m) return [line];
-  const [, indent, key, body, comma] = m as unknown as [string, string, string, string, string];
-  const width = max - indent.length - 6;
-  const chunks: string[] = [];
-  let cur = "";
-  for (const w of body.split(" ")) {
-    if (cur && cur.length + 1 + w.length > width) {
-      chunks.push(`${cur} `);
-      cur = w;
-    } else {
-      cur = cur ? `${cur} ${w}` : w;
-    }
-  }
-  chunks.push(cur);
-  if (chunks.length < 2) {
-    // Short enough on a line of its own: move the value below its key.
-    const value = `${indent}  "${body}"${comma}`;
-    return key && value.length <= max + 1 ? [`${indent}${key.trimEnd()}`, value] : [line];
-  }
-  const lines = chunks.map((c, i) => `${indent}  "${c}"${i === chunks.length - 1 ? comma : " +"}`);
-  return [`${indent}${key.trimEnd()}`, ...lines];
-}
-
-function splitTopLevel(s: string, separator: string): string[] {
-  const out: string[] = [];
-  let start = 0;
-  for (const i of topLevel(s, separator)) {
-    out.push(s.slice(start, i));
-    start = i + 1;
-  }
-  const last = s.slice(start);
-  if (last.trim()) out.push(last);
-  return out;
+  return formatSource(parts.join("\n\n") + "\n\n" + body.trim() + "\n");
 }

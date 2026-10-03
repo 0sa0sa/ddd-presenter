@@ -67,7 +67,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
    */
   static from(input: CleaningStaffInvitationInput): CleaningStaffInvitation {
     const aggregate = new CleaningStaffInvitation(
-      parseWith(CleaningStaffInvitationProps, input, "CleaningStaffInvitation")
+      parseWith(CleaningStaffInvitationProps, input, "CleaningStaffInvitation"),
     );
     aggregate.#checkInvariants();
     return aggregate;
@@ -162,14 +162,12 @@ export class CleaningStaffInvitation extends AggregateRoot {
    * Factory: construct-time invariants are checked on the new instance.
    * Emits: InvitationIssued.
    */
-  static issue(
-    args: {
-      readonly id: UUID;
-      readonly email: EmailAddress;
-      readonly at: Date;
-      readonly expiresAt: Date;
-    }
-  ): Transition<CleaningStaffInvitation> {
+  static issue(args: {
+    readonly id: UUID;
+    readonly email: EmailAddress;
+    readonly at: Date;
+    readonly expiresAt: Date;
+  }): Transition<CleaningStaffInvitation> {
     const { id, email, at, expiresAt } = args;
     const aggregate = CleaningStaffInvitation.from({
       id,

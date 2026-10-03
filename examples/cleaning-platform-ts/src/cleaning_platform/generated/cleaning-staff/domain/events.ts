@@ -5,83 +5,128 @@
 
 import { z } from "zod";
 
-import { dateTimeSchema, type DomainEvent, parseWith, uuidSchema } from "../../runtime.js";
+import {
+  dateTimeSchema,
+  type DomainEvent,
+  type EventType,
+  parseWith,
+  uuidSchema,
+} from "../../runtime.js";
 import { EmailAddressSchema } from "./value-objects.js";
 
-const InvitationAcceptedPayload = z.strictObject({
-  id: uuidSchema,
-  at: dateTimeSchema,
-});
+const InvitationAcceptedSchema = z
+  .strictObject({
+    type: z.literal("CleaningStaff.InvitationAccepted"),
+    id: uuidSchema,
+    at: dateTimeSchema,
+  })
+  .readonly();
 
 /** Emitted by CleaningStaffInvitation.accept. */
-export type InvitationAccepted = Readonly<{
-  type: "CleaningStaff.InvitationAccepted"
-} & z.output<typeof InvitationAcceptedPayload>>;
-export type InvitationAcceptedInput = z.input<typeof InvitationAcceptedPayload>;
+export type InvitationAccepted = z.output<typeof InvitationAcceptedSchema>;
+/** Payload of `InvitationAccepted.create`: the event without its `type`. */
+export type InvitationAcceptedInput = Omit<z.input<typeof InvitationAcceptedSchema>, "type">;
 
 export const InvitationAccepted = {
   type: "CleaningStaff.InvitationAccepted",
-  /** Builds the event (the payload is validated and frozen). */
+  /** Strict schema of the whole event, `type` included (unknown keys are rejected). */
+  schema: InvitationAcceptedSchema,
+  /** Builds the event: the payload is validated, the event is frozen. */
   create(payload: InvitationAcceptedInput): InvitationAccepted {
-    return Object.freeze({
-      type: InvitationAccepted.type,
-      ...parseWith(InvitationAcceptedPayload, payload, "InvitationAccepted"),
-    });
+    return parseWith(
+      InvitationAcceptedSchema,
+      { ...payload, type: "CleaningStaff.InvitationAccepted" },
+      "InvitationAccepted",
+    );
   },
-  is(event: DomainEvent): event is InvitationAccepted {
-    return event.type === InvitationAccepted.type;
+  /** Parses a serialized event (e.g. JSON read from an outbox). */
+  parse(input: unknown): InvitationAccepted {
+    return parseWith(InvitationAcceptedSchema, input, "InvitationAccepted");
   },
-} as const;
+  /** Type guard (an arrow function: safe to pass unbound, e.g. `events.filter(X.is)`). */
+  is: (event: DomainEvent): event is InvitationAccepted =>
+    event.type === "CleaningStaff.InvitationAccepted",
+} as const satisfies EventType<InvitationAccepted, InvitationAcceptedInput>;
 
-const InvitationIssuedPayload = z.strictObject({
-  id: uuidSchema,
-  email: EmailAddressSchema,
-  expiresAt: dateTimeSchema,
-});
+const InvitationIssuedSchema = z
+  .strictObject({
+    type: z.literal("CleaningStaff.InvitationIssued"),
+    id: uuidSchema,
+    email: EmailAddressSchema,
+    expiresAt: dateTimeSchema,
+  })
+  .readonly();
 
 /** Emitted by CleaningStaffInvitation.issue. */
-export type InvitationIssued = Readonly<{
-  type: "CleaningStaff.InvitationIssued"
-} & z.output<typeof InvitationIssuedPayload>>;
-export type InvitationIssuedInput = z.input<typeof InvitationIssuedPayload>;
+export type InvitationIssued = z.output<typeof InvitationIssuedSchema>;
+/** Payload of `InvitationIssued.create`: the event without its `type`. */
+export type InvitationIssuedInput = Omit<z.input<typeof InvitationIssuedSchema>, "type">;
 
 export const InvitationIssued = {
   type: "CleaningStaff.InvitationIssued",
-  /** Builds the event (the payload is validated and frozen). */
+  /** Strict schema of the whole event, `type` included (unknown keys are rejected). */
+  schema: InvitationIssuedSchema,
+  /** Builds the event: the payload is validated, the event is frozen. */
   create(payload: InvitationIssuedInput): InvitationIssued {
-    return Object.freeze({
-      type: InvitationIssued.type,
-      ...parseWith(InvitationIssuedPayload, payload, "InvitationIssued"),
-    });
+    return parseWith(
+      InvitationIssuedSchema,
+      { ...payload, type: "CleaningStaff.InvitationIssued" },
+      "InvitationIssued",
+    );
   },
-  is(event: DomainEvent): event is InvitationIssued {
-    return event.type === InvitationIssued.type;
+  /** Parses a serialized event (e.g. JSON read from an outbox). */
+  parse(input: unknown): InvitationIssued {
+    return parseWith(InvitationIssuedSchema, input, "InvitationIssued");
   },
-} as const;
+  /** Type guard (an arrow function: safe to pass unbound, e.g. `events.filter(X.is)`). */
+  is: (event: DomainEvent): event is InvitationIssued =>
+    event.type === "CleaningStaff.InvitationIssued",
+} as const satisfies EventType<InvitationIssued, InvitationIssuedInput>;
 
-const InvitationRevokedPayload = z.strictObject({
-  id: uuidSchema,
-});
+const InvitationRevokedSchema = z
+  .strictObject({
+    type: z.literal("CleaningStaff.InvitationRevoked"),
+    id: uuidSchema,
+  })
+  .readonly();
 
 /** Emitted by CleaningStaffInvitation.revoke. */
-export type InvitationRevoked = Readonly<{
-  type: "CleaningStaff.InvitationRevoked"
-} & z.output<typeof InvitationRevokedPayload>>;
-export type InvitationRevokedInput = z.input<typeof InvitationRevokedPayload>;
+export type InvitationRevoked = z.output<typeof InvitationRevokedSchema>;
+/** Payload of `InvitationRevoked.create`: the event without its `type`. */
+export type InvitationRevokedInput = Omit<z.input<typeof InvitationRevokedSchema>, "type">;
 
 export const InvitationRevoked = {
   type: "CleaningStaff.InvitationRevoked",
-  /** Builds the event (the payload is validated and frozen). */
+  /** Strict schema of the whole event, `type` included (unknown keys are rejected). */
+  schema: InvitationRevokedSchema,
+  /** Builds the event: the payload is validated, the event is frozen. */
   create(payload: InvitationRevokedInput): InvitationRevoked {
-    return Object.freeze({
-      type: InvitationRevoked.type,
-      ...parseWith(InvitationRevokedPayload, payload, "InvitationRevoked"),
-    });
+    return parseWith(
+      InvitationRevokedSchema,
+      { ...payload, type: "CleaningStaff.InvitationRevoked" },
+      "InvitationRevoked",
+    );
   },
-  is(event: DomainEvent): event is InvitationRevoked {
-    return event.type === InvitationRevoked.type;
+  /** Parses a serialized event (e.g. JSON read from an outbox). */
+  parse(input: unknown): InvitationRevoked {
+    return parseWith(InvitationRevokedSchema, input, "InvitationRevoked");
   },
-} as const;
+  /** Type guard (an arrow function: safe to pass unbound, e.g. `events.filter(X.is)`). */
+  is: (event: DomainEvent): event is InvitationRevoked =>
+    event.type === "CleaningStaff.InvitationRevoked",
+} as const satisfies EventType<InvitationRevoked, InvitationRevokedInput>;
 
 /** Every domain event of the CleaningStaff context. */
 export type CleaningStaffEvent = InvitationAccepted | InvitationIssued | InvitationRevoked;
+
+/** Schema of any CleaningStaff event, discriminated by `type`. */
+export const CleaningStaffEventSchema = z.discriminatedUnion("type", [
+  InvitationAcceptedSchema,
+  InvitationIssuedSchema,
+  InvitationRevokedSchema,
+]);
+
+/** Parses a serialized CleaningStaff event (strict: an unknown `type` or key is rejected). */
+export function parseCleaningStaffEvent(input: unknown): CleaningStaffEvent {
+  return parseWith(CleaningStaffEventSchema, input, "CleaningStaffEvent");
+}

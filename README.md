@@ -76,7 +76,7 @@ generation:
 ```
 
 ```sh
-bun run ddd generate model.ddd.yaml   # 初回は package.json と tsconfig.json も作る（以後は顧客所有）
+bun run ddd generate model.ddd.yaml   # 初回は package.json・tsconfig.json・.prettierrc.json も作る（以後は顧客所有）
 npm install && npm run typecheck && npm test   # または bun install && bun run typecheck && bun run test
 ```
 
@@ -167,6 +167,7 @@ tests/generated/test_<context>_policies.py
 
 ```text
 package.json, tsconfig.json        # 初回のみ作成（zod / decimal.js、strict + exactOptionalPropertyTypes + NodeNext）
+.prettierrc.json                   # 初回のみ作成（printWidth 100。生成物は Prettier と typescript-eslint strict-type-checked でそのまま通る）
 src/<package>/
   index.ts                         # 初回のみ作成（generated/index.js を再エクスポート）
   generated/

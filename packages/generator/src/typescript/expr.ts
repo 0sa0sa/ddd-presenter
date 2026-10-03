@@ -43,6 +43,8 @@ export function emitExpr(e: TExpr, ctx: ExprContext): string {
 
 /** `!(<e>)`: the negated condition (parenthesized unless `e` is an atom). */
 export function emitNegated(e: TExpr, ctx: ExprContext): string {
+  // `not x` negated is `x` itself (never `!!(…)`, which typescript-eslint flags as a needless conversion).
+  if (e.t === "not") return emit(e.operand, ctx)[0];
   return `!${wrap(emit(e, ctx), P.unary)}`;
 }
 
@@ -97,9 +99,10 @@ function emitCoerced(e: TExpr, target: Type | undefined, ctx: ExprContext): Out 
   if (want && want !== "UUID" && have && have !== want) {
     ctx.imports.type(ctx.L.runtime, "Id");
     const inner = wrap(emit(e, ctx), P.rel);
-    if (have === "UUID") return [`(${inner} as Id<${tsString(want)}>)`, P.atom];
+    // An `as` cast binds like a relational operator: callers that put it in a tighter position parenthesize it.
+    if (have === "UUID") return [`${inner} as Id<${tsString(want)}>`, P.cond];
     ctx.imports.type(ctx.L.runtime, "UUID");
-    return [`(${inner} as UUID as Id<${tsString(want)}>)`, P.atom];
+    return [`${inner} as UUID as Id<${tsString(want)}>`, P.cond];
   }
   return emit(e, ctx);
 }

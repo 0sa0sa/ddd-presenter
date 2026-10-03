@@ -40,16 +40,14 @@ export class IssueInvitationUseCase {
   readonly #eventPublisher: EventPublisher;
   readonly #unitOfWork: UnitOfWork;
 
-  constructor(
-    deps: {
-      readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
-      readonly clock: Clock;
-      readonly ids: IdGenerator;
-      readonly extensions: Extensions;
-      readonly eventPublisher: EventPublisher;
-      readonly unitOfWork: UnitOfWork;
-    }
-  ) {
+  constructor(deps: {
+    readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
+    readonly clock: Clock;
+    readonly ids: IdGenerator;
+    readonly extensions: Extensions;
+    readonly eventPublisher: EventPublisher;
+    readonly unitOfWork: UnitOfWork;
+  }) {
     this.#cleaningStaffInvitationRepository = deps.cleaningStaffInvitationRepository;
     this.#clock = deps.clock;
     this.#ids = deps.ids;
@@ -72,7 +70,7 @@ export class IssueInvitationUseCase {
       await this.#unitOfWork.rollback();
       throw error;
     }
-    if (afterCommit.length) await this.#eventPublisher.publish(afterCommit);
+    if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);
     return result;
   }
 
@@ -119,14 +117,12 @@ export class AcceptInvitationUseCase {
   readonly #eventPublisher: EventPublisher;
   readonly #unitOfWork: UnitOfWork;
 
-  constructor(
-    deps: {
-      readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
-      readonly clock: Clock;
-      readonly eventPublisher: EventPublisher;
-      readonly unitOfWork: UnitOfWork;
-    }
-  ) {
+  constructor(deps: {
+    readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
+    readonly clock: Clock;
+    readonly eventPublisher: EventPublisher;
+    readonly unitOfWork: UnitOfWork;
+  }) {
     this.#cleaningStaffInvitationRepository = deps.cleaningStaffInvitationRepository;
     this.#clock = deps.clock;
     this.#eventPublisher = deps.eventPublisher;
@@ -146,14 +142,14 @@ export class AcceptInvitationUseCase {
       await this.#unitOfWork.rollback();
       throw error;
     }
-    if (afterCommit.length) await this.#eventPublisher.publish(afterCommit);
+    if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);
   }
 
   async #run(command: AcceptInvitation, afterCommit: DomainEvent[]): Promise<void> {
     const emitted: DomainEvent[] = [];
     // 1. load CleaningStaffInvitation
     const loaded1 = await this.#cleaningStaffInvitationRepository.get(
-      (command.invitationId as Id<"CleaningStaffInvitation">)
+      command.invitationId as Id<"CleaningStaffInvitation">,
     );
     if (loaded1 === null) throw new InvitationNotFound({ id: command.invitationId });
     let invitation = loaded1;
@@ -189,13 +185,11 @@ export class RevokeInvitationUseCase {
   readonly #eventPublisher: EventPublisher;
   readonly #unitOfWork: UnitOfWork;
 
-  constructor(
-    deps: {
-      readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
-      readonly eventPublisher: EventPublisher;
-      readonly unitOfWork: UnitOfWork;
-    }
-  ) {
+  constructor(deps: {
+    readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
+    readonly eventPublisher: EventPublisher;
+    readonly unitOfWork: UnitOfWork;
+  }) {
     this.#cleaningStaffInvitationRepository = deps.cleaningStaffInvitationRepository;
     this.#eventPublisher = deps.eventPublisher;
     this.#unitOfWork = deps.unitOfWork;
@@ -215,7 +209,7 @@ export class RevokeInvitationUseCase {
       await this.#unitOfWork.rollback();
       throw error;
     }
-    if (afterCommit.length) await this.#eventPublisher.publish(afterCommit);
+    if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);
     return result;
   }
 
@@ -223,7 +217,7 @@ export class RevokeInvitationUseCase {
     const emitted: DomainEvent[] = [];
     // 1. load CleaningStaffInvitation
     const loaded1 = await this.#cleaningStaffInvitationRepository.get(
-      (command.invitationId as Id<"CleaningStaffInvitation">)
+      command.invitationId as Id<"CleaningStaffInvitation">,
     );
     if (loaded1 === null) throw new InvitationNotFound({ id: command.invitationId });
     let invitation = loaded1;

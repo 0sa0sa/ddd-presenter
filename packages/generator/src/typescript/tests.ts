@@ -1,4 +1,4 @@
-import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
 import { depParams, repoName, useCaseClass, useCaseDeps } from "./application.ts";
 import { assemble, Code, header, relativeSpecifier, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
@@ -38,14 +38,13 @@ export function testingFile(L: TsLayout): TsFile {
     c.line("}");
   }
   const exts = L.ca.ir.extensionPoints;
+  if (!exts.length) {
+    return file(L, mod, `In-memory test doubles for the ports of the ${L.ca.ir.name} context.`, imp, c.toString());
+  }
   imp.type(L.ports, "Extensions");
   c.line();
   c.doc("Test double for the Extensions interface; each extension returns a fixed value.");
   c.block("export class StubExtensions implements Extensions", () => {
-    if (!exts.length) {
-      c.comment("This context declares no extension points.");
-      return;
-    }
     const types = exts.map((x) => ({ x, t: tsType(L.resolve(x.returns), imp, L) }));
     for (const { x, t } of types) c.line(`readonly #${prop(x.name)}: ${t}${x.testDefault === undefined ? " | undefined" : ""};`);
     c.line();
@@ -112,9 +111,35 @@ function importError(L: TsLayout, imp: TsImports, name: string): void {
   else imp.value(L.mod("errors"), name);
 }
 
+/** Whether values of `t` survive JSON (entities are class instances, which a schema accepts only as instances). */
+function jsonSerializable(L: TsLayout, t: Type, seen = new Set<string>()): boolean {
+  switch (t.k) {
+    case "optional":
+      return jsonSerializable(L, t.inner, seen);
+    case "list":
+      return jsonSerializable(L, t.item, seen);
+    case "entity":
+    case "aggregate":
+      return false;
+    case "vo":
+      if (seen.has(t.name)) return true;
+      seen.add(t.name);
+      return [...L.fieldTypes(t.name).values()].every((f) => jsonSerializable(L, f, seen));
+    default:
+      return true;
+  }
+}
+
 function eventAsserts(L: TsLayout, c: Code, events: string, then: ScenarioThenIR, imp: TsImports): void {
   if (!then.emits) return;
   c.line(`expect(${events}.map((event) => event.type)).toEqual([${then.emits.map((e) => tsString(`${L.ca.ir.name}.${e.event}`)).join(", ")}]);`);
+  const serializable = [...L.ca.events.values()].every((ev) => ev.fields.every((f) => jsonSerializable(L, f.type)));
+  if (then.emits.length && serializable) {
+    imp.value(L.contextTesting, "viaJson", "plain");
+    imp.value(L.mod("events"), `parse${L.ca.ir.name}Event`);
+    c.comment("Every event survives JSON (e.g. an outbox): parsing its JSON gives an equal event.");
+    c.line(`expect(viaJson(${events}, parse${L.ca.ir.name}Event)).toEqual(${events}.map(plain));`);
+  }
   then.emits.forEach((e, i) => {
     const entries = Object.entries(e.fields);
     if (!entries.length) return;
@@ -323,7 +348,7 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
         const ag = L.aggregate(s.aggregate)!;
         T("expectPresent");
         const key = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
-        c.line(`const stored${i} = expectPresent(await ${repoName(ag.name)}.get(${key}), ${tsString(`stored ${ag.name}`)});`);
+        c.line(`const stored${i} = expectPresent(${repoName(ag.name)}.get(${key}), ${tsString(`stored ${ag.name}`)});`);
         recordAsserts(L, c, `stored${i}`, ag.name, s.fields, imp);
       });
     }
@@ -332,7 +357,7 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
       else c.comment(`${uc.name} publishes no events`);
     }
     if (uc.idempotencyKey) {
-      const recorded = `await idempotencyStore.get(${tsString(uc.name)}, String(command.${prop(uc.idempotencyKey)}))`;
+      const recorded = `idempotencyStore.get(${tsString(uc.name)}, String(command.${prop(uc.idempotencyKey)}))`;
       if (then.raises) {
         c.comment("A failed run is not recorded, so a retry with the same key runs again.");
         c.line(`expect(${recorded}).toBeNull();`);

@@ -155,6 +155,8 @@ const TS_RESERVED_TYPES = new Set([
   "Math",
   "Number",
   "Object",
+  "Omit",
+  "ErrorOptions",
   "Partial",
   "Promise",
   "Readonly",
@@ -532,8 +534,14 @@ class Validator {
         add(`${u.command}Input`, `the input type of ${u.command}`);
         add(`${pascal(u.name)}Runner`, `the runner interface of ${u.name}`);
       }
-      for (const e of ca.events.values()) add(`${e.name}Input`, `the payload type of ${e.name}`);
-      if (ca.events.size) add(`${ctx.name}Event`, `the union of the events of ${ctx.name}`);
+      for (const e of ca.events.values()) {
+        add(`${e.name}Input`, `the payload type of ${e.name}`);
+        add(`${e.name}Schema`, `the schema of ${e.name}`);
+      }
+      if (ca.events.size) {
+        add(`${ctx.name}Event`, `the union of the events of ${ctx.name}`);
+        add(`${ctx.name}EventSchema`, `the schema of the events of ${ctx.name}`);
+      }
       for (const p of ca.policies.values()) {
         if (p.crossContext) {
           add(`${p.event.context}Translator`, `the translator interface from ${p.event.context}`);
@@ -551,6 +559,21 @@ class Validator {
             element: `${ctx.name} › ${t.name}`,
             hint: "Rename the type",
           });
+        }
+      }
+      // `type` is the discriminator of every generated event ("<Context>.<Event>").
+      for (const a of ctx.aggregates) {
+        for (const m of [...a.factories, ...a.operations]) {
+          for (const em of m.emits) {
+            for (const f of em.fields) {
+              if (f.name === "type") {
+                this.bag.error("reserved-name", `An event field cannot be named "type" when generating TypeScript (it holds "<Context>.<Event>")`, [...f.path, "name"], {
+                  element: `${ctx.name} › ${em.name}`,
+                  hint: "Rename the field, e.g. kind",
+                });
+              }
+            }
+          }
         }
       }
       for (const x of ctx.aggregates.flatMap((a) => [a, ...a.entities])) {

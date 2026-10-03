@@ -38,7 +38,7 @@ relationships: [...]                # コンテキストマップ（§9）
 
 `ddd generate --target typescript`（`diff` も同じ）はモデルの `target` を一時的に上書きする。`ddd init --target typescript` は TypeScript 用のサンプルを作る。target を切り替えると生成するファイルがすべて変わるので、元の target の生成物は stale になる（生成したままのテストは削除され、ソースは `--prune` で消す）。
 
-TypeScript のとき、生成物は `src/<package>/generated/` に、初回だけ `package.json`・`tsconfig.json`・`src/<package>/index.ts` を作る（以後は顧客所有）。型の対応:
+TypeScript のとき、生成物は `src/<package>/generated/` に、初回だけ `package.json`・`tsconfig.json`・`.prettierrc.json`・`src/<package>/index.ts` を作る（以後は顧客所有）。型の対応:
 
 | モデル | TypeScript | 備考 |
 |---|---|---|
@@ -55,7 +55,7 @@ TypeScript のとき、生成物は `src/<package>/generated/` に、初回だ�
 | `required: false` | `T \| null`（既定 null） | |
 | Duration（式の中だけ） | ミリ秒の `number`（`days/hours/minutes`） | |
 
-フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。
+フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。`Omit` `ErrorOptions` と、イベントのスキーマ（`<Event>Schema`、`<Context>EventSchema`）と同じ名前の型、`type` という名前のイベントフィールド（イベントの種類 `"<Context>.<Event>"` を入れるため）も同じエラーになる。
 
 命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。イベントのフィールド名 `event_type`（生成するイベントが必ず持つタグ）と型名 `AnyEvent`（コンテキストのイベントの共用体）も予約されている。
 
