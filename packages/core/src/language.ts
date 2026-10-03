@@ -70,6 +70,7 @@ export interface DefinitionResult {
 type Container =
   | "root"
   | "generation"
+  | "generation:typescript"
   | "context"
   | "glossary"
   | "error"
@@ -126,6 +127,7 @@ type Container =
 
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   root: { generation: "generation", contexts: "context", relationships: "relationship" },
+  generation: { typescript: "generation:typescript" },
   context: {
     glossary: "glossary",
     errors: "error",
@@ -197,7 +199,14 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("contexts", "Bounded context の一覧"),
     K("relationships", "コンテキストマップ（コンテキスト間の関係とイベント契約）"),
   ],
-  generation: [K("package", "生成するPythonパッケージ名（snake_case）"), K("src_dir", "ソースの出力先（既定 src）"), K("tests_dir", "テストの出力先（既定 tests）")],
+  generation: [
+    K("package", "生成するパッケージ名（snake_case。TypeScript では src の下のディレクトリ名）"),
+    K("src_dir", "ソースの出力先（既定 src）"),
+    K("tests_dir", "テストの出力先（既定 tests）"),
+    K("target", "生成する言語: python（既定, Pydantic v2）/ typescript（Zod v4）"),
+    K("typescript", "TypeScript の生成設定（test_runner）"),
+  ],
+  "generation:typescript": [K("test_runner", "生成テストのランナー: vitest（既定）/ bun")],
   context: [
     K("name", "コンテキスト名（PascalCase）"),
     K("description", "責務の説明"),
@@ -747,6 +756,16 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     scope.useCase ? [...bindingsBefore(scope.useCase.steps, s)].map(([v, a]) => ({ label: v, kind: "variable" as const, detail: a })) : [];
 
   if (c === "relationship") return relationshipCompletions(s, pos);
+  if (c === "generation" && key === "target")
+    return [
+      { label: "python", kind: "value" as const, detail: "既定。Python 3.11+ / Pydantic v2 / pytest", sortRank: 0 },
+      { label: "typescript", kind: "value" as const, detail: "TypeScript / Zod v4 / vitest または bun test", sortRank: 1 },
+    ];
+  if (c === "generation:typescript" && key === "test_runner")
+    return [
+      { label: "vitest", kind: "value" as const, detail: "既定。生成テストは vitest から import する", sortRank: 0 },
+      { label: "bun", kind: "value" as const, detail: "生成テストは bun:test から import する", sortRank: 1 },
+    ];
   if (c === "context" && key === "subdomain")
     return [
       { label: "core", kind: "value" as const, detail: "コア: 競争力の源。いちばん力を入れて作り込む", sortRank: 0 },

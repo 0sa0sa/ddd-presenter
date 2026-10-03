@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { GenerationOutput, Manifest, Ownership } from "./index.ts";
+import type { GenerationOutput, Manifest, Ownership } from "./output.ts";
 
 export { unifiedDiff } from "@ddd/core";
 

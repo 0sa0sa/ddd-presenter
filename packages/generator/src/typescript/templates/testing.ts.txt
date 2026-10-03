@@ -1,0 +1,193 @@
+import {
+  Decimal,
+  Entity,
+  uuid,
+  type AggregateRoot,
+  type DomainEvent,
+  type EventType,
+  type RecordedResult,
+  type UUID,
+} from "./runtime.js";
+
+interface Transactional {
+  commitStaged(): void;
+  discardStaged(): void;
+}
+
+/** Unit of work for tests: repositories enlisted here only apply writes on commit. */
+export class FakeUnitOfWork {
+  committed = false;
+  rolledBack = false;
+  readonly #participants: Transactional[] = [];
+
+  enlist(participant: Transactional): void {
+    this.#participants.push(participant);
+  }
+
+  commit(): void {
+    for (const p of this.#participants) p.commitStaged();
+    this.committed = true;
+  }
+
+  rollback(): void {
+    for (const p of this.#participants) p.discardStaged();
+    this.rolledBack = true;
+  }
+}
+
+/** In-memory repository. Writes are staged until the unit of work (if any) commits. */
+export class InMemoryRepository<A extends AggregateRoot, K> implements Transactional {
+  readonly #committed = new Map<K, A>();
+  readonly #pending = new Map<K, A>();
+  readonly #identity: (aggregate: A) => K;
+  readonly #unitOfWork: FakeUnitOfWork | undefined;
+
+  constructor(identity: (aggregate: A) => K, unitOfWork?: FakeUnitOfWork) {
+    this.#identity = identity;
+    this.#unitOfWork = unitOfWork;
+    unitOfWork?.enlist(this);
+  }
+
+  seed(...aggregates: A[]): void {
+    for (const aggregate of aggregates) this.#committed.set(this.#identity(aggregate), aggregate);
+  }
+
+  get(id: K): A | null {
+    return this.#pending.get(id) ?? this.#committed.get(id) ?? null;
+  }
+
+  save(aggregate: A): void {
+    (this.#unitOfWork ? this.#pending : this.#committed).set(this.#identity(aggregate), aggregate);
+  }
+
+  all(): A[] {
+    return [...this.#committed.values()];
+  }
+
+  commitStaged(): void {
+    for (const [k, v] of this.#pending) this.#committed.set(k, v);
+    this.#pending.clear();
+  }
+
+  discardStaged(): void {
+    this.#pending.clear();
+  }
+}
+
+/** In-memory IdempotencyStore. Records are staged until the unit of work commits, like the repositories. */
+export class InMemoryIdempotencyStore implements Transactional {
+  readonly #committed = new Map<string, RecordedResult>();
+  readonly #pending = new Map<string, RecordedResult>();
+  readonly #unitOfWork: FakeUnitOfWork | undefined;
+
+  constructor(unitOfWork?: FakeUnitOfWork) {
+    this.#unitOfWork = unitOfWork;
+    unitOfWork?.enlist(this);
+  }
+
+  get(useCase: string, key: string): RecordedResult | null {
+    const k = useCase + "\u0000" + key;
+    return this.#pending.get(k) ?? this.#committed.get(k) ?? null;
+  }
+
+  record(useCase: string, key: string, result: RecordedResult): void {
+    (this.#unitOfWork ? this.#pending : this.#committed).set(useCase + "\u0000" + key, result);
+  }
+
+  commitStaged(): void {
+    for (const [k, v] of this.#pending) this.#committed.set(k, v);
+    this.#pending.clear();
+  }
+
+  discardStaged(): void {
+    this.#pending.clear();
+  }
+}
+
+export class FixedClock {
+  readonly #now: Date;
+
+  constructor(now: Date) {
+    this.#now = now;
+  }
+
+  now(): Date {
+    return this.#now;
+  }
+}
+
+export class SequentialIds {
+  readonly #ids: UUID[];
+
+  constructor(ids: ReadonlyArray<string>) {
+    this.#ids = ids.map(uuid);
+  }
+
+  newId(): UUID {
+    const next = this.#ids.shift();
+    if (next === undefined) throw new Error("SequentialIds ran out of ids; add more to given.ids");
+    return next;
+  }
+}
+
+export class CapturingEventPublisher {
+  readonly published: DomainEvent[] = [];
+
+  publish(events: ReadonlyArray<DomainEvent>): void {
+    this.published.push(...events);
+  }
+}
+
+type ErrorClass<E> = abstract new (...args: never[]) => E;
+
+/** Runs `fn` and returns the error it throws; fails when it throws nothing or an error of another class. */
+export function expectThrows<E>(fn: () => unknown, type: ErrorClass<E>): E {
+  try {
+    fn();
+  } catch (error) {
+    if (error instanceof type) return error;
+    throw error;
+  }
+  throw new Error("Expected " + type.name + " to be thrown");
+}
+
+/** Awaits `fn()` and returns the error it rejects with; fails when it resolves or rejects with another class. */
+export async function expectRejects<E>(fn: () => Promise<unknown>, type: ErrorClass<E>): Promise<E> {
+  try {
+    await fn();
+  } catch (error) {
+    if (error instanceof type) return error;
+    throw error;
+  }
+  throw new Error("Expected " + type.name + " to be thrown");
+}
+
+/** `value`, checked to be present (not null or undefined). */
+export function expectPresent<T>(value: T | null | undefined, what = "value"): T {
+  if (value === null || value === undefined) throw new Error("Expected " + what + " to be present");
+  return value;
+}
+
+/** The event at `index`, checked to be of the given type. */
+export function expectEvent<E extends DomainEvent>(events: ReadonlyArray<DomainEvent>, index: number, type: EventType<E>): E {
+  const event = events[index];
+  if (event === undefined || !type.is(event)) {
+    throw new Error("Expected " + type.type + " at index " + index + ", got " + (event?.type ?? "nothing"));
+  }
+  return event;
+}
+
+/**
+ * A plain, comparable form of a model value for assertions: decimals become normalized strings, date-times ISO
+ * strings, entities their identity (entities are equal when their identities are).
+ */
+export function plain(value: unknown): unknown {
+  if (Decimal.isDecimal(value)) return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Entity) return { identity: plain(value.identity) };
+  if (Array.isArray(value)) return value.map(plain);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]));
+  }
+  return value;
+}

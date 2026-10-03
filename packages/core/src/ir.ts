@@ -16,10 +16,19 @@ export interface ModelIR {
   relationships: RelationshipIR[];
 }
 
+export const GENERATION_TARGETS = ["python", "typescript"] as const;
+export type GenerationTarget = (typeof GENERATION_TARGETS)[number];
+export const TEST_RUNNERS = ["vitest", "bun"] as const;
+export type TestRunner = (typeof TEST_RUNNERS)[number];
+
 export interface GenerationSettings {
   package: string;
   srcDir: string;
   testsDir: string;
+  /** Language of the generated code (`generation.target`, default python). */
+  target: GenerationTarget;
+  /** Settings of the TypeScript target (`generation.typescript`). */
+  typescript: { testRunner: TestRunner };
 }
 
 interface Located {

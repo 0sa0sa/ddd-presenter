@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import type { Analysis } from "@ddd/core";
+import type { Analysis, GenerationTarget } from "@ddd/core";
 import { portsFile, resolveReturn, useCasesFile } from "./python/application.ts";
 import { contextReadme } from "./python/docs.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, paramTypes, rulesFile, valueObjectsFile } from "./python/domain.ts";
@@ -8,50 +7,13 @@ import { policiesFile, policyTestFile, translatorScaffolds } from "./python/poli
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, docstringLines, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
+import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "./output.ts";
+import { generateTypeScript } from "./typescript/index.ts";
 
 export { GENERATOR_NAME, GENERATOR_VERSION };
 export * from "./plan.ts";
-
-/**
- * - generated: owned by the generator; rewritten on every run, hand edits are detected.
- * - scaffold: written once if missing, then owned by the customer; never overwritten.
- */
-export type Ownership = "generated" | "scaffold";
-
-export interface GeneratedFile {
-  path: string;
-  content: string;
-  ownership: Ownership;
-}
-
-export interface Manifest {
-  generator: string;
-  generator_version: string;
-  schema_version: number;
-  project: string;
-  model_sha256: string;
-  files: { path: string; sha256: string }[];
-  scaffold: string[];
-  /** Generated files the model no longer produces, kept on disk until pruned. */
-  stale?: { path: string; sha256: string }[];
-}
-
-export interface GenerationOutput {
-  files: GeneratedFile[];
-  manifest: Manifest;
-  manifestPath: string;
-  /** Tests directory of the model (`generation.tests_dir`); generated tests live under `<testsDir>/generated/`. */
-  testsDir: string;
-}
-
-export function sha256(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-/** Normalizes line endings so the model hash does not depend on the checkout platform. */
-export function modelHash(modelText: string): string {
-  return sha256(modelText.replace(/\r\n/g, "\n"));
-}
+export * from "./output.ts";
+export { generateTypeScript } from "./typescript/index.ts";
 
 /** Deterministic Python generation. The analysis must come from a model without errors. */
 export function generatePython(analysis: Analysis, modelText: string): GenerationOutput {
@@ -134,6 +96,11 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     scaffold: files.filter((f) => f.ownership === "scaffold").map((f) => f.path),
   };
   return { files, manifest, manifestPath, testsDir: model.generation.testsDir };
+}
+
+/** Generates code for the model's `generation.target` (or `target` when given, e.g. `ddd generate --target`). */
+export function generate(analysis: Analysis, modelText: string, target: GenerationTarget = analysis.model.generation.target): GenerationOutput {
+  return target === "typescript" ? generateTypeScript(analysis, modelText) : generatePython(analysis, modelText);
 }
 
 export function renderManifest(m: Manifest): string {

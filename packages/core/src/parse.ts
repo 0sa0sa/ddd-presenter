@@ -28,7 +28,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
-import { RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, type SubdomainKind } from "./ir.ts";
+import { GENERATION_TARGETS, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -882,8 +882,18 @@ export function parseModel(text: string): ParseResult {
     }
     const project = r.str(root, "project", [], true) ?? "";
     const gen = root.generation === undefined ? {} : r.obj(root.generation, ["generation"], "generation") ?? {};
-    r.keys(gen, ["package", "src_dir", "tests_dir"], ["generation"], "generation");
+    r.keys(gen, ["package", "src_dir", "tests_dir", "target", "typescript"], ["generation"], "generation");
     const defaultPackage = project.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "domain";
+    const target = r.str(gen, "target", ["generation"], false) ?? "python";
+    if (!(GENERATION_TARGETS as readonly string[]).includes(target)) {
+      bag.error("invalid-value", `Unknown generation target "${target}"`, ["generation", "target"], { hint: `Use one of ${GENERATION_TARGETS.join(", ")} (default python)` });
+    }
+    const ts = gen.typescript === undefined ? {} : r.obj(gen.typescript, ["generation", "typescript"], "generation.typescript") ?? {};
+    r.keys(ts, ["test_runner"], ["generation", "typescript"], "generation.typescript");
+    const testRunner = r.str(ts, "test_runner", ["generation", "typescript"], false) ?? "vitest";
+    if (!(TEST_RUNNERS as readonly string[]).includes(testRunner)) {
+      bag.error("invalid-value", `Unknown test runner "${testRunner}"`, ["generation", "typescript", "test_runner"], { hint: `Use one of ${TEST_RUNNERS.join(", ")} (default vitest)` });
+    }
     model = {
       schemaVersion: typeof version === "number" ? version : SCHEMA_VERSION,
       project,
@@ -892,6 +902,8 @@ export function parseModel(text: string): ParseResult {
         package: r.str(gen, "package", ["generation"], false) ?? defaultPackage,
         srcDir: r.str(gen, "src_dir", ["generation"], false) ?? "src",
         testsDir: r.str(gen, "tests_dir", ["generation"], false) ?? "tests",
+        target: target === "typescript" ? "typescript" : "python",
+        typescript: { testRunner: testRunner === "bun" ? "bun" : "vitest" },
       },
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
       relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),

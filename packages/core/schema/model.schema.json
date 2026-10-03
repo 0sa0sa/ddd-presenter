@@ -16,7 +16,19 @@
       "properties": {
         "package": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
         "src_dir": { "type": "string" },
-        "tests_dir": { "type": "string" }
+        "tests_dir": { "type": "string" },
+        "target": {
+          "description": "Language of the generated code: python (Pydantic v2, default) or typescript (Zod v4).",
+          "enum": ["python", "typescript"]
+        },
+        "typescript": {
+          "description": "Settings of the TypeScript target.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "test_runner": { "description": "Runner the generated tests import from (default vitest).", "enum": ["vitest", "bun"] }
+          }
+        }
       }
     },
     "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } },

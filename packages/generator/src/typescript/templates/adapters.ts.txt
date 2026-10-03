@@ -1,0 +1,16 @@
+import { randomUUID } from "node:crypto";
+import { uuid, type Clock, type IdGenerator, type UUID } from "./runtime.js";
+
+/** Clock backed by the system time. */
+export class SystemClock implements Clock {
+  now(): Date {
+    return new Date();
+  }
+}
+
+/** IdGenerator producing random UUID v4 identities. */
+export class RandomIds implements IdGenerator {
+  newId(): UUID {
+    return uuid(randomUUID());
+  }
+}

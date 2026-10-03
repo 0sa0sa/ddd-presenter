@@ -1,0 +1,404 @@
+import { Decimal as DecimalJs } from "decimal.js";
+import { z } from "zod";
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact decimal numbers (decimal.js), configured like Python's default decimal context: 28 significant digits,
+ * round half to even. Never use JavaScript numbers for money.
+ */
+export const Decimal = DecimalJs.clone({ precision: 28, rounding: DecimalJs.ROUND_HALF_EVEN });
+export type Decimal = DecimalJs;
+
+/** A UUID string (8-4-4-4-12 hexadecimal digits, normalized to lower case). */
+export const uuidSchema = z
+  .guid()
+  .transform((value) => value.toLowerCase())
+  .brand<"UUID">();
+export type UUID = z.output<typeof uuidSchema>;
+
+/** Identity of the aggregate (or entity) `A`: a UUID that cannot be mixed up with the identity of another type. */
+export type Id<A extends string> = UUID & z.$brand<A>;
+
+export function idSchema<A extends string>(_owner: A): z.ZodType<Id<A>, string> {
+  return uuidSchema as unknown as z.ZodType<Id<A>, string>;
+}
+
+/** Point in time. Accepts a `Date` or an ISO 8601 string with a UTC offset (`2026-01-01T10:00:00+00:00`). */
+export const dateTimeSchema = z.union([
+  z.date(),
+  z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
+]);
+
+/** Calendar date as an ISO 8601 string (`2026-01-31`). Ordered like the dates it denotes. */
+export const localDateSchema = z.iso.date().brand<"LocalDate">();
+export type LocalDate = z.output<typeof localDateSchema>;
+
+/** Length of time in milliseconds (expression-only: never stored in a field). */
+export type Duration = number;
+
+export interface DecimalConstraints {
+  readonly min?: number;
+  readonly max?: number;
+  readonly maxDigits?: number;
+  readonly decimalPlaces?: number;
+}
+
+/** Number of digits of `value` as Pydantic counts them (trailing zeros of the fraction do not count). */
+function digits(value: Decimal): number {
+  const whole = value.abs().trunc();
+  return (whole.isZero() ? 0 : whole.toFixed().length) + value.decimalPlaces();
+}
+
+/** Decimal field: accepts a string, a number or a Decimal; the value is a `Decimal`. */
+export function decimalSchema(constraints: DecimalConstraints = {}): z.ZodType<Decimal, string | number | Decimal> {
+  const { min, max, maxDigits, decimalPlaces } = constraints;
+  return z
+    .union([z.string(), z.number(), z.custom<Decimal>((value) => DecimalJs.isDecimal(value), "Expected a decimal")])
+    .transform((value, ctx) => {
+      let result: Decimal | undefined;
+      try {
+        result = new Decimal(value);
+      } catch {
+        result = undefined;
+      }
+      if (!result || !result.isFinite()) {
+        ctx.addIssue({ code: "custom", message: "Invalid decimal" });
+        return z.NEVER;
+      }
+      if (min !== undefined && result.lt(min)) ctx.addIssue({ code: "custom", message: "Too small: expected >=" + min });
+      if (max !== undefined && result.gt(max)) ctx.addIssue({ code: "custom", message: "Too big: expected <=" + max });
+      if (maxDigits !== undefined && digits(result) > maxDigits) {
+        ctx.addIssue({ code: "custom", message: "Expected at most " + maxDigits + " digits" });
+      }
+      if (decimalPlaces !== undefined && result.decimalPlaces() > decimalPlaces) {
+        ctx.addIssue({ code: "custom", message: "Expected at most " + decimalPlaces + " decimal places" });
+      }
+      return result;
+    });
+}
+
+/** Parses a UUID literal (throws ConstraintViolation). */
+export function uuid(value: string): UUID {
+  return parseWith(uuidSchema, value, "UUID");
+}
+
+/** Parses the identity of `owner` (throws ConstraintViolation). */
+export function id<A extends string>(owner: A, value: string): Id<A> {
+  return parseWith(idSchema(owner), value, "Id<" + owner + ">");
+}
+
+/** Parses an ISO 8601 date-time with a UTC offset (throws ConstraintViolation). */
+export function dateTime(value: string): Date {
+  return parseWith(dateTimeSchema, value, "DateTime");
+}
+
+/** Parses an ISO 8601 calendar date (throws ConstraintViolation). */
+export function localDate(value: string): LocalDate {
+  return parseWith(localDateSchema, value, "Date");
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/** Internal diagnostic data of a domain error (`rule` / `guard` name the rule that failed). */
+export interface ErrorDetails {
+  readonly rule?: string;
+  readonly guard?: string;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * Base class of all domain errors. `message` is safe to show to end users; `details` is internal diagnostic data.
+ * Domain errors never depend on HTTP or web framework types.
+ */
+export class DomainError<D extends ErrorDetails = ErrorDetails> extends Error {
+  static readonly code: string = "domain_error";
+  readonly code: string = "domain_error";
+  readonly details: D;
+
+  constructor(details: D, message: string) {
+    super(message);
+    this.name = new.target.name;
+    this.details = details;
+  }
+}
+
+export interface ConstraintIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+export interface ConstraintViolationDetails extends ErrorDetails {
+  readonly model?: string;
+  readonly issues?: ReadonlyArray<ConstraintIssue>;
+}
+
+/** A field constraint (type, length, range, pattern, ...) was violated. */
+export class ConstraintViolation extends DomainError<ConstraintViolationDetails> {
+  static override readonly code = "constraint_violation";
+  override readonly code = "constraint_violation";
+
+  constructor(details: ConstraintViolationDetails = {}, message = "A field constraint was violated") {
+    super(details, message);
+  }
+}
+
+export interface AggregateNotFoundDetails extends ErrorDetails {
+  readonly aggregate?: string;
+}
+
+/** Raised by a use case when a load step finds nothing and no specific error is declared. */
+export class AggregateNotFound extends DomainError<AggregateNotFoundDetails> {
+  static override readonly code = "aggregate_not_found";
+  override readonly code = "aggregate_not_found";
+
+  constructor(details: AggregateNotFoundDetails = {}, message = "The requested aggregate does not exist") {
+    super(details, message);
+  }
+}
+
+/**
+ * Validates `input` with `schema`. Constraint failures become a `ConstraintViolation`; domain errors raised by
+ * invariants inside the schema propagate unchanged.
+ */
+export function parseWith<S extends z.ZodType>(schema: S, input: unknown, model: string): z.output<S> {
+  const result = schema.safeParse(input);
+  if (result.success) return result.data;
+  const issues = result.error.issues.map((issue) => ({ path: issue.path.map(String).join("."), message: issue.message }));
+  const text = issues.map((issue) => (issue.path || "(root)") + ": " + issue.message).join("; ");
+  throw new ConstraintViolation({ model, issues }, model + ": " + text);
+}
+
+// ---------------------------------------------------------------------------
+// Entities, events, transitions, guards
+// ---------------------------------------------------------------------------
+
+/** Compared by identity; state changes go through named operations that return new instances. */
+export abstract class Entity {
+  /** Value of the identity field. */
+  abstract get identity(): unknown;
+}
+
+/** Consistency boundary. Only the root is loaded and saved through a repository. */
+export abstract class AggregateRoot extends Entity {}
+
+/** Something that happened in the domain. `type` is `<Context>.<Event>`; the payload is immutable. */
+export interface DomainEvent {
+  readonly type: string;
+}
+
+/** The companion object of a generated event type. */
+export interface EventType<E extends DomainEvent> {
+  readonly type: E["type"];
+  is(event: DomainEvent): event is E;
+}
+
+/** Result of a factory or operation: the new aggregate state plus the events it emitted. */
+export interface Transition<A extends AggregateRoot> {
+  readonly aggregate: A;
+  readonly events: ReadonlyArray<DomainEvent>;
+}
+
+export function transition<A extends AggregateRoot>(aggregate: A, events: ReadonlyArray<DomainEvent> = []): Transition<A> {
+  return Object.freeze({ aggregate, events: Object.freeze([...events]) });
+}
+
+/**
+ * A named condition evaluated at a specific moment. `checks()` answers the question; `assertHolds()` throws the
+ * declared domain error.
+ */
+export class StateGuard {
+  readonly name: string;
+  readonly #holds: boolean;
+  readonly #error: () => DomainError;
+
+  constructor(name: string, holds: boolean, error: () => DomainError) {
+    this.name = name;
+    this.#holds = holds;
+    this.#error = error;
+    Object.freeze(this);
+  }
+
+  checks(): boolean {
+    return this.#holds;
+  }
+
+  assertHolds(): void {
+    if (!this.#holds) throw this.#error();
+  }
+}
+
+/** Catalogue entry of a named domain rule (for traceability and documentation). */
+export interface Rule {
+  readonly name: string;
+  readonly kind: "invariant" | "state_guard";
+  readonly owner: string;
+  readonly expression: string;
+  readonly error: string;
+  readonly checkOn: ReadonlyArray<"construct" | "transition">;
+  readonly appliedBy: ReadonlyArray<string>;
+}
+
+// ---------------------------------------------------------------------------
+// Expression helpers
+// ---------------------------------------------------------------------------
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Model equality: decimals and date-times by value, entities by identity, value objects and lists structurally.
+ */
+export function equals(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  if (DecimalJs.isDecimal(a)) return (typeof b === "number" || DecimalJs.isDecimal(b)) && a.eq(b);
+  if (DecimalJs.isDecimal(b)) return typeof a === "number" && b.eq(a);
+  if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
+  if (a instanceof Entity || b instanceof Entity) {
+    return a instanceof Entity && b instanceof Entity && a.constructor === b.constructor && equals(a.identity, b.identity);
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => equals(x, b[i]));
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every((k) => k in b && equals(a[k], b[k]));
+  }
+  return false;
+}
+
+/** Whether `list` has an element equal to `value` (see `equals`). */
+export function contains(list: ReadonlyArray<unknown>, value: unknown): boolean {
+  return list.some((x) => equals(x, value));
+}
+
+/** `list` without the elements equal to `value`. */
+export function without<T>(list: ReadonlyArray<T>, value: unknown): ReadonlyArray<T> {
+  return list.filter((x) => !equals(x, value));
+}
+
+export function sumOf<T>(list: ReadonlyArray<T>, value: (item: T) => number): number {
+  return list.reduce((total, item) => total + value(item), 0);
+}
+
+export function sumDecimals<T>(list: ReadonlyArray<T>, value: (item: T) => Decimal | number): Decimal {
+  return list.reduce((total: Decimal, item) => total.plus(value(item)), new Decimal(0));
+}
+
+export const days = (n: number): Duration => n * 86_400_000;
+export const hours = (n: number): Duration => n * 3_600_000;
+export const minutes = (n: number): Duration => n * 60_000;
+
+export function plusDuration(at: Date, duration: Duration): Date {
+  return new Date(at.getTime() + duration);
+}
+
+export function minusDuration(at: Date, duration: Duration): Date {
+  return new Date(at.getTime() - duration);
+}
+
+/** `later - earlier` as a duration. */
+export function durationBetween(later: Date, earlier: Date): Duration {
+  return later.getTime() - earlier.getTime();
+}
+
+function dayNumber(date: LocalDate): number {
+  return Date.parse(date + "T00:00:00Z") / 86_400_000;
+}
+
+function fromDayNumber(day: number): LocalDate {
+  return new Date(day * 86_400_000).toISOString().slice(0, 10) as LocalDate;
+}
+
+/** `date + days(n)` (the duration is a whole number of days). */
+export function plusDays(date: LocalDate, duration: Duration): LocalDate {
+  return fromDayNumber(dayNumber(date) + Math.trunc(duration / 86_400_000));
+}
+
+export function minusDays(date: LocalDate, duration: Duration): LocalDate {
+  return plusDays(date, -duration);
+}
+
+/** `later - earlier` for calendar dates, as a duration. */
+export function daysBetween(later: LocalDate, earlier: LocalDate): Duration {
+  return (dayNumber(later) - dayNumber(earlier)) * 86_400_000;
+}
+
+const instant = (value: Date | LocalDate): number | string => (value instanceof Date ? value.getTime() : value);
+
+export function earliest<T extends Date | LocalDate>(a: T, b: T): T {
+  return instant(b) < instant(a) ? b : a;
+}
+
+export function latest<T extends Date | LocalDate>(a: T, b: T): T {
+  return instant(b) > instant(a) ? b : a;
+}
+
+// ---------------------------------------------------------------------------
+// Ports shared by every context
+// ---------------------------------------------------------------------------
+
+/** A value or a promise of it: adapters may be synchronous (tests) or asynchronous (databases, brokers). */
+export type Awaitable<T> = T | Promise<T>;
+
+/** Source of the current time. Rules never read a hidden global clock. */
+export interface Clock {
+  now(): Date;
+}
+
+/** Source of new identities. */
+export interface IdGenerator {
+  newId(): UUID;
+}
+
+/** Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's responsibility. */
+export interface EventPublisher {
+  publish(events: ReadonlyArray<DomainEvent>): Awaitable<void>;
+}
+
+/** Transaction boundary of a use case. */
+export interface UnitOfWork {
+  commit(): Awaitable<void>;
+  rollback(): Awaitable<void>;
+}
+
+/** What an idempotent use case returned for one idempotency key. */
+export interface RecordedResult {
+  readonly value: unknown;
+}
+
+/**
+ * Results of idempotent use cases by key: a repeated command returns the first result instead of running again.
+ *
+ * `record()` is called inside the use case's transaction, before commit. Store the record in the same transaction
+ * as the aggregates, so a rolled-back run leaves none, and make (useCase, key) unique so that two concurrent runs
+ * with the same key cannot both commit. Only successful runs are recorded; a failed one may be retried.
+ */
+export interface IdempotencyStore {
+  get(useCase: string, key: string): Awaitable<RecordedResult | null>;
+  record(useCase: string, key: string, result: RecordedResult): Awaitable<void>;
+}
+
+/** Reacts to a domain event, e.g. a generated policy (see `subscriptions()` in policies.ts). */
+export type EventHandler = (event: DomainEvent) => Promise<void>;
+
+/** Event type (`<Context>.<Event>`) → handlers, in order. */
+export type Subscriptions = ReadonlyMap<string, ReadonlyArray<EventHandler>>;
+
+/**
+ * Minimal in-process event bus: runs the handlers subscribed to each event's type, in order. Production buses
+ * (outbox, message broker) call the same handlers; this helper is for tests and simple apps.
+ */
+export async function dispatch(subscriptions: Subscriptions, events: Iterable<DomainEvent>): Promise<void> {
+  for (const event of events) {
+    for (const handler of subscriptions.get(event.type) ?? []) await handler(event);
+  }
+}
