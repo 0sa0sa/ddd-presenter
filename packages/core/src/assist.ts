@@ -650,28 +650,83 @@ export interface BoardGhost {
   source: "local" | "llm";
 }
 
+const MAX_GHOSTS = 12;
+/** A ghost keeps this distance from existing stickies (|dx| < 120 and |dy| < 70 counts as taken). */
+const CLEAR_X = 120;
+const CLEAR_Y = 70;
+const STEP = 40;
+/** Upper bound on jumps when looking for a free spot (each jump skips a whole blocking sticky). */
+const MAX_JUMPS = 5000;
+
+/**
+ * Free spots along a row in near-linear time: stickies are bucketed in a grid of CLEAR_X × CLEAR_Y cells,
+ * so a probe only looks at the 3 × 3 neighbouring cells, and the search jumps past a blocking sticky in STEP
+ * increments (the same spot the one-step-at-a-time search reaches, without visiting every step).
+ */
+function freeSpotFinder(items: readonly { x: number; y: number }[]) {
+  const grid = new Map<number, { x: number; y: number }[]>();
+  // Numeric keys; a collision (only for coordinates in the hundreds of millions) just adds candidates to check.
+  const key = (cx: number, cy: number) => cx * 4_194_304 + cy;
+  for (const i of items) {
+    const k = key(Math.floor(i.x / CLEAR_X), Math.floor(i.y / CLEAR_Y));
+    const cell = grid.get(k);
+    if (cell) cell.push(i);
+    else grid.set(k, [i]);
+  }
+  /** The sticky blocking (x, y) that reaches furthest in the search direction; undefined when the spot is free. */
+  const blocker = (x: number, y: number, dir: 1 | -1) => {
+    const cx = Math.floor(x / CLEAR_X);
+    const cy = Math.floor(y / CLEAR_Y);
+    let best: { x: number; y: number } | undefined;
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        for (const i of grid.get(key(gx, gy)) ?? []) {
+          if (Math.abs(i.x - x) < CLEAR_X && Math.abs(i.y - y) < CLEAR_Y && (!best || (dir === 1 ? i.x > best.x : i.x < best.x))) best = i;
+        }
+      }
+    }
+    return best;
+  };
+  return (x: number, y: number, dir: 1 | -1): number => {
+    for (let n = 0; n < MAX_JUMPS; n++) {
+      const b = blocker(x, y, dir);
+      if (!b) return x;
+      // Every step short of the blocker's far edge is still blocked by it: jump to the first step past it.
+      const distance = dir === 1 ? b.x + CLEAR_X - x : x - (b.x - CLEAR_X);
+      x += dir * Math.max(1, Math.ceil(distance / STEP)) * STEP;
+    }
+    return x;
+  };
+}
+
 /** Predicts the next stickies from the board's structure (EventStorming grammar). */
 export function boardGhosts(board: Board): BoardGhost[] {
   const out: BoardGhost[] = [];
   const byId = new Map(board.items.map((i) => [i.id, i]));
-  const occupied = (x: number, y: number) => board.items.some((i) => Math.abs(i.x - x) < 120 && Math.abs(i.y - y) < 70);
-  for (const c of board.items.filter((i) => i.kind === "command" && i.text.trim())) {
-    if (board.connectors.some((k) => k.from === c.id && byId.get(k.to)?.kind === "event")) continue;
-    let x = c.x + c.w + 40;
-    const y = c.y;
-    while (occupied(x, y)) x += 40;
-    out.push({ id: `ghost-evt-${c.id}`, kind: "event", text: eventTextFor(c.text), x, y, connect: { from: c.id, to: `ghost-evt-${c.id}` }, reason: `「${c.text}」が成功したときに起きる出来事`, source: "local" });
+  const freeX = freeSpotFinder(board.items);
+  const hasEvent = new Set<string>(); // stickies with an arrow to an event
+  const caused = new Set<string>(); // events with an arrow from a command / policy / external system / aggregate
+  for (const k of board.connectors) {
+    if (byId.get(k.to)?.kind !== "event") continue;
+    hasEvent.add(k.from);
+    if (["command", "policy", "external_system", "aggregate"].includes(byId.get(k.from)?.kind ?? "")) caused.add(k.to);
   }
-  for (const e of board.items.filter((i) => i.kind === "event" && i.text.trim())) {
-    if (board.connectors.some((k) => k.to === e.id && ["command", "policy", "external_system", "aggregate"].includes(byId.get(k.from)?.kind ?? ""))) continue;
-    let x = e.x - 200;
-    const y = e.y;
-    while (occupied(x, y)) x -= 40;
-    out.push({ id: `ghost-cmd-${e.id}`, kind: "command", text: commandTextFor(e.text), x, y, connect: { from: `ghost-cmd-${e.id}`, to: e.id }, reason: `「${e.text}」を起こす操作`, source: "local" });
+  for (const c of board.items) {
+    if (out.length >= MAX_GHOSTS) return out;
+    if (c.kind !== "command" || !c.text.trim() || hasEvent.has(c.id)) continue;
+    const x = freeX(c.x + c.w + 40, c.y, 1);
+    out.push({ id: `ghost-evt-${c.id}`, kind: "event", text: eventTextFor(c.text), x, y: c.y, connect: { from: c.id, to: `ghost-evt-${c.id}` }, reason: `「${c.text}」が成功したときに起きる出来事`, source: "local" });
+  }
+  for (const e of board.items) {
+    if (out.length >= MAX_GHOSTS) return out;
+    if (e.kind !== "event" || !e.text.trim() || caused.has(e.id)) continue;
+    const x = freeX(e.x - 200, e.y, -1);
+    out.push({ id: `ghost-cmd-${e.id}`, kind: "command", text: commandTextFor(e.text), x, y: e.y, connect: { from: `ghost-cmd-${e.id}`, to: e.id }, reason: `「${e.text}」を起こす操作`, source: "local" });
   }
   for (const cand of suggestAggregates(board)) {
+    if (out.length >= MAX_GHOSTS) return out;
     if (cand.aggregateItemId || !cand.commandIds.length || !cand.name) continue;
     out.push({ id: `ghost-agg-${cand.id}`, kind: "aggregate", text: cand.name, x: cand.position.x, y: cand.position.y, reason: `${cand.commandIds.length} 個のコマンドを受け止める集約の案`, source: "local" });
   }
-  return out.slice(0, 12);
+  return out;
 }

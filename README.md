@@ -78,7 +78,44 @@ bun run build:web && bun run start   # http://localhost:4870
 
 AI の予測・提案を使うには、サーバーのマシンで Claude Code（`claude`）か Codex CLI（`codex`）にログインしておくか、`ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで使う AI を選んで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
 
-ログインは開発用の簡易方式（ユーザー名のみ。docs/09 の決定）。初回ログインでアカウントと個人ワークスペースを作る。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
+ログインはユーザー名とパスワード。サーバーは既定で `127.0.0.1` だけで待ち受け、パスワードを持つアカウントがまだない間は、ユーザー名だけで入れる「開発用の簡易ログイン」も使える（最初のパスワード付きアカウントができると自動で無効になる）。アカウントを作ると個人ワークスペースができる。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
+
+### セキュアに動かす
+
+**ひとりで使う（既定）**: そのまま `bun run start`。`127.0.0.1` だけで待ち受けるので、ほかのマシンからは接続できない。初回は簡易ログインで入れる。右上のメニューからパスワードを設定すると簡易ログインは無効になり、以後はパスワードでログインする。
+
+**チームで使う**: HTTPS の終端（リバースプロキシ）の裏で動かす。
+
+```sh
+# DDD_HOST:          プロキシと同じマシンなら loopback のまま。別マシンなら 0.0.0.0 など
+# DDD_ALLOWED_HOSTS: 利用者がブラウザで開くホスト名（DNS リバインディング対策の許可リスト）
+# DDD_SECURE_COOKIES: Cookie に Secure を付ける（HTTPS 必須）
+# DDD_AI_ADMINS:     AI をオンにできる人（サーバーの API キー・CLI 契約を使うため）
+DDD_HOST=127.0.0.1 DDD_ALLOWED_HOSTS=ddd.example.com DDD_SECURE_COOKIES=1 DDD_AI_ADMINS=alice bun run start
+```
+
+- 各自が画面の「アカウントを作る」から登録する。登録を止めるときは `DDD_REGISTRATION=closed` にして、管理者が `bun run admin set-password <ユーザー名>`（パスワードは標準入力）でアカウントを作る。パスワードを忘れた人も同じコマンドで再設定できる。
+- 会社の SSO（OIDC）を使うときは oauth2-proxy などの認証プロキシを前に置き、`DDD_TRUSTED_USER_HEADER=X-Forwarded-User` を設定する。このヘッダーの値をユーザー名として信頼するので、**サーバーに届くのがプロキシ経由の要求だけ**であること、プロキシがクライアントから来た同名のヘッダーを消すことを必ず確認する。
+- プロキシは `Host` をそのまま渡す（nginx なら `proxy_set_header Host $host;`）。書き換えると Origin の照合で更新系の要求が 403 になる。
+
+| 環境変数 | 既定 | 意味 |
+| --- | --- | --- |
+| `DDD_HOST`（`HOST`） | `127.0.0.1` | 待ち受けるアドレス。loopback 以外なら起動時に警告を出す |
+| `PORT` / `DDD_PORT` | `4870` | ポート |
+| `DDD_ALLOWED_HOSTS` | （なし） | `localhost`・`127.0.0.1`・`[::1]` のほかに受け付けるホスト名（カンマ区切り）。`DDD_HOST` に具体的なアドレスを指定したときはそれも許可。`*` はすべて許可（非推奨）。ほかのホスト名は 421 |
+| `DDD_DEV_LOGIN` | （自動） | `1` で簡易ログインを常に有効（ネットワークに公開しないこと）、`0` で常に無効。未設定なら「このマシンだけから届く（loopback で待ち受け、`DDD_ALLOWED_HOSTS` に外向きの名前がなく、プロキシのヘッダーを信頼していない。`X-Forwarded-For` などが付いた要求は除く）」かつ「パスワード付きアカウントがない」ときだけ有効 |
+| `DDD_REGISTRATION` | `open` | `closed` で画面からの登録を止める |
+| `DDD_TRUSTED_USER_HEADER` | （なし） | 認証プロキシが付けるユーザー名のヘッダー（例 `X-Forwarded-User`）。設定したときだけ使う |
+| `DDD_SECURE_COOKIES` | （なし） | `1` で Cookie に Secure を付ける |
+| `DDD_AI_ADMINS` | （下記） | AI をオンにできるユーザー名（カンマ区切り）。未設定なら、このマシンだけから届くときは最初に作られたユーザー、それ以外では誰も（`DDD_AI_WORKSPACES` も未設定のとき） |
+| `DDD_AI_WORKSPACES` | （なし） | オーナーなら誰でも AI をオンにできるワークスペース ID（カンマ区切り、`*` はすべて） |
+| `DDD_AI_RATE_PER_MIN` / `DDD_AI_BURST` | `30` / `10` | 1人あたりの AI 呼び出しの上限（毎分の補充数・まとめて使える数）。超えると 429 |
+| `DDD_AI_QUEUE` | `8` | ローカル CLI の待ち行列の長さ（同時実行は 2）。あふれた要求は 429 |
+| `DDD_AI_PASS_ENV` | （なし） | ローカル CLI に追加で渡す環境変数名（カンマ区切り）。既定では PATH・HOME・ロケール・プロキシ設定と、その CLI の認証情報だけを渡す |
+| `DDD_CODEX_USER_CONFIG` | （なし） | `1` で Codex の `~/.codex/config.toml`（MCP サーバーなど）を読む。既定は読まない（認証は `~/.codex` のまま） |
+| `DDD_SERVE_SOURCEMAPS` | （なし） | `1` で `bun run start` でもソースマップを配信する |
+
+セッションは 14 日で切れ、期限切れは 1 時間ごとに消す。右上のメニューの「すべての端末からログアウト」で自分のセッションをすべて終了できる。要求の本文は 4 MB まで（モデルは 1 MB、ボードは 2 MB・付箋 3000 枚まで）。詳しい決定は docs/09 §11。
 
 ## 生成されるもの
 
@@ -152,7 +189,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 
 ## 対象外・既知の制限
 
-- 認証は開発用の簡易ログイン。本番公開には認証プロバイダの導入と `DDD_SECURE_COOKIES=1`（HTTPS）が必要。
+- 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
 - 生成対象は Python / Pydantic v2 のみ。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。

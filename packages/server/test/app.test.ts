@@ -11,7 +11,7 @@ const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-pl
 let app: ReturnType<typeof createApp>;
 
 beforeEach(() => {
-  app = createApp(openDatabase(":memory:"));
+  app = createApp(openDatabase(":memory:"), { devLogin: true });
 });
 
 type Session = { cookie: string; call: (method: string, path: string, body?: unknown) => Promise<Response>; json: <T = any>(method: string, path: string, body?: unknown) => Promise<{ status: number; body: T }> };
@@ -21,7 +21,7 @@ async function login(username: string): Promise<Session> {
   expect(res.status).toBe(200);
   const cookie = res.headers.get("set-cookie")!.split(";")[0]!;
   const call = async (method: string, path: string, body?: unknown) =>
-    app.request(path, { method, headers: { cookie, ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+    app.request(path, { method, headers: { cookie, origin: "http://localhost", ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
   return {
     cookie,
     call,
@@ -215,7 +215,7 @@ describe("models", () => {
 
 describe("validation parity (FR-030 / FR-034)", () => {
   test("POST /api/validate returns exactly what the CLI's core returns", async () => {
-    expect((await app.request("/api/validate", { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await app.request("/api/validate", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
     const s = await login("alice");
     for (const text of [SAMPLE, SAMPLE.replace("error: InvalidInvitationWindow", "error: Nope"), "schema_version: 1\ncontexts: ["]) {
       const res = await s.call("POST", "/api/validate", { yaml: text });

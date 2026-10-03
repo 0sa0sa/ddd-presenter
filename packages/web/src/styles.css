@@ -2318,4 +2318,28 @@ input[aria-invalid="true"] {
 }
 .main.has-notice {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+
+/* ------------------------------------------------------------------ account menu (top bar) */
+
+.account-menu {
+  position: relative;
+}
+.account-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+  display: grid;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  box-shadow: 0 6px 20px rgb(10 14 20 / 12%);
+}
+.account-menu-list button {
+  text-align: left;
+}
+.modal.password-dialog {
+  width: min(420px, 100%);
 }

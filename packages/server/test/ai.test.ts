@@ -37,14 +37,14 @@ let app: ReturnType<typeof createApp>;
 
 beforeEach(() => {
   fake = new FakeAssistant();
-  app = createApp(openDatabase(":memory:"), { assistant: fake });
+  app = createApp(openDatabase(":memory:"), { assistant: fake, devLogin: true, loopback: true });
 });
 
 async function login(username: string) {
   const res = await app.request("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username }) });
   const cookie = res.headers.get("set-cookie")!.split(";")[0]!;
   const json = async (method: string, path: string, body?: unknown) => {
-    const r = await app.request(path, { method, headers: { cookie, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const r = await app.request(path, { method, headers: { cookie, origin: "http://localhost", "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as any };
   };
   const ws = (await json("GET", "/api/me")).body.workspaces[0].id as string;
@@ -263,7 +263,7 @@ describe("choosing the assistant per workspace", () => {
     (b as { model: string }).model = "Codex CLI（ローカル）";
     a.inlineText = "a";
     b.inlineText = "b";
-    app = createApp(openDatabase(":memory:"), { assistants: { "claude-code": a, codex: b } });
+    app = createApp(openDatabase(":memory:"), { assistants: { "claude-code": a, codex: b }, devLogin: true, loopback: true });
     const s = await login("owner");
     const ws = (await s.json("GET", `/api/workspaces/${s.ws}`)).body;
     expect(ws.ai_providers.map((p: any) => p.id)).toEqual(["claude-code", "codex"]);

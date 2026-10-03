@@ -382,11 +382,12 @@ export interface AggregateCandidate {
 export function suggestAggregates(board: Board): AggregateCandidate[] {
   const relevant = board.items.filter((i) => i.kind === "command" || i.kind === "event" || i.kind === "aggregate");
   const ids = new Set(relevant.map((i) => i.id));
+  const itemById = new Map(relevant.map((i) => [i.id, i]));
   const adj = new Map<string, Set<string>>(relevant.map((i) => [i.id, new Set<string>()]));
   for (const c of board.connectors) {
     if (!ids.has(c.from) || !ids.has(c.to)) continue;
-    const a = board.items.find((i) => i.id === c.from)!;
-    const b = board.items.find((i) => i.id === c.to)!;
+    const a = itemById.get(c.from)!;
+    const b = itemById.get(c.to)!;
     // Event → command links are cross-aggregate reactions (via policies), not the same aggregate.
     if (a.kind === "event" && b.kind === "command") continue;
     adj.get(c.from)!.add(c.to);
@@ -402,13 +403,13 @@ export function suggestAggregates(board: Board): AggregateCandidate[] {
       const id = stack.pop()!;
       if (seen.has(id)) continue;
       seen.add(id);
-      group.push(board.items.find((i) => i.id === id)!);
+      group.push(itemById.get(id)!);
       for (const n of adj.get(id) ?? []) stack.push(n);
     }
     groups.push(group);
   }
 
-  const aggregates = board.items.filter((i) => i.kind === "aggregate");
+  const aggregates = board.items.filter((i) => i.kind === "aggregate").map((a) => ({ a, frameId: frameOf(board, a)?.id }));
   const out: AggregateCandidate[] = [];
   for (const g of groups) {
     const commands = g.filter((i) => i.kind === "command");
@@ -428,8 +429,8 @@ export function suggestAggregates(board: Board): AggregateCandidate[] {
     let reason = anchor ? `矢印で「${label(anchor)}」とつながっています` : "";
     if (!anchor) {
       const near = aggregates
-        .filter((a) => frameOf(board, a)?.id === frame?.id)
-        .map((a) => ({ a, d: Math.hypot(center(a).x - cx, center(a).y - cy) }))
+        .filter((x) => x.frameId === frame?.id)
+        .map(({ a }) => ({ a, d: Math.hypot(center(a).x - cx, center(a).y - cy) }))
         .filter((x) => x.d < 450)
         .sort((x, y) => x.d - y.d)[0];
       if (near) {

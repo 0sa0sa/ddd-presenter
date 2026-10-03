@@ -35,7 +35,15 @@ export function WorkspacePage({ me, ws, onLogout, onChanged }: { me: Me; ws: str
       (r) => {
         setName(r.workspace.name);
         setRole(r.role);
-        setAi({ enabled: r.workspace.ai_enabled, available: r.ai_available, model: r.ai_model, provider: r.workspace.ai_provider, providers: r.ai_providers });
+        setAi({
+          enabled: r.workspace.ai_enabled,
+          available: r.ai_available,
+          model: r.ai_model,
+          provider: r.workspace.ai_provider,
+          providers: r.ai_providers,
+          canEnable: r.ai_can_enable ?? true,
+          active: r.ai_active ?? r.workspace.ai_enabled,
+        });
       },
       (e) => setError(e instanceof ApiError && e.status === 404 ? "このワークスペースは存在しないか、参加していません。" : describeError(e)),
     );
@@ -99,6 +107,10 @@ interface AiSettings {
   model: string | null;
   provider: AiProviderId | null;
   providers: AiProvider[];
+  /** The server operator allows this user to turn AI on here. */
+  canEnable: boolean;
+  /** On and still allowed (the person who turned it on is still an AI admin). */
+  active: boolean;
 }
 
 /** Where the model text goes, per provider (shown before the owner turns AI on). */
@@ -116,7 +128,7 @@ function Settings({ ws, ai, onAi }: { ws: string; ai: AiSettings; onAi: (ai: AiS
     setError(undefined);
     try {
       const r = await api.setAi(ws, settings);
-      onAi({ ...ai, enabled: r.ai_enabled, provider: r.ai_provider, model: r.ai_model });
+      onAi({ ...ai, enabled: r.ai_enabled, provider: r.ai_provider, model: r.ai_model, active: r.ai_enabled });
     } catch (e) {
       setError(describeError(e));
     } finally {
@@ -155,9 +167,17 @@ function Settings({ ws, ai, onAi }: { ws: string; ai: AiSettings; onAi: (ai: AiS
               )}
             </fieldset>
             <label className="row">
-              <input type="checkbox" checked={ai.enabled} disabled={busy} onChange={(e) => void save({ ai_enabled: e.target.checked })} />
+              <input type="checkbox" checked={ai.enabled} disabled={busy || (!ai.enabled && !ai.canEnable)} onChange={(e) => void save({ ai_enabled: e.target.checked })} />
               <span>このワークスペースで AI の提案を使う</span>
             </label>
+            {!ai.canEnable && !ai.enabled && (
+              <p className="small warn-note">
+                AI の利用はサーバーの API キーや CLI の契約を使うため、サーバーの管理者が許可したユーザーだけがオンにできます（サーバーの環境変数 <code>DDD_AI_ADMINS</code> / <code>DDD_AI_WORKSPACES</code>）。
+              </p>
+            )}
+            {ai.enabled && !ai.active && (
+              <p className="small warn-note">オンにした人が AI を有効にできるユーザーではなくなったため、いまは AI を使っていません。許可されたユーザーがオンにし直してください。</p>
+            )}
           </>
         ) : (
           <p className="small warn-note">

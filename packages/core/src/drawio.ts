@@ -7,7 +7,7 @@
  * and edges between stickies become arrows.
  * Export: the board as an uncompressed `.drawio` file that draw.io opens and that imports back unchanged.
  */
-import { deflateSync, inflateSync, strFromU8, strToU8 } from "fflate";
+import { deflateSync, Inflate, strFromU8, strToU8 } from "fflate";
 import { STICKY_KINDS, type Board, type BoardConnector, type BoardFrame, type BoardItem, type StickyKind } from "./discovery.ts";
 import { STICKY_FILL } from "./workshop.ts";
 
@@ -36,43 +36,184 @@ export function decodeEntities(s: string): string {
   });
 }
 
+/** Largest draw.io file read (characters), and the most a file's compressed pages may inflate to in total. */
+export const MAX_DRAWIO_INPUT = 20_000_000;
+export const MAX_DRAWIO_INFLATED = 20_000_000;
+/** Deeper elements are attached to the deepest allowed one (draw.io files are a few levels deep). */
+const MAX_XML_DEPTH = 256;
+/** Cells read per page (a board holds at most a few thousand stickies). */
+const MAX_DRAWIO_CELLS = 50_000;
+const MAX_BOUNDARY_CANDIDATES = 200;
+
+const NAME_START = /[A-Za-z_]/;
+const NAME_CHAR = /[\w:.-]/;
+
+/** Reads `name="value"` pairs of a start tag in one pass (no backtracking regex). */
+function parseAttrs(src: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    while (i < n && /\s/.test(src[i]!)) i++;
+    const start = i;
+    while (i < n && NAME_CHAR.test(src[i]!)) i++;
+    if (i === start) {
+      i++; // stray character
+      continue;
+    }
+    const name = src.slice(start, i);
+    while (i < n && /\s/.test(src[i]!)) i++;
+    if (src[i] !== "=") continue;
+    i++;
+    while (i < n && /\s/.test(src[i]!)) i++;
+    const q = src[i];
+    if (q !== '"' && q !== "'") continue;
+    const close = src.indexOf(q, i + 1);
+    if (close < 0) break;
+    attrs[name] = decodeEntities(src.slice(i + 1, close));
+    i = close + 1;
+  }
+  return attrs;
+}
+
+/**
+ * Minimal XML reader. Every construct is found with `indexOf` from the current position, so unclosed
+ * comments, processing instructions, CDATA sections or tags end the scan instead of re-scanning the rest
+ * of the input from each `<` (which made hostile files quadratic).
+ */
 function parseXml(xml: string): XmlNode {
   const root: XmlNode = { name: "#root", attrs: {}, children: [], text: "" };
   const stack: XmlNode[] = [root];
-  const re = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<!DOCTYPE[^>]*>|<(\/?)([A-Za-z_][\w:.-]*)((?:\s+[\w:.-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>|([^<]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) {
+  const n = xml.length;
+  let pos = 0;
+  while (pos < n) {
     const top = stack[stack.length - 1]!;
-    if (m[1] !== undefined) {
-      top.text += m[1];
-    } else if (m[3]) {
-      if (m[2] === "/") {
+    const lt = xml.indexOf("<", pos);
+    if (lt < 0) {
+      top.text += decodeEntities(xml.slice(pos));
+      break;
+    }
+    if (lt > pos) top.text += decodeEntities(xml.slice(pos, lt));
+    if (xml.startsWith("<!--", lt)) {
+      const end = xml.indexOf("-->", lt + 4);
+      if (end < 0) break;
+      pos = end + 3;
+    } else if (xml.startsWith("<?", lt)) {
+      const end = xml.indexOf("?>", lt + 2);
+      if (end < 0) break;
+      pos = end + 2;
+    } else if (xml.startsWith("<![CDATA[", lt)) {
+      const end = xml.indexOf("]]>", lt + 9);
+      if (end < 0) break;
+      top.text += xml.slice(lt + 9, end);
+      pos = end + 3;
+    } else if (xml.startsWith("<!", lt)) {
+      const end = xml.indexOf(">", lt + 2);
+      if (end < 0) break;
+      pos = end + 1;
+    } else {
+      const closing = xml[lt + 1] === "/";
+      const nameStart = closing ? lt + 2 : lt + 1;
+      if (!NAME_START.test(xml[nameStart] ?? "")) {
+        pos = lt + 1; // a stray "<" in text
+        continue;
+      }
+      // The tag ends at the first ">" outside a quoted attribute value.
+      let i = nameStart;
+      let quote = "";
+      while (i < n) {
+        const ch = xml[i]!;
+        if (quote) {
+          const close = xml.indexOf(quote, i);
+          if (close < 0) {
+            i = n;
+            break;
+          }
+          i = close + 1;
+          quote = "";
+          continue;
+        }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") break;
+        i++;
+      }
+      if (i >= n) break; // unterminated tag
+      let nameEnd = nameStart;
+      while (nameEnd < i && NAME_CHAR.test(xml[nameEnd]!)) nameEnd++;
+      const name = xml.slice(nameStart, nameEnd);
+      pos = i + 1;
+      if (closing) {
         if (stack.length > 1) stack.pop();
         continue;
       }
-      const attrs: Record<string, string> = {};
-      for (const a of (m[4] ?? "").matchAll(/([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) attrs[a[1]!] = decodeEntities(a[2] ?? a[3] ?? "");
-      const node: XmlNode = { name: m[3], attrs, children: [], text: "" };
+      let body = xml.slice(nameEnd, i);
+      const selfClosing = body.trimEnd().endsWith("/");
+      if (selfClosing) body = body.trimEnd().slice(0, -1);
+      const node: XmlNode = { name, attrs: parseAttrs(body), children: [], text: "" };
       top.children.push(node);
-      if (!m[5]) stack.push(node);
-    } else if (m[6] !== undefined) {
-      top.text += decodeEntities(m[6]);
+      if (!selfClosing && stack.length < MAX_XML_DEPTH) stack.push(node);
     }
   }
   return root;
 }
 
-const walk = (n: XmlNode, f: (n: XmlNode) => void) => {
-  f(n);
-  for (const c of n.children) walk(c, f);
+/** Name of the first element, skipping the XML declaration, comments and doctype (one forward pass). */
+function firstElementName(xml: string): string {
+  let pos = 0;
+  for (;;) {
+    const lt = xml.indexOf("<", pos);
+    if (lt < 0) return "";
+    if (xml.startsWith("<?", lt) || xml.startsWith("<!", lt)) {
+      const end = xml.startsWith("<!--", lt) ? xml.indexOf("-->", lt + 4) : xml.indexOf(">", lt + 2);
+      if (end < 0) return "";
+      pos = end + 1;
+      continue;
+    }
+    let i = lt + 1;
+    while (i < xml.length && NAME_CHAR.test(xml[i]!)) i++;
+    return xml.slice(lt + 1, i);
+  }
+}
+
+/** Depth-first, pre-order, without recursion (deeply nested input cannot overflow the stack). */
+const walk = (root: XmlNode, f: (n: XmlNode) => void) => {
+  const todo: XmlNode[] = [root];
+  while (todo.length) {
+    const n = todo.pop()!;
+    f(n);
+    for (let i = n.children.length - 1; i >= 0; i--) todo.push(n.children[i]!);
+  }
 };
 
-/** A compressed page: base64 → raw deflate → URI-encoded XML. */
-function inflatePage(data: string): string {
+/** Shared by the pages of one file, so many small compressed pages cannot add up to a decompression bomb. */
+interface InflateBudget {
+  left: number;
+}
+
+/** A compressed page: base64 → raw deflate → URI-encoded XML. Throws when the output would exceed the budget. */
+function inflatePage(data: string, budget: InflateBudget): string {
   const bin = atob(data.replace(/\s+/g, ""));
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const text = strFromU8(inflateSync(bytes), true);
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const inflater = new Inflate((chunk) => {
+    size += chunk.length;
+    if (size > budget.left) throw new Error("inflated page is too large");
+    chunks.push(chunk);
+  });
+  // Small input chunks keep the output of a single push bounded (deflate expands at most ~1000×).
+  const CHUNK = 4096;
+  for (let i = 0; i < bytes.length; i += CHUNK) inflater.push(bytes.subarray(i, i + CHUNK), i + CHUNK >= bytes.length);
+  if (!bytes.length) inflater.push(new Uint8Array(0), true);
+  budget.left -= size;
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  const text = strFromU8(out, true);
   try {
     return decodeURIComponent(text);
   } catch {
@@ -152,7 +293,7 @@ function labelText(value: string, html: boolean): string {
     s = s
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<\/(div|p|li|h\d)>/gi, "\n")
-      .replace(/<[^>]+>/g, "");
+      .replace(/<[^<>]*>/g, "");
     s = decodeEntities(s);
   }
   return s
@@ -165,13 +306,16 @@ function labelText(value: string, html: boolean): string {
 
 /** Reads every page of a draw.io file (`.drawio`, `.xml`, or `.drawio.svg`). */
 export function parseDrawio(input: string): DrawioParseResult {
+  if (input.length > MAX_DRAWIO_INPUT) return { ok: false, error: `ファイルが大きすぎます（${Math.round(MAX_DRAWIO_INPUT / 1_000_000)} MB まで）` };
   let text = input.trim();
   // An SVG exported with "include a copy of my diagram" carries the file in its `content` attribute.
-  if (/^<\?xml[\s\S]*?<svg|^<svg/i.test(text)) {
-    const m = /\scontent="([^"]*)"/.exec(text);
-    if (!m) return { ok: false, error: "この SVG には draw.io の図が含まれていません（書き出すときに「図のコピーを含める」を選んでください）" };
-    text = decodeEntities(m[1]!);
+  if (firstElementName(text).toLowerCase() === "svg") {
+    const at = /\scontent="/.exec(text);
+    const end = at ? text.indexOf('"', at.index + at[0].length) : -1;
+    if (!at || end < 0) return { ok: false, error: "この SVG には draw.io の図が含まれていません（書き出すときに「図のコピーを含める」を選んでください）" };
+    text = decodeEntities(text.slice(at.index + at[0].length, end));
   }
+  const budget: InflateBudget = { left: MAX_DRAWIO_INFLATED };
   let doc: XmlNode;
   try {
     doc = parseXml(text);
@@ -185,7 +329,7 @@ export function parseDrawio(input: string): DrawioParseResult {
     if (inner) models.push({ name: n.attrs.name ?? `ページ${models.length + 1}`, model: inner });
     else if (n.text.trim()) {
       try {
-        const m = parseXml(inflatePage(n.text)).children.find((c) => c.name === "mxGraphModel");
+        const m = parseXml(inflatePage(n.text, budget)).children.find((c) => c.name === "mxGraphModel");
         if (m) models.push({ name: n.attrs.name ?? `ページ${models.length + 1}`, model: m });
       } catch {
         // An unreadable page is skipped; the others still import.
@@ -194,8 +338,12 @@ export function parseDrawio(input: string): DrawioParseResult {
   });
   if (!models.length) {
     // A bare <mxGraphModel> (copied from draw.io's "Edit Diagram").
+    const seen = new Set<XmlNode>();
     walk(doc, (n) => {
-      if (n.name === "mxGraphModel" && !models.some((x) => x.model === n)) models.push({ name: "ページ1", model: n });
+      if (n.name === "mxGraphModel" && !seen.has(n)) {
+        seen.add(n);
+        models.push({ name: "ページ1", model: n });
+      }
     });
   }
   if (!models.length) return { ok: false, error: "draw.io の図が見つかりませんでした（.drawio / .xml / 図を含む .drawio.svg を選んでください）" };
@@ -217,7 +365,7 @@ interface RawCell {
 function readPage(name: string, model: XmlNode): DrawioPage {
   const cells: RawCell[] = [];
   const root = model.children.find((c) => c.name === "root") ?? model;
-  for (const n of root.children) {
+  for (const n of root.children.slice(0, MAX_DRAWIO_CELLS)) {
     // <UserObject label="…"> / <object label="…"> wrap an mxCell and hold the label.
     const cellNode = n.name === "mxCell" ? n : n.children.find((c) => c.name === "mxCell");
     if (!cellNode) continue;
@@ -270,18 +418,29 @@ function readPage(name: string, model: XmlNode): DrawioPage {
     shapes.push({ id: c.id, text, x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), fill, shapeKind });
   }
   // Large, unfilled or dashed rectangles that surround other shapes are boundaries (context frames).
+  // At most MAX_BOUNDARY_CANDIDATES are checked, so a file of thousands of large rectangles stays linear.
+  let candidates = 0;
   for (const sh of shapes) {
     if (sh.shapeKind || sh.w < 300 || sh.h < 150) continue;
     const cell = byId.get(sh.id)!;
     const outline = sh.fill === "none" || cell.style.dashed === "1" || cell.style.opacity !== undefined;
-    const surrounds = shapes.filter((o) => o !== sh && o.x >= sh.x && o.y >= sh.y && o.x + o.w <= sh.x + sh.w && o.y + o.h <= sh.y + sh.h).length;
-    if (outline && surrounds >= 1) sh.shapeKind = "frame";
+    if (!outline || ++candidates > MAX_BOUNDARY_CANDIDATES) continue;
+    const surrounds = shapes.some((o) => o !== sh && o.x >= sh.x && o.y >= sh.y && o.x + o.w <= sh.x + sh.w && o.y + o.h <= sh.y + sh.h);
+    if (surrounds) sh.shapeKind = "frame";
   }
   const vertexIds = new Set(shapes.map((s) => s.id));
+  // Edge labels are vertices whose parent is the edge.
+  const labelsOf = new Map<string, RawCell[]>();
+  for (const l of cells) {
+    if (!l.vertex || !l.parent) continue;
+    const list = labelsOf.get(l.parent);
+    if (list) list.push(l);
+    else labelsOf.set(l.parent, [l]);
+  }
   const edges: DrawioEdge[] = cells
     .filter((c) => c.edge && c.source && c.target && vertexIds.has(c.source) && vertexIds.has(c.target) && c.source !== c.target)
     .map((c) => {
-      const label = labelText(c.value, c.style.html === "1") || cells.filter((l) => l.parent === c.id && l.vertex).map((l) => labelText(l.value, l.style.html === "1")).find(Boolean) || "";
+      const label = labelText(c.value, c.style.html === "1") || (labelsOf.get(c.id) ?? []).map((l) => labelText(l.value, l.style.html === "1")).find(Boolean) || "";
       return { id: c.id, source: c.source!, target: c.target!, label };
     });
   return { name, shapes, edges, colors: colorGroups(shapes) };
@@ -348,7 +507,9 @@ function colorGroups(shapes: DrawioShape[]): DrawioColor[] {
   const groups = new Map<string, DrawioShape[]>();
   for (const s of shapes) {
     if (s.shapeKind) continue;
-    groups.set(s.fill, [...(groups.get(s.fill) ?? []), s]);
+    const list = groups.get(s.fill);
+    if (list) list.push(s);
+    else groups.set(s.fill, [s]);
   }
   return [...groups.entries()]
     .map(([fill, list]) => {
@@ -390,10 +551,11 @@ export function drawioToBoard(page: DrawioPage, board: Board, mapping: Record<st
   const counts: Partial<Record<DrawioTarget, number>> = {};
   if (!chosen.length) return { board, counts, ignored: page.shapes.length, droppedEdges: page.edges.length, truncated: false };
 
-  const minX = Math.min(...chosen.map((x) => x.s.x));
-  const minY = Math.min(...chosen.map((x) => x.s.y));
+  // reduce, not Math.min(...list): spreading a very large list overflows the argument limit.
+  const minX = chosen.reduce((m, x) => Math.min(m, x.s.x), Infinity);
+  const minY = chosen.reduce((m, x) => Math.min(m, x.s.y), Infinity);
   const existing = [...board.items, ...board.frames];
-  const origin = at ?? (existing.length ? { x: Math.max(...existing.map((b) => b.x + b.w)) + 200, y: Math.min(...existing.map((b) => b.y)) } : { x: 0, y: 0 });
+  const origin = at ?? (existing.length ? { x: existing.reduce((m, b) => Math.max(m, b.x + b.w), -Infinity) + 200, y: existing.reduce((m, b) => Math.min(m, b.y), Infinity) } : { x: 0, y: 0 });
   const dx = origin.x - minX;
   const dy = origin.y - minY;
   const suffix = Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 5);
@@ -423,13 +585,15 @@ export function drawioToBoard(page: DrawioPage, board: Board, mapping: Record<st
   }
   const connectors: BoardConnector[] = [];
   let droppedEdges = 0;
+  const linked = new Set<string>();
   for (const e of page.edges) {
     const from = idMap.get(e.source);
     const to = idMap.get(e.target);
-    if (!from || !to || connectors.some((c) => c.from === from && c.to === to)) {
+    if (!from || !to || linked.has(`${from}\u0000${to}`)) {
       droppedEdges++;
       continue;
     }
+    linked.add(`${from}\u0000${to}`);
     connectors.push({ id: idOf(e.id, "k"), from, to, ...(e.label ? { label: e.label.slice(0, 120) } : {}) });
   }
   return {
@@ -452,8 +616,8 @@ export function boardToDrawio(board: Board, name = "Board"): string {
   const cells: string[] = ['<mxCell id="0" />', '<mxCell id="1" parent="0" />'];
   const geo = (x: number, y: number, w: number, h: number) => `<mxGeometry x="${x}" y="${y}" width="${w}" height="${h}" as="geometry" />`;
   const boxes = [...board.items, ...board.frames];
-  const minX = boxes.length ? Math.min(...boxes.map((b) => b.x)) - 240 : 0;
-  const maxX = boxes.length ? Math.max(...boxes.map((b) => b.x + b.w)) + 240 : 800;
+  const minX = boxes.length ? boxes.reduce((m, b) => Math.min(m, b.x), Infinity) - 240 : 0;
+  const maxX = boxes.length ? boxes.reduce((m, b) => Math.max(m, b.x + b.w), -Infinity) + 240 : 800;
   for (const l of board.lanes ?? []) {
     cells.push(`<mxCell id="${escAttr(l.id)}" value="${escAttr(l.title)}" style="rounded=0;whiteSpace=wrap;html=0;fillColor=#eef1f5;strokeColor=#cfd5dd;dashed=1;align=left;verticalAlign=top;spacingLeft=10;fontStyle=1;" vertex="1" parent="1">${geo(minX, l.y, maxX - minX, l.h)}</mxCell>`);
   }
