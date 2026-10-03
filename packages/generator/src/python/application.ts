@@ -259,7 +259,7 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
         c.line(`recorded = self._idempotency_store.get(${pyString(uc.name)}, key)`);
         c.line("if recorded is not None:");
         c.indent(() => {
-          if (ret === "None") c.line("return None");
+          if (ret === "None") c.line("return");
           else {
             imp.from("typing", "cast");
             c.line(`return cast(${ret}, recorded.value)`);
@@ -296,7 +296,6 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
       c.line("emitted: list[DomainEvent] = []");
       const counter = { n: 0 };
       emitSteps(L, c, uc.steps, ectx, imp, counter, bindings(uc.steps), info.returnType);
-      if (ret === "None" && !endsTerminal(uc.steps)) c.line("return None");
     });
   });
 }
@@ -336,7 +335,6 @@ function emitSteps(
     switch (s.kind) {
       case "load": {
         const ag = L.ca.ir.aggregates.find((a) => a.name === s.aggregate)!;
-        imp.from(L.mod("aggregates"), ag.name);
         const key = X([...s.path, "by"]);
         c.line(`# ${n}. load ${s.aggregate}`);
         c.line(`${s.as} = self._${repoAttr(ag.name)}.get(${key})`);
@@ -394,7 +392,10 @@ function emitSteps(
           if (!s.then.length) c.line("pass");
           emitSteps(L, c, s.then, ectx, imp, counter, vars, returnType);
         });
-        if (s.else.length) {
+        if (s.else.length && endsTerminal(s.then)) {
+          // The then-branch returns or raises, so the else-branch needs no `else:` (ruff RET505 / RET506).
+          emitSteps(L, c, s.else, ectx, imp, counter, vars, returnType);
+        } else if (s.else.length) {
           c.line("else:");
           c.indent(() => emitSteps(L, c, s.else, ectx, imp, counter, vars, returnType));
         }

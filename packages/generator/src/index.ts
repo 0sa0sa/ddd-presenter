@@ -31,7 +31,9 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   const initPy = (doc: string) => `${header(model)}\n\n${docstringLines(doc, "").join("\n")}\n`;
 
   scaffold(`${src}/${pkg}/__init__.py`, `${docstringLines(`${model.project}${model.description ? ` — ${model.description}` : ""}`, "").join("\n")}\n`);
-  gen(`${src}/${pkg}/generated/__init__.py`, initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
+  // PEP 561 marker: type checkers of other packages use the inline annotations (the top-level package is customer-owned).
+  scaffold(`${src}/${pkg}/py.typed`, "");
+  gen(`${src}/${pkg}/generated/__init__.py`,initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
   gen(`${src}/${pkg}/generated/_runtime.py`, `${header(model)}\n\n"""Base classes shared by the generated domain code (Pydantic v2 + stdlib only)."""\n\n${RUNTIME_PY}`);
   gen(`${src}/${pkg}/generated/adapters.py`, `${header(model)}\n\n"""Reference adapters for the clock and id ports (structurally typed; usable in every context)."""\n\n${ADAPTERS_PY}`);
 

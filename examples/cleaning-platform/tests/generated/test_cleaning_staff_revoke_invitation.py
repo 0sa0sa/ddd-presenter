@@ -12,6 +12,7 @@ from cleaning_platform.generated.cleaning_staff.application.use_cases import Rev
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.commands import RevokeInvitation
 from cleaning_platform.generated.cleaning_staff.domain.enums import InvitationStatus
+from cleaning_platform.generated.cleaning_staff.domain.events import parse_event
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 from cleaning_platform.generated.cleaning_staff.testing import (
     CapturingEventPublisher,
@@ -48,7 +49,7 @@ def test_open_invitation_is_revoked() -> None:
     )
     command = RevokeInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
     result = use_case.execute(command)
-    assert result == True
+    assert result is True
     assert unit_of_work.committed
     stored_0 = cleaning_staff_invitation_repository.get(
         UUID("00000000-0000-0000-0000-000000000001")
@@ -56,6 +57,10 @@ def test_open_invitation_is_revoked() -> None:
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.REVOKED
     assert [type(event).__name__ for event in event_publisher.published] == ["InvitationRevoked"]
+    # The serialized events come back as the same classes (`event_type` tells them apart).
+    assert [
+        parse_event(event.model_dump(mode="json")) for event in event_publisher.published
+    ] == list(event_publisher.published)
 
 
 def test_closed_invitation_is_left_untouched() -> None:
@@ -85,6 +90,6 @@ def test_closed_invitation_is_left_untouched() -> None:
     )
     command = RevokeInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
     result = use_case.execute(command)
-    assert result == False
+    assert result is False
     assert unit_of_work.committed
     assert [type(event).__name__ for event in event_publisher.published] == []

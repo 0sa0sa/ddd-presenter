@@ -5,7 +5,4 @@
 
 from __future__ import annotations
 
-
-
-
 # This context declares no internal entities.

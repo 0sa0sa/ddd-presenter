@@ -25,6 +25,8 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
 )
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 
+__all__ = ["CleaningStaffInvitation"]
+
 
 class CleaningStaffInvitation(AggregateRoot):
     """スタッフ候補への招待
@@ -50,7 +52,6 @@ class CleaningStaffInvitation(AggregateRoot):
 
     def _check_transition_invariants(self) -> None:
         """Invariants checked only after a state transition (construct-time ones already ran)."""
-        return None
 
     def _invariant_expiry_after_creation(self) -> None:
         """Invariant `expiry_after_creation`: expires_at > created_at

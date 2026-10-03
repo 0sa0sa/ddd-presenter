@@ -32,6 +32,8 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
     InvitationRevoked,
 )
 
+__all__ = ["AcceptInvitationUseCase", "IssueInvitationUseCase", "RevokeInvitationUseCase"]
+
 
 class IssueInvitationUseCase:
     """スタッフ候補へ招待を発行する
@@ -159,7 +161,6 @@ class AcceptInvitationUseCase:
         self._cleaning_staff_invitation_repository.save(invitation)
         # 4. publish InvitationAccepted after commit
         after_commit.extend(event for event in emitted if isinstance(event, InvitationAccepted))
-        return None
 
 
 class RevokeInvitationUseCase:
@@ -224,6 +225,5 @@ class RevokeInvitationUseCase:
             after_commit.extend(event for event in emitted if isinstance(event, InvitationRevoked))
             # 6. return
             return True
-        else:
-            # 7. return
-            return False
+        # 7. return
+        return False

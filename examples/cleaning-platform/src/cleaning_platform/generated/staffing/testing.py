@@ -13,6 +13,15 @@ from uuid import UUID
 from cleaning_platform.generated._runtime import DomainEvent
 from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 
+__all__ = [
+    "CapturingEventPublisher",
+    "FakeUnitOfWork",
+    "FixedClock",
+    "InMemoryStaffMemberRepository",
+    "SequentialIds",
+    "StubExtensions",
+]
+
 
 class _Transactional(Protocol):
     def _commit(self) -> None: ...
@@ -104,5 +113,3 @@ class CapturingEventPublisher:
 
 class StubExtensions:
     """Test double for the Extensions protocol; each extension returns a fixed value."""
-
-    pass

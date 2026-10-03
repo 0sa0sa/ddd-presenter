@@ -154,8 +154,16 @@ describe("expression emission", () => {
     expect(py("status == placed and total >= 1")).toBe("self.status == Status.PLACED and self.total >= 1");
     expect(py("note == null or length(note) < 3")).toBe("self.note is None or len(self.note) < 3");
     expect(py("not (status == draft or total > 1.5)")).toBe('not (self.status == Status.DRAFT or self.total > Decimal("1.5"))');
-    expect(py("(total > 1 or total < 0) and not is_empty(tags)")).toBe("(self.total > 1 or self.total < 0) and not len(self.tags) == 0");
+    expect(py("(total > 1 or total < 0) and not is_empty(tags)")).toBe("(self.total > 1 or self.total < 0) and len(self.tags) != 0");
     expect(py("contains(tags, 'vip')")).toBe('"vip" in self.tags');
+  });
+
+  test("negation takes its simplest readable form (ruff SIM201 / SIM202 / SIM208 / E714)", () => {
+    expect(py("not (status == draft)")).toBe("self.status != Status.DRAFT");
+    expect(py("not (status != draft)")).toBe("self.status == Status.DRAFT");
+    expect(py("not (note == null)")).toBe("self.note is not None");
+    expect(py("not (not is_empty(tags))")).toBe("len(self.tags) == 0");
+    expect(py("not (total <= 3)")).toBe("not (self.total <= 3)");
   });
 
   test("arithmetic keeps the source grouping and divides integers exactly", () => {
@@ -166,8 +174,8 @@ describe("expression emission", () => {
     expect(py("round(total * 1.08, 0) > min(total, 2.5)")).toBe('(self.total * Decimal("1.08")).quantize(Decimal("1"), rounding=ROUND_HALF_UP) > min(Decimal(self.total), Decimal("2.5"))');
   });
 
-  test("collection functions become comprehensions over tuples", () => {
-    expect(py("any(tags, item == 'vip') and all(tags, length(item) < 10)")).toBe('any([item_ == "vip" for item_ in self.tags]) and all([len(item_) < 10 for item_ in self.tags])');
+  test("collection functions become comprehensions over tuples (any / all short-circuit on a generator)", () => {
+    expect(py("any(tags, item == 'vip') and all(tags, length(item) < 10)")).toBe('any(item_ == "vip" for item_ in self.tags) and all(len(item_) < 10 for item_ in self.tags)');
     expect(py("count(tags, item != 'x') == count(tags)")).toBe('len([item_ for item_ in self.tags if item_ != "x"]) == len(self.tags)');
     expect(py("length(append(tags, 'a')) > length(remove(tags, 'b'))")).toBe('len((*self.tags, "a")) > len(tuple([item_ for item_ in self.tags if item_ != "b"]))');
     expect(py("is_empty(remove_where(tags, item == 'a' or item == 'b'))")).toBe('len(tuple([item_ for item_ in self.tags if not (item_ == "a" or item_ == "b")])) == 0');
@@ -248,6 +256,46 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
   }, 300_000);
 });
 
+/** ruff from the example venv, the PATH or `uvx` (whichever answers `--version`); undefined skips the lint test. */
+const RUFF: string[] | undefined = (() => {
+  const candidates = [[join(EXAMPLE, ".venv/bin/ruff")], ["ruff"], ["uvx", "ruff"]];
+  for (const cmd of candidates) {
+    if (cmd[0]!.includes("/") ? !existsSync(cmd[0]!) : !Bun.which(cmd[0]!)) continue;
+    try {
+      if (Bun.spawnSync([...cmd, "--version"]).exitCode === 0) return cmd;
+    } catch {
+      // not runnable: try the next one
+    }
+  }
+  return undefined;
+})();
+
+describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of the example's pyproject.toml)", () => {
+  test.each([
+    ["the sample model", MODEL],
+    ["the kitchen-sink model", KITCHEN_SINK],
+    ["the context-map model", CONTEXT_MAP],
+    ["the ordering model", ORDERING],
+    ["the long-rules model", LONG_RULES],
+    ["a model reflected from the discovery board", FROM_BOARD],
+  ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));
+    try {
+      for (const f of generate(modelText).files) {
+        mkdirSync(dirname(join(dir, f.path)), { recursive: true });
+        writeFileSync(join(dir, f.path), f.content);
+      }
+      writeFileSync(join(dir, "pyproject.toml"), readFileSync(join(EXAMPLE, "pyproject.toml")));
+      const check = Bun.spawnSync([...RUFF!, "check", "--no-cache", "--output-format", "concise", "."], { cwd: dir });
+      expect(check.stdout.toString() + check.stderr.toString()).toContain("All checks passed");
+      const format = Bun.spawnSync([...RUFF!, "format", "--no-cache", "--diff", "."], { cwd: dir });
+      expect({ exit: format.exitCode, diff: format.stdout.toString() }).toEqual({ exit: 0, diff: "" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
 describe("multiple bounded contexts", () => {
   const TWO = `schema_version: 1
 project: shop
@@ -304,7 +352,7 @@ describe("policies and the context map", () => {
   test("the downstream imports the upstream's event class (published language) and maps event fields into the command", () => {
     const py = file("src/context_map/generated/staffing/application/policies.py")!.content;
     expect(py).toContain("from context_map.generated.hiring.domain import events as hiring_events");
-    expect(py).toContain("event_type = hiring_events.CandidateAccepted");
+    expect(py).toContain("event_type: ClassVar[type[hiring_events.CandidateAccepted]] = hiring_events.CandidateAccepted");
     expect(py).toMatch(/RegisterStaff\(\s*candidate_id=event\.id,\s*email=event\.email\.value,\s*joined_at=event\.at,\s*source=Source\.HIRING,?\s*\)/);
     expect(py).toContain("hiring_events.CandidateAccepted: (register_accepted_candidate,),");
     expect(py).toContain("StaffRegistered: (welcome_registered_staff,),");
@@ -399,9 +447,47 @@ describe("line wrapping (regression: a grouping parenthesis must never become a 
     expect(out.split("\n")[0]).toBe("            holds=(");
     expect(out.split("\n").at(-1)).toBe("            ),");
     expect(tupleConditions(out)).toEqual([]);
-    const ret = wrapLongLines("        return command.allow_orders_that_are_currently_on_hold or (purchase_order.status == PurchaseOrderStatus.PLACED)");
+    const ret = wrapLongLines("        return command.allow_orders_that_are_currently_on_hold or purchase_order.status == PurchaseOrderStatus.PLACED");
     expect(ret.startsWith("        return (\n")).toBe(true);
     expect(tupleConditions(ret)).toEqual([]);
+    // As in ruff format: a single operator whose last operand is bracketed splits that bracket instead.
+    const last = wrapLongLines("        return command.allow_orders_that_are_currently_on_hold or (purchase_order.status == PurchaseOrderStatus.PLACED)");
+    expect(last.split("\n")).toEqual([
+      "        return command.allow_orders_that_are_currently_on_hold or (",
+      "            purchase_order.status == PurchaseOrderStatus.PLACED",
+      "        )",
+    ]);
+    expect(tupleConditions(last)).toEqual([]);
+  });
+
+  test("statement values follow ruff format: optional parentheses, operator levels, comprehensions", () => {
+    // Two operators of the loosest level: parenthesize, split before each, tighter operators stay together.
+    expect(wrapLongLines("        total: Decimal = sum([item_.unit_price.amount * item_.quantity for item_ in order.lines], Decimal(\"0\")) - order.discount - order.refunded").split("\n")).toEqual([
+      "        total: Decimal = (",
+      '            sum([item_.unit_price.amount * item_.quantity for item_ in order.lines], Decimal("0"))',
+      "            - order.discount",
+      "            - order.refunded",
+      "        )",
+    ]);
+    // An assignment never splits its annotation; a plain value goes into parentheses.
+    expect(wrapLongLines("    event_type: ClassVar[type[cleaning_staff_events.InvitationAccepted]] = cleaning_staff_events.InvitationAccepted").split("\n")).toEqual([
+      "    event_type: ClassVar[type[cleaning_staff_events.InvitationAccepted]] = (",
+      "        cleaning_staff_events.InvitationAccepted",
+      "    )",
+    ]);
+    // A comprehension splits before its clauses, not inside its element.
+    expect(wrapLongLines("            lines=tuple([item_._replace(quantity=quantity) if item_.line_id == line_id else item_ for item_ in self.lines]),")).toBe(
+      [
+        "            lines=tuple(",
+        "                [",
+        "                    item_._replace(quantity=quantity) if item_.line_id == line_id else item_",
+        "                    for item_ in self.lines",
+        "                ]",
+        "            ),",
+      ].join("\n"),
+    );
+    // A signature splits its parameters, never its return annotation.
+    expect(wrapLongLines("    def issue(cls, id: UUID, email: EmailAddress, at: datetime, expires_at: datetime) -> Transition[CleaningStaffInvitation]:").split("\n")[0]).toBe("    def issue(");
   });
 
   test("a trailing comment moves above the code instead of into the wrapped brackets", () => {

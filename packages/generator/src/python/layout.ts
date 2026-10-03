@@ -1,5 +1,5 @@
 import type { ContextAnalysis, ModelIR, Type } from "@ddd/core";
-import { docstringLines, Imports, MAX_LINE, toSnake, wrapWords, type ExprContext } from "./support.ts";
+import { byDunderAll, docstringLines, Imports, MAX_LINE, toSnake, wrapWords, type ExprContext } from "./support.ts";
 
 /** Module / path layout for one bounded context. */
 export class Layout {
@@ -93,13 +93,39 @@ export function header(model: ModelIR, extra?: string): string {
   return lines.join("\n");
 }
 
-export function assemble(model: ModelIR, doc: string | undefined, imports: Imports, body: string): string {
+export interface AssembleOptions {
+  /** Declare the module's public names in `__all__` (default true; off for test modules and scaffolds). */
+  exports?: boolean;
+}
+
+export function assemble(model: ModelIR, doc: string | undefined, imports: Imports, body: string, opts: AssembleOptions = {}): string {
   const head = [header(model)];
   if (doc) head.push(docstringLines(doc, "").join("\n"));
   const imp = imports.render();
   if (imp) head.push(imp);
-  const text = head.join("\n\n") + "\n\n\n" + body.trim() + "\n";
+  const code = body.trim();
+  const exported = opts.exports === false ? [] : publicNames(code);
+  if (exported.length) head.push(dunderAll(exported));
+  // Like ruff (isort + format): two blank lines before a class or function, one before anything else.
+  const gap = /^(class |def |@)/.test(code) ? "\n\n\n" : "\n\n";
+  const text = head.join("\n\n") + gap + code + "\n";
   return wrapLongLines(text);
+}
+
+/** Top-level classes, functions and assignments of a module body that do not start with an underscore. */
+export function publicNames(body: string): string[] {
+  const names = new Set<string>();
+  for (const line of body.split("\n")) {
+    const m = /^(?:class |def )?([A-Za-z]\w*)\s*(?:[(:]|=(?!=))/.exec(line);
+    if (m && !/^(?:if|for|while|with|try|except|else|elif|return|raise|assert|import|from)$/.test(m[1]!)) names.add(m[1]!);
+  }
+  return [...names].sort(byDunderAll);
+}
+
+function dunderAll(names: string[]): string {
+  const one = `__all__ = [${names.map((n) => `"${n}"`).join(", ")}]`;
+  if (one.length <= MAX_LINE) return one;
+  return `__all__ = [\n${names.map((n) => `    "${n}",`).join("\n")}\n]`;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,65 +214,173 @@ function topLevel(s: string, needle: string): number[] {
   return out;
 }
 
-/** Splits a boolean expression before its top-level `or` (else `and`) operators; the operator leads the next line. */
-function splitBoolean(expr: string): string[] {
-  for (const op of [" or ", " and "]) {
-    const at = topLevel(expr, op);
-    if (!at.length) continue;
-    const parts: string[] = [];
-    let start = 0;
-    for (const i of at) {
-      parts.push(expr.slice(start, i));
-      start = i + 1;
-    }
-    parts.push(expr.slice(start));
-    return parts.map((p) => p.trim());
-  }
-  return [expr.trim()];
+// The rules below follow ruff format (Black style), so that `ruff format --check` accepts the generated code:
+// - an expression is split before the operators of its loosest-binding level, the operator leading the line; an
+//   operand that still does not fit is split the same way at the same indentation, then at its brackets;
+// - at statement level (`if`, `return`, `x = ...`) the value is put in parentheses unless it has a single such
+//   operator and its first operand starts (or its last operand ends) with a bracket: then that bracket is split;
+// - of several bracket groups on a line, the first one that does not fit up to the next group is split;
+// - a comprehension is split before its `for` / `if` clauses.
+
+/** Operator levels from the loosest binding to the tightest (a split happens before each operator of one level). */
+const LEVELS: string[][] = [
+  [" if ", " else "],
+  [" or "],
+  [" and "],
+  [" not in ", " is not ", " == ", " != ", " <= ", " >= ", " < ", " > ", " in ", " is "],
+  [" | "],
+  [" + ", " - "],
+  [" * ", " // ", " / ", " % "],
+];
+
+interface Op {
+  at: number;
+  op: string;
 }
 
-/** `if …:`, `return …`, `x = …` and `name=…,` lines (the value may be a bare boolean expression). */
-const STATEMENT = /^(if |elif |while |return |assert |[A-Za-z_][\w.]* = |[A-Za-z_]\w*=(?!=))(.*?)(:|,)?$/;
+/** Top-level operators of one level, in order (a longer operator hides the shorter ones it contains). */
+function operatorsAt(expr: string, level: string[]): Op[] {
+  const found: Op[] = [];
+  for (const op of [...level].sort((a, b) => b.length - a.length)) {
+    for (const at of topLevel(expr, op)) {
+      if (!found.some((f) => at < f.at + f.op.length && f.at < at + op.length)) found.push({ at, op });
+    }
+  }
+  return found.sort((a, b) => a.at - b.at);
+}
 
-function wrapLine(line: string, max: number): string[] {
+/** The operators of the loosest level present at the top level of `expr`. */
+function loosest(expr: string): Op[] {
+  if (topLevel(expr, "lambda").length) return [];
+  for (const level of LEVELS) {
+    const ops = operatorsAt(expr, level);
+    if (ops.length) return ops;
+  }
+  return [];
+}
+
+/** Splits before each operator; every part after the first starts with its operator. */
+function splitAt(expr: string, ops: Op[]): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  for (const { at } of ops) {
+    parts.push(expr.slice(start, at).trim());
+    start = at + 1;
+  }
+  parts.push(expr.slice(start).trim());
+  return parts;
+}
+
+/** The element and the `for` / `if` clauses of a comprehension, or undefined. */
+function comprehensionParts(expr: string): string[] | undefined {
+  const fors = topLevel(expr, " for ");
+  if (!fors.length) return undefined;
+  const cuts = [...fors, ...topLevel(expr, " if ").filter((i) => i > fors[0]!)].sort((a, b) => a - b);
+  return splitAt(expr, cuts.map((at) => ({ at, op: "" })));
+}
+
+/** ruff: optional parentheses are left out when the only split operator has a bracketed first or last operand. */
+function canOmitParens(value: string, ops: Op[]): boolean {
+  if (ops.length !== 1) return false;
+  const [first, second] = splitAt(value, ops) as [string, string];
+  const last = second.slice(ops[0]!.op.trim().length).trim();
+  const empty = /^(\(\)|\[\]|\{\})$/;
+  const opens = /^[([{]/.test(first) && !empty.test(first.slice(0, 2));
+  const closes = /[)\]}]$/.test(last) && !empty.test(last.slice(-2));
+  return opens || closes;
+}
+
+const OPERATOR_LEAD = /^(?:not in |is not |for |if |else |or |and |== |!= |<= |>= |< |> |in |is |\| |\+ |- |\* |\/\/ |\/ |% )/;
+
+/** One operand of a split expression (possibly led by its operator): split tighter operators, then brackets. */
+function wrapPiece(line: string, max: number): string[] {
+  if (line.length <= max) return [line];
+  const indent = /^ */.exec(line)![0];
+  const text = line.slice(indent.length);
+  const lead = OPERATOR_LEAD.exec(text)?.[0] ?? "";
+  const rest = text.slice(lead.length);
+  const ops = lead === "for " ? [] : loosest(rest);
+  if (ops.length) {
+    const parts = splitAt(rest, ops);
+    parts[0] = lead + parts[0];
+    return parts.flatMap((p) => wrapPiece(indent + p, max));
+  }
+  return wrapLine(line, max, lead === "");
+}
+
+/** `if …:`, `return …`, `assert …`, `x = …`, `x: T = …` and `name=…,` lines. */
+const STATEMENT = /^(if |elif |while |return |assert |[A-Za-z_][\w.]*(?:: [^=]*?)? = |[A-Za-z_]\w*=(?!=))(.*?)(:|,)?$/;
+
+function wrapLine(line: string, max: number, statement = true): string[] {
   if (line.length <= max) return [line];
   const indent = /^ */.exec(line)![0];
   const inner = indent + "    ";
-  const rewrap = (lines: string[]) => lines.flatMap((l) => wrapLine(l, max));
 
   // A trailing comment must not end up inside the brackets: move it to its own line above the code.
   const hash = topLevel(line, "#").find((i) => i > indent.length && /\s/.test(line[i - 1]!));
   if (hash !== undefined) {
-    return [...wrapComment(`${indent}${line.slice(hash)}`, max), ...wrapLine(line.slice(0, hash).trimEnd(), max)];
+    return [...wrapComment(`${indent}${line.slice(hash)}`, max), ...wrapLine(line.slice(0, hash).trimEnd(), max, statement)];
   }
 
-  // A boolean value outside any bracket: put it in grouping parentheses, one operand per line.
-  const m = STATEMENT.exec(line.slice(indent.length));
+  // A value with operators outside any bracket: put it in parentheses, one operand per line (a keyword argument
+  // always gets them; ruff keeps explicit parentheses there).
+  const m = statement ? STATEMENT.exec(line.slice(indent.length)) : null;
+  let valueStart = 0;
   if (m) {
     const lead = m[1]!;
     const value = m[2]!;
     const end = m[3] ?? "";
-    const plain = !topLevel(value, ",").length && !topLevel(value, "lambda").length;
-    if (plain && (topLevel(value, " or ").length || topLevel(value, " and ").length)) {
-      return [`${indent}${lead}(`, ...rewrap(splitBoolean(value).map((p) => inner + p)), `${indent})${end}`];
+    const ops = topLevel(value, ",").length ? [] : loosest(value);
+    if (ops.length && (/^[A-Za-z_]\w*=$/.test(lead) || !canOmitParens(value, ops))) {
+      return [`${indent}${lead}(`, ...splitAt(value, ops).flatMap((p) => wrapPiece(inner + p, max)), `${indent})${end}`];
+    }
+    if (lead.endsWith(" = ")) {
+      // An assignment splits its value, never its target or annotation; a value without a closing bracket
+      // (a name, an attribute, a string) goes into parentheses.
+      valueStart = indent.length + lead.length;
+      if (!ops.length && !/[)\]}]$/.test(value) && (inner + value).length <= max) {
+        return [`${indent}${lead}(`, inner + value, `${indent})${end}`];
+      }
     }
   }
 
-  // Otherwise break up the longest top-level bracket group.
-  const groups = topGroups(line);
+  // Otherwise split the first bracket group that does not fit up to the next group (or the end of the line).
+  const groups = topGroups(line).filter((g) => g.open >= valueStart && line.slice(g.open + 1, g.close).trim());
   if (!groups.length) return splitString(line, max);
-  const g = groups.reduce((a, b) => (b.close - b.open > a.close - a.open ? b : a));
+  let g = groups[groups.length - 1]!;
+  // A function signature splits its parameters, never its return annotation.
+  if (/^(async )?def /.test(line.slice(indent.length))) g = groups[0]!;
+  else for (let i = 0; i < groups.length; i++) {
+    const until = i + 1 < groups.length ? groups[i + 1]!.open + 1 : line.length;
+    if (until > max) {
+      g = groups[i]!;
+      break;
+    }
+  }
   const content = line.slice(g.open + 1, g.close);
-  if (!content.trim()) return [line];
   const head = line.slice(0, g.open + 1);
   const tail = `${indent}${line.slice(g.close)}`;
   const elements = splitTopLevel(content);
   if (elements.length < 2 && !content.trimEnd().endsWith(",")) {
     // One element: a grouping parenthesis, a single argument or a bare generator expression. Never add a comma.
-    return [head, ...rewrap(splitBoolean(content).map((p) => inner + p)), tail];
+    const one = content.trim();
+    if ((inner + one).length <= max) return [head, inner + one, tail];
+    const comprehension = comprehensionParts(one);
+    const parts = comprehension ?? splitAt(one, loosest(one));
+    return [head, ...parts.flatMap((p) => wrapPiece(inner + p, max)), tail];
   }
   const body = elements.flatMap((el) => {
-    const parts = wrapLine(`${inner}${el.trim()}`, max - 1);
+    const text = el.trim();
+    const own = `${inner}${text}`;
+    // The element line gets a trailing comma, which must fit too.
+    const fits = own.length + 1 <= max;
+    const ops = /^[A-Za-z_]\w*=(?!=)|^\*/.test(text) ? [] : loosest(text);
+    const parts = fits
+      ? [own]
+      : ops.length
+        ? // An operator chain as a positional element: parenthesize it, one operand per line.
+          [`${inner}(`, ...splitAt(text, ops).flatMap((p) => wrapPiece(`${inner}    ${p}`, max)), `${inner})`]
+        : wrapLine(own, own.length === max ? max - 1 : max);
     parts[parts.length - 1] += ",";
     return parts;
   });

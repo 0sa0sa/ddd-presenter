@@ -14,6 +14,15 @@ from cleaning_platform.generated._runtime import DomainEvent
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 
+__all__ = [
+    "CapturingEventPublisher",
+    "FakeUnitOfWork",
+    "FixedClock",
+    "InMemoryCleaningStaffInvitationRepository",
+    "SequentialIds",
+    "StubExtensions",
+]
+
 
 class _Transactional(Protocol):
     def _commit(self) -> None: ...

@@ -14,6 +14,15 @@ from cleaning_platform.generated._runtime import DomainEvent
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 
+__all__ = [
+    "CleaningStaffInvitationRepository",
+    "Clock",
+    "EventPublisher",
+    "Extensions",
+    "IdGenerator",
+    "UnitOfWork",
+]
+
 
 class CleaningStaffInvitationRepository(Protocol):
     """Loads and stores CleaningStaffInvitation aggregates. Implemented by an adapter outside the
@@ -42,7 +51,8 @@ class IdGenerator(Protocol):
 
 
 class EventPublisher(Protocol):
-    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's responsibility.
+    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's
+    responsibility.
     """
 
     def publish(self, events: Sequence[DomainEvent]) -> None: ...

@@ -9,6 +9,8 @@ from pydantic import Field, field_validator
 
 from cleaning_platform.generated._runtime import ValueObject
 
+__all__ = ["EmailAddress"]
+
 
 class EmailAddress(ValueObject):
     """招待先のメールアドレス

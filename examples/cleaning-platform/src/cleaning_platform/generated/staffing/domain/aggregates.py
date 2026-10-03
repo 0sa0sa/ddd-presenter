@@ -14,6 +14,8 @@ from pydantic import AwareDatetime
 from cleaning_platform.generated._runtime import AggregateRoot, DomainEvent, Transition
 from cleaning_platform.generated.staffing.domain.events import StaffRegistered
 
+__all__ = ["StaffMember"]
+
 
 class StaffMember(AggregateRoot):
     """登録済みのスタッフ
@@ -29,7 +31,6 @@ class StaffMember(AggregateRoot):
 
     def _check_transition_invariants(self) -> None:
         """Invariants checked only after a state transition (construct-time ones already ran)."""
-        return None
 
     @classmethod
     def register(

@@ -17,7 +17,7 @@ from cleaning_platform.generated.cleaning_staff.domain.errors import (
     EmailBlocked,
     InvalidInvitationWindow,
 )
-from cleaning_platform.generated.cleaning_staff.domain.events import InvitationIssued
+from cleaning_platform.generated.cleaning_staff.domain.events import InvitationIssued, parse_event
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 from cleaning_platform.generated.cleaning_staff.testing import (
     CapturingEventPublisher,
@@ -66,6 +66,10 @@ def test_invitation_is_issued() -> None:
     assert stored_0.status == InvitationStatus.PENDING
     assert stored_0.expires_at == datetime.fromisoformat("2026-01-08T10:00:00+00:00")
     assert [type(event).__name__ for event in event_publisher.published] == ["InvitationIssued"]
+    # The serialized events come back as the same classes (`event_type` tells them apart).
+    assert [
+        parse_event(event.model_dump(mode="json")) for event in event_publisher.published
+    ] == list(event_publisher.published)
     event_0 = event_publisher.published[0]
     assert isinstance(event_0, InvitationIssued)
     assert event_0.email == EmailAddress(value="new@example.com")

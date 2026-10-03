@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from cleaning_platform.generated._runtime import DomainError
 
+__all__ = ["ALL_ERRORS"]
 
-ALL_ERRORS: tuple[type[DomainError], ...] = ()
+ALL_ERRORS: Final[tuple[type[DomainError], ...]] = ()

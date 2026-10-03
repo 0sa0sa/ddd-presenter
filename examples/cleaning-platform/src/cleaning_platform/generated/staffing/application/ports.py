@@ -13,6 +13,15 @@ from uuid import UUID
 from cleaning_platform.generated._runtime import DomainEvent
 from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 
+__all__ = [
+    "Clock",
+    "EventPublisher",
+    "Extensions",
+    "IdGenerator",
+    "StaffMemberRepository",
+    "UnitOfWork",
+]
+
 
 class StaffMemberRepository(Protocol):
     """Loads and stores StaffMember aggregates. Implemented by an adapter outside the domain."""
@@ -39,7 +48,8 @@ class IdGenerator(Protocol):
 
 
 class EventPublisher(Protocol):
-    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's responsibility.
+    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's
+    responsibility.
     """
 
     def publish(self, events: Sequence[DomainEvent]) -> None: ...

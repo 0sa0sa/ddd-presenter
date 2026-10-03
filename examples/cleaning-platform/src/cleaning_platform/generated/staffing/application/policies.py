@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from cleaning_platform.generated._runtime import DomainEvent, EventHandler
 from cleaning_platform.generated.cleaning_staff.domain import events as cleaning_staff_events
 from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
+
+__all__ = ["RegisterStaffOnAcceptancePolicy", "RegisterStaffRunner", "subscriptions"]
 
 
 class RegisterStaffRunner(Protocol):
@@ -26,7 +28,9 @@ class RegisterStaffOnAcceptancePolicy:
     Args: invitation_id=event.id, joined_at=event.at
     """
 
-    event_type = cleaning_staff_events.InvitationAccepted
+    event_type: ClassVar[type[cleaning_staff_events.InvitationAccepted]] = (
+        cleaning_staff_events.InvitationAccepted
+    )
 
     def __init__(self, *, use_case: RegisterStaffRunner) -> None:
         self._use_case = use_case

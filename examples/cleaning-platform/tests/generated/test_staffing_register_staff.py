@@ -10,7 +10,7 @@ from uuid import UUID
 
 from cleaning_platform.generated.staffing.application.use_cases import RegisterStaffUseCase
 from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
-from cleaning_platform.generated.staffing.domain.events import StaffRegistered
+from cleaning_platform.generated.staffing.domain.events import StaffRegistered, parse_event
 from cleaning_platform.generated.staffing.testing import (
     CapturingEventPublisher,
     FakeUnitOfWork,
@@ -51,6 +51,10 @@ def test_accepted_invitation_registers_staff() -> None:
     assert stored_0.invitation_id == UUID("00000000-0000-0000-0000-000000000001")
     assert stored_0.joined_at == datetime.fromisoformat("2026-01-02T10:00:00+00:00")
     assert [type(event).__name__ for event in event_publisher.published] == ["StaffRegistered"]
+    # The serialized events come back as the same classes (`event_type` tells them apart).
+    assert [
+        parse_event(event.model_dump(mode="json")) for event in event_publisher.published
+    ] == list(event_publisher.published)
     event_0 = event_publisher.published[0]
     assert isinstance(event_0, StaffRegistered)
     assert event_0.invitation_id == UUID("00000000-0000-0000-0000-000000000001")

@@ -18,6 +18,8 @@ from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
 from cleaning_platform.generated.staffing.domain.events import StaffRegistered
 
+__all__ = ["RegisterStaffUseCase"]
+
 
 class RegisterStaffUseCase:
     """招待を受諾した人をスタッフとして登録する

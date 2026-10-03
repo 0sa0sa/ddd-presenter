@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
+
+__all__ = ["RULES", "Rule"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Rule:
     """Catalogue entry of a named domain rule (for traceability and documentation)."""
 
@@ -21,5 +24,4 @@ class Rule:
     applied_by: tuple[str, ...]
 
 
-RULES: tuple[Rule, ...] = (
-)
+RULES: Final[tuple[Rule, ...]] = ()

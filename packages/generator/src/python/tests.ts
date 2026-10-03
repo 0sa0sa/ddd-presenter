@@ -2,7 +2,7 @@ import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScen
 import { depParams, repoAttr, resolveReturn, useCaseDeps } from "./application.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { Code, Imports, pascal, pyString, pyType, pyValue, type ValueContext } from "./support.ts";
+import { assertEquals, Code, Imports, pascal, pyString, pyType, pyValue, type ValueContext } from "./support.ts";
 
 // ---------------------------------------------------------------------------
 // testing.py — in-memory adapters for the generated ports
@@ -179,11 +179,7 @@ export function testingFile(L: Layout): PyFile {
   c.indent(() => {
     c.docstring("Test double for the Extensions protocol; each extension returns a fixed value.");
     const exts = L.ca.ir.extensionPoints;
-    if (!exts.length) {
-      c.line();
-      c.line("pass");
-      return;
-    }
+    if (!exts.length) return;
     c.line();
     const sig = exts.map((x) => {
       const rt = resolveReturn(L, x.returns);
@@ -238,6 +234,11 @@ function spacedJson(v: unknown): string {
 function eventAsserts(L: Layout, c: Code, events: string, then: ScenarioThenIR, imp: Imports, vctx: ValueContext): void {
   if (!then.emits) return;
   c.line(`assert [type(event).__name__ for event in ${events}] == [${then.emits.map((e) => pyString(e.event)).join(", ")}]`);
+  if (then.emits.length) {
+    imp.from(L.mod("events"), "parse_event");
+    c.line("# The serialized events come back as the same classes (`event_type` tells them apart).");
+    c.line(`assert [parse_event(event.model_dump(mode="json")) for event in ${events}] == list(${events})`);
+  }
   then.emits.forEach((e, i) => {
     const entries = Object.entries(e.fields);
     if (!entries.length) return;
@@ -247,7 +248,7 @@ function eventAsserts(L: Layout, c: Code, events: string, then: ScenarioThenIR, 
     c.line(`assert isinstance(event_${i}, ${e.event})`);
     for (const [k, v] of entries) {
       const t = info.fields.find((f) => f.name === k)!.type;
-      c.line(`assert event_${i}.${k} == ${pyValue(v, t, vctx)}`);
+      c.line(assertEquals(`event_${i}.${k}`, pyValue(v, t, vctx)));
     }
   });
 }
@@ -256,7 +257,7 @@ function recordAsserts(c: Code, target: string, rec: Record<string, unknown>, ty
   for (const [k, v] of Object.entries(rec)) {
     const t = types.get(k)!;
     const expected = pyValue(v, t, vctx);
-    c.line(expected === "None" ? `assert ${target}.${k} is None` : `assert ${target}.${k} == ${expected}`);
+    c.line(assertEquals(`${target}.${k}`, expected));
   }
 }
 
@@ -280,7 +281,7 @@ export function aggregateTestFile(L: Layout, ag: AggregateIR): PyFile | undefine
   for (const sc of ag.scenarios) aggregateScenario(L, c, ag, sc, types, imp, vctx);
   return {
     path: L.testPath(ag.name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()),
-    content: assemble(L.model, `Scenarios of aggregate ${ag.name} (${L.ca.ir.name}).`, imp, c.toString()),
+    content: assemble(L.model, `Scenarios of aggregate ${ag.name} (${L.ca.ir.name}).`, imp, c.toString(), { exports: false }),
   };
 }
 
@@ -359,7 +360,7 @@ export function invariantTestFile(L: Layout): PyFile | undefined {
   }
   return {
     path: L.testPath("invariants"),
-    content: assemble(L.model, `Invariants of the ${L.ca.ir.name} context, each violated on purpose (values derived from the scenarios).`, imp, c.toString()),
+    content: assemble(L.model, `Invariants of the ${L.ca.ir.name} context, each violated on purpose (values derived from the scenarios).`, imp, c.toString(), { exports: false }),
   };
 }
 
@@ -370,7 +371,7 @@ export function useCaseTestFile(L: Layout, uc: UseCaseIR): PyFile | undefined {
   const vctx: ValueContext = { imports: imp, typeModule: L.typeModule, fieldTypes: L.ca.fieldTypes };
   const c = new Code();
   for (const sc of uc.scenarios) useCaseScenario(L, c, uc, sc, imp, vctx);
-  return { path: L.testPath(uc.name), content: assemble(L.model, `Scenarios of use case ${uc.name} (${L.ca.ir.name}).`, imp, c.toString()) };
+  return { path: L.testPath(uc.name), content: assemble(L.model, `Scenarios of use case ${uc.name} (${L.ca.ir.name}).`, imp, c.toString(), { exports: false }) };
 }
 
 function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: Imports, vctx: ValueContext): void {
@@ -442,7 +443,7 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       }
     } else if (info.returnType) {
       c.line("result = use_case.execute(command)");
-      if (then.hasReturns) c.line(`assert result == ${pyValue(then.returns, info.returnType, vctx)}`);
+      if (then.hasReturns) c.line(assertEquals("result", pyValue(then.returns, info.returnType, vctx)));
       if (deps.uow) c.line("assert unit_of_work.committed");
     } else {
       c.line("use_case.execute(command)");

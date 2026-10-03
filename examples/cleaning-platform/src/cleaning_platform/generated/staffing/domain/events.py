@@ -5,13 +5,34 @@
 
 from __future__ import annotations
 
+from typing import Final, Literal, TypeAlias
 from uuid import UUID
 
-from cleaning_platform.generated._runtime import DomainEvent
+from pydantic import TypeAdapter
+
+from cleaning_platform.generated._runtime import DomainEvent, parse_with
+
+__all__ = ["AnyEvent", "StaffRegistered", "parse_event"]
 
 
 class StaffRegistered(DomainEvent):
     """Emitted by StaffMember.register."""
 
+    event_type: Literal["Staffing.StaffRegistered"] = "Staffing.StaffRegistered"
     id: UUID
     invitation_id: UUID
+
+
+AnyEvent: TypeAlias = StaffRegistered
+"""Every domain event of the Staffing context, told apart by `event_type`."""
+
+_EVENTS: Final[TypeAdapter[AnyEvent]] = TypeAdapter(AnyEvent)
+
+
+def parse_event(data: object) -> AnyEvent:
+    """Rebuilds an event of this context from its `model_dump()` / `model_dump(mode="json")` form
+    (e.g. an outbox row).
+
+    `event_type` selects the class; invalid data raises ConstraintViolation.
+    """
+    return parse_with(_EVENTS, data, "AnyEvent")

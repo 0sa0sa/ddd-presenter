@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
+__all__ = ["RandomIds", "SystemClock"]
 
 
 class SystemClock:
     """Clock backed by the system time. Always returns an aware UTC datetime."""
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 class RandomIds:

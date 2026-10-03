@@ -11,6 +11,8 @@ from pydantic import AwareDatetime
 
 from cleaning_platform.generated._runtime import DomainModel
 
+__all__ = ["RegisterStaff"]
+
 
 class RegisterStaff(DomainModel):
     """Input of use case `register_staff` (actor: システム（ポリシー）)."""

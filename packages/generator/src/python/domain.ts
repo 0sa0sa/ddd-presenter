@@ -1,11 +1,16 @@
 import { formatPath, resolveType, typeToString, type AggregateIR, type Constraints, type EntityIR, type EventEmissionIR, type FieldIR, type InvariantIR, type Type, type ValueObjectIR } from "@ddd/core";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { Code, emitAs, emitExpr, enumMember, pyString, pyType, type Imports } from "./support.ts";
+import { Code, emitAs, emitExpr, emitNegated, enumMember, MAX_LINE, pyString, pyType, type Imports } from "./support.ts";
 
 export interface PyFile {
   path: string;
   content: string;
 }
+
+/** Discriminator field of every generated event ("<Context>.<Event>", the same tag as the TypeScript target). */
+export const EVENT_TAG = "event_type";
+/** Tagged union of the events of one context (in its events module). */
+export const EVENT_UNION = "AnyEvent";
 
 // ---------------------------------------------------------------------------
 // shared helpers
@@ -69,7 +74,7 @@ function invariantMethods(L: Layout, c: Code, owner: string, identity: string | 
     c.line(`def _invariant_${inv.name}(self) -> None:`);
     c.indent(() => {
       c.docstring(`Invariant \`${inv.name}\`: ${inv.expression}${inv.description ? `\n\n${inv.description}` : ""}\nChecked on: ${inv.checkOn.join(", ")}. Violation raises ${inv.error}.`);
-      c.line(`if not (${emitExpr(e, L.exprCtx(imp, "self"))}):`);
+      c.line(`if ${emitNegated(e, L.exprCtx(imp, "self"))}:`);
       c.indent(() => c.line(`raise ${inv.error}(${errorDetails(identity, "self", { rule: pyString(inv.name) })})`));
     });
   }
@@ -144,19 +149,20 @@ export function errorsFile(L: Layout): PyFile {
     });
   }
   const names = L.ca.ir.errors.map((e) => e.name);
+  imp.from("typing", "Final");
   c.line().line();
-  c.line(`ALL_ERRORS: tuple[type[DomainError], ...] = (${names.join(", ")}${names.length === 1 ? "," : ""})`);
+  c.line(`ALL_ERRORS: Final[tuple[type[DomainError], ...]] = (${names.join(", ")}${names.length === 1 ? "," : ""})`);
   return { path: L.path(mod), content: assemble(L.model, `Domain errors of the ${L.ca.ir.name} context.`, imp, c.toString()) };
 }
 
 export function enumsFile(L: Layout): PyFile {
   const mod = L.mod("enums");
   const imp = new ModuleImports(mod);
-  imp.from("enum", "Enum");
+  if (L.ca.ir.enums.length) imp.from("enum", "StrEnum");
   const c = new Code();
   for (const e of L.ca.ir.enums) {
     c.line().line();
-    c.line(`class ${e.name}(str, Enum):`);
+    c.line(`class ${e.name}(StrEnum):`);
     c.indent(() => {
       if (e.description) c.docstring(e.description).line();
       for (const v of e.values) c.line(`${enumMember(v)} = ${pyString(v)}`);
@@ -236,15 +242,58 @@ export function eventsFile(L: Layout): PyFile {
   const events = [...L.ca.events.values()].sort((a, b) => a.name.localeCompare(b.name));
   if (events.length) imp.from(L.runtime, "DomainEvent");
   for (const ev of events) {
+    if (ev.name === EVENT_UNION || ev.fields.some((f) => f.name === EVENT_TAG)) {
+      throw new Error(`${L.ca.ir.name}.${ev.name}: "${EVENT_UNION}" and the field name "${EVENT_TAG}" are reserved by the Python event module`);
+    }
+    imp.from("typing", "Literal");
+    const tag = pyString(`${L.ca.ir.name}.${ev.name}`);
     c.line().line();
     c.line(`class ${ev.name}(DomainEvent):`);
     c.indent(() => {
       c.docstring(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.`);
-      if (ev.fields.length) c.line();
+      c.line();
+      const one = `${EVENT_TAG}: Literal[${tag}] = ${tag}`;
+      // Too long for one line: parenthesize the value, as ruff format does.
+      if (one.length + 4 <= MAX_LINE) c.line(one);
+      else c.line(`${EVENT_TAG}: Literal[${tag}] = (`).indent(() => c.line(tag)).line(")");
       for (const f of ev.fields) {
         const ann = pyType(f.type, imp, L.typeModule, { field: true });
         c.line(`${f.name}: ${ann}${f.type.k === "optional" ? " = None" : ""}`);
       }
+    });
+  }
+  if (events.length) {
+    imp.from("typing", "Final", "TypeAlias");
+    imp.from("pydantic", "TypeAdapter");
+    imp.from(L.runtime, "parse_with");
+    const names = events.map((e) => e.name);
+    c.line().line();
+    if (names.length === 1) {
+      c.line(`${EVENT_UNION}: TypeAlias = ${names[0]}`);
+    } else {
+      // Tagged union: Pydantic picks the class from `event_type` instead of trying each member in turn (a member's
+      // ConstraintViolation is not a ValueError, so an untagged union would stop at the first member that fails).
+      imp.from("typing", "Annotated");
+      imp.from("pydantic", "Field");
+      c.line(`${EVENT_UNION}: TypeAlias = Annotated[`);
+      c.indent(() => {
+        const union = names.join(" | ");
+        if (union.length + 5 <= MAX_LINE) c.line(`${union},`);
+        else c.line("(").indent(() => names.forEach((n, i) => c.line(i === 0 ? n : `| ${n}`))).line("),");
+        c.line(`Field(discriminator=${pyString(EVENT_TAG)}),`);
+      });
+      c.line("]");
+    }
+    c.docstring(`Every domain event of the ${L.ca.ir.name} context, told apart by \`${EVENT_TAG}\`.`);
+    c.line();
+    c.line(`_EVENTS: Final[TypeAdapter[${EVENT_UNION}]] = TypeAdapter(${EVENT_UNION})`);
+    c.line().line();
+    c.line(`def parse_event(data: object) -> ${EVENT_UNION}:`);
+    c.indent(() => {
+      c.docstring(
+        `Rebuilds an event of this context from its \`model_dump()\` / \`model_dump(mode="json")\` form (e.g. an outbox row).\n\n\`${EVENT_TAG}\` selects the class; invalid data raises ConstraintViolation.`,
+      );
+      c.line(`return parse_with(_EVENTS, data, ${pyString(EVENT_UNION)})`);
     });
   }
   if (!events.length) c.line("# This context declares no domain events.");
@@ -326,7 +375,6 @@ function aggregate(L: Layout, c: Code, ag: AggregateIR, imp: Imports): void {
     c.line("def _check_transition_invariants(self) -> None:");
     c.indent(() => {
       c.docstring("Invariants checked only after a state transition (construct-time ones already ran).");
-      if (!transitionOnly.length) c.line("return None");
       for (const i of transitionOnly) c.line(`self._invariant_${i.name}()`);
     });
     invariantMethods(L, c, ag.name, ag.identity, ag.invariants, imp);
@@ -435,9 +483,10 @@ export function rulesFile(L: Layout): PyFile {
   const mod = L.mod("rules");
   const imp = new ModuleImports(mod);
   imp.from("dataclasses", "dataclass");
+  imp.from("typing", "Final");
   const c = new Code();
   c.line().line();
-  c.line("@dataclass(frozen=True)");
+  c.line("@dataclass(frozen=True, slots=True)");
   c.line("class Rule:");
   c.indent(() => {
     c.docstring("Catalogue entry of a named domain rule (for traceability and documentation).");
@@ -451,8 +500,9 @@ export function rulesFile(L: Layout): PyFile {
     c.line("applied_by: tuple[str, ...]");
   });
   c.line().line();
-  c.line("RULES: tuple[Rule, ...] = (");
-  c.indent(() => {
+  const entries = new Code();
+  entries.indent(() => {
+    const c = entries;
     const owners: (EntityIR | ValueObjectIR)[] = [...L.ca.ir.valueObjects, ...L.ca.ir.aggregates.flatMap((a) => [a, ...a.entities])];
     for (const o of owners) {
       for (const inv of o.invariants) {
@@ -471,7 +521,9 @@ export function rulesFile(L: Layout): PyFile {
       }
     }
   });
-  c.line(")");
+  const body = entries.toString();
+  if (body.trim()) c.line("RULES: Final[tuple[Rule, ...]] = (").lines_(body.split("\n").map((l) => l.trim()).map((l) => `    ${l}`)).line(")");
+  else c.line("RULES: Final[tuple[Rule, ...]] = ()");
   return { path: L.path(mod), content: assemble(L.model, `Catalogue of the named rules in the ${L.ca.ir.name} context.`, imp, c.toString()) };
 }
 

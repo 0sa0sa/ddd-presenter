@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
+
+__all__ = ["InvitationStatus"]
 
 
-class InvitationStatus(str, Enum):
+class InvitationStatus(StrEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REVOKED = "revoked"

@@ -7,15 +7,33 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, Self, TypeVar
+from typing import Any, ClassVar, Generic, Self, TypeAlias, TypeVar
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     ModelWrapValidatorHandler,
+    TypeAdapter,
     ValidationError,
     model_validator,
 )
+from pydantic_core import ErrorDetails
+
+__all__ = [
+    "AggregateNotFound",
+    "AggregateRoot",
+    "ConstraintViolation",
+    "DomainError",
+    "DomainEvent",
+    "DomainModel",
+    "Entity",
+    "EventHandler",
+    "StateGuard",
+    "Transition",
+    "ValueObject",
+    "dispatch",
+    "parse_with",
+]
 
 
 class DomainError(Exception):
@@ -41,7 +59,10 @@ class DomainError(Exception):
 
 
 class ConstraintViolation(DomainError):
-    """A field constraint (type, length, range, pattern, ...) was violated."""
+    """A field constraint (type, length, range, pattern, ...) was violated.
+
+    `details["errors"]` holds Pydantic's error list; the `ValidationError` is kept as `__cause__`.
+    """
 
     code = "constraint_violation"
     default_message = "A field constraint was violated"
@@ -54,14 +75,24 @@ class AggregateNotFound(DomainError):
     default_message = "The requested aggregate does not exist"
 
 
-def _describe(exc: ValidationError) -> str:
+def _constraint_violation(subject: str, exc: ValidationError) -> ConstraintViolation:
+    errors = exc.errors(include_url=False)
+    return ConstraintViolation(f"{subject}: {_describe(errors)}", model=subject, errors=errors)
+
+
+def _describe(errors: Sequence[ErrorDetails]) -> str:
     return "; ".join(
-        f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}" for e in exc.errors()
+        f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}" for e in errors
     )
 
 
 class DomainModel(BaseModel):
-    """Immutable Pydantic model whose validation failures surface as `ConstraintViolation`."""
+    """Immutable Pydantic model whose validation failures surface as `ConstraintViolation`.
+
+    Every way of making a new state validates it: the constructor, `model_validate`,
+    `model_copy(update=...)` and `_replace`. Only `model_construct` skips validation (Pydantic's
+    escape hatch for data that is already known to be valid).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
 
@@ -73,9 +104,23 @@ class DomainModel(BaseModel):
         try:
             return handler(data)
         except ValidationError as exc:
-            raise ConstraintViolation(
-                f"{cls.__name__}: {_describe(exc)}", model=cls.__name__, errors=exc.errors()
-            ) from None
+            raise _constraint_violation(cls.__name__, exc) from exc
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        """Copy of this model; with `update`, the copy is validated like a new instance.
+
+        Pydantic's own `model_copy(update=...)` does not validate, which would let field
+        constraints, normalization and invariants be bypassed. Raises `ConstraintViolation` or the
+        declared domain error instead.
+        """
+        copied = super().model_copy(deep=deep)
+        return copied._replace(**update) if update else copied
+
+    def _replace(self, **changes: object) -> Self:
+        """Build a candidate state; constraints and construct-time invariants run on it."""
+        data = {name: getattr(self, name) for name in type(self).model_fields}
+        data.update(changes)
+        return type(self).model_validate(data)
 
 
 class ValueObject(DomainModel):
@@ -104,22 +149,31 @@ class Entity(DomainModel):
         """Full structural comparison (identity equality ignores the other fields)."""
         return self.model_dump() == other.model_dump()
 
-    def _replace(self, **changes: object) -> Self:
-        """Build a candidate state; all construct-time invariants run on the new instance."""
-        data = {name: getattr(self, name) for name in type(self).model_fields}
-        data.update(changes)
-        return type(self).model_validate(data)
-
 
 class AggregateRoot(Entity):
     """Consistency boundary. Only the root is loaded and saved through a repository."""
 
 
 class DomainEvent(DomainModel):
-    """Something that happened in the domain. Immutable payload."""
+    """Something that happened in the domain. Immutable payload.
+
+    Each generated event has an `event_type` field ("<Context>.<Event>") that tags its
+    serialized form; `parse_event` in the context's events module rebuilds the right class.
+    """
 
 
-EventHandler = Callable[[DomainEvent], None]
+T = TypeVar("T")
+
+
+def parse_with(adapter: TypeAdapter[T], data: object, subject: str) -> T:
+    """Validates `data` with `adapter`; failures raise `ConstraintViolation` (as models do)."""
+    try:
+        return adapter.validate_python(data)
+    except ValidationError as exc:
+        raise _constraint_violation(subject, exc) from exc
+
+
+EventHandler: TypeAlias = Callable[[DomainEvent], None]
 """Reacts to a domain event, e.g. a generated policy (see `subscriptions()` in policies.py)."""
 
 
@@ -140,7 +194,7 @@ def dispatch(
 A = TypeVar("A", bound=AggregateRoot)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Transition(Generic[A]):
     """Result of a factory or operation: the new aggregate state plus the events it emitted."""
 
@@ -148,7 +202,7 @@ class Transition(Generic[A]):
     events: tuple[DomainEvent, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StateGuard:
     """A named condition evaluated at a specific moment.
 

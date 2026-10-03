@@ -34,21 +34,42 @@ export class Imports {
     const third: string[] = [];
     const local: string[] = [];
     const bucket = (m: string) => (STDLIB.has(m.split(".")[0]!) ? std : m.startsWith("pydantic") || m === "pytest" ? third : local);
-    for (const m of [...this.plain].sort()) bucket(m).push(`import ${m}`);
-    for (const m of [...this.map.keys()].sort()) {
+    for (const m of [...this.plain].sort(byModule)) bucket(m).push(`import ${m}`);
+    for (const m of [...this.map.keys()].sort(byModule)) {
       if (m === "__future__") continue;
-      const names = [...this.map.get(m)!].sort((a, b) => a.localeCompare(b));
+      const names = [...this.map.get(m)!].sort(byMemberType);
       if (names.length === 0) continue;
       const one = `from ${m} import ${names.join(", ")}`;
       const line = one.length <= 100 ? one : `from ${m} import (\n${names.map((n) => `    ${n},`).join("\n")}\n)`;
       bucket(m).push(line);
     }
     const groups = [std, third, local].filter((g) => g.length);
-    return [...lines, ...groups.map((g) => g.join("\n"))].join("\n\n").replace(/\n\n\n+/g, "\n\n");
+    return [...lines, ...groups.map((g) => g.join("\n"))].join("\n\n").replace(/\n\n\n+/g, "\n\n").trim();
   }
 }
 
-const STDLIB = new Set(["dataclasses", "datetime", "decimal", "enum", "typing", "uuid", "collections", "re", "abc"]);
+/** isort / ruff order of modules: case-insensitive. */
+function byModule(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** isort / ruff `order-by-type` order of imported names: CONSTANTS, then Classes, then functions and modules. */
+export function byMemberType(a: string, b: string): number {
+  return nameKind(a) - nameKind(b) || byModule(a, b);
+}
+
+/** ruff RUF022 order of `__all__`: CONSTANTS, Classes, the rest; case-sensitive within each group. */
+export function byDunderAll(a: string, b: string): number {
+  return nameKind(a) - nameKind(b) || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+function nameKind(n: string): number {
+  return n.length > 1 && n === n.toUpperCase() && /[A-Z]/.test(n) ? 0 : /^[A-Z]/.test(n) ? 1 : 2;
+}
+
+const STDLIB = new Set(["abc", "collections", "copy", "dataclasses", "datetime", "decimal", "enum", "json", "re", "typing", "uuid"]);
 
 /** Maximum length of a generated line (code is wrapped in layout.ts, docstrings and comments here). */
 export const MAX_LINE = 100;
@@ -89,6 +110,12 @@ export function docstringLines(text: string, pad: string, max = MAX_LINE): strin
     const rest = first.length > 1 ? wrapWords(first.slice(1).join(" "), Math.max(20, max - cont.length)) : [];
     out.push(prefix + first[0], ...rest.map((l) => cont + l));
   });
+  if (out.length === 1) {
+    // One content line that only overflows with the closing quotes: ruff format would pull the quotes back onto
+    // it, so move the last word down instead (a docstring of two content lines keeps its closing quotes apart).
+    const at = out[0]!.lastIndexOf(" ");
+    if (at > pad.length + 3) out.splice(0, 1, out[0]!.slice(0, at), pad + out[0]!.slice(at + 1));
+  }
   out.push(`${pad}"""`);
   return out;
 }
@@ -127,9 +154,17 @@ export class Code {
   }
 }
 
+/** `assert <actual> == <expected>`; singletons are compared by identity (`is None` / `is True`, ruff E711 / E712). */
+export function assertEquals(actual: string, expected: string): string {
+  return expected === "None" || expected === "True" || expected === "False" ? `assert ${actual} is ${expected}` : `assert ${actual} == ${expected}`;
+}
+
 export function pyString(s: string): string {
   // JSON string syntax is valid Python for our inputs; escape non-printables explicitly.
-  return JSON.stringify(s);
+  const json = JSON.stringify(s);
+  // Like ruff format: double quotes, unless that needs escapes and single quotes do not.
+  if (s.includes('"') && !s.includes("'")) return `'${json.slice(1, -1).replace(/\\"/g, '"')}'`;
+  return json;
 }
 
 export interface PyTypeOptions {
@@ -214,6 +249,20 @@ export function emitExpr(e: TExpr, ctx: ExprContext): string {
   return emit(e, ctx)[0];
 }
 
+/** `not e` in its simplest form: `not not x` is `x`, `not a == b` is `a != b`, `not x is None` is `x is not None`. */
+export function emitNegated(e: TExpr, ctx: ExprContext): string {
+  return negated(e, ctx)[0];
+}
+
+function negated(e: TExpr, ctx: ExprContext): [string, Prec] {
+  if (e.t === "not") return emit(e.operand, ctx);
+  if (e.t === "isNull") return emit({ ...e, negate: !e.negate }, ctx);
+  if (e.t === "binary" && (e.op === "==" || e.op === "!=")) return emit({ ...e, op: e.op === "==" ? "!=" : "==" }, ctx);
+  if (e.t === "builtin" && e.fn === "is_empty") return [`len(${emit(e.args[0]!, ctx)[0]}) != 0`, 3];
+  // `not (a <= b)` rather than `not a <= b`: the same meaning, but readable.
+  return [`not ${wrap(emit(e, ctx), 4)}`, 2];
+}
+
 /**
  * Emits `e` for a place that expects `target`. An Integer flowing into a Decimal is wrapped in
  * `Decimal(...)` so plain-Python call sites (operation arguments, tuples, return values) stay mypy-clean.
@@ -260,8 +309,9 @@ function zero(t: Type, ctx: ExprContext): string {
 }
 
 /**
- * Collection functions are emitted with list comprehensions (`[... for item_ in xs]`) rather than bare
- * generator expressions, so the generated code stays valid when a long line is split argument by argument.
+ * Collection functions are emitted with list comprehensions (`[... for item_ in xs]`) where the comprehension may be
+ * one of several arguments, so the generated code stays valid when a long line is split argument by argument.
+ * `any` / `all` take it as their only argument and get a (short-circuiting) generator expression.
  */
 function emitBuiltin(e: Extract<TExpr, { t: "builtin" }>, ctx: ExprContext): [string, Prec] {
   const arg = (i: number) => emit(e.args[i]!, ctx);
@@ -296,7 +346,8 @@ function emitBuiltin(e: Extract<TExpr, { t: "builtin" }>, ctx: ExprContext): [st
       return [`sum([${emitAs(e.args[1]!, e.type, ctx)} for item_ in ${s(0)}], ${zero(e.type, ctx)})`, ATOM];
     case "any":
     case "all":
-      return [`${e.fn}([${s(1)} for item_ in ${s(0)}])`, ATOM];
+      // A generator expression short-circuits; as the only argument it never gets a trailing comma when wrapped.
+      return [`${e.fn}(${s(1)} for item_ in ${s(0)})`, ATOM];
     case "append": {
       const item = (e.type as { item: Type }).item;
       return [`(*${wrap(arg(0), ATOM)}, ${emitAs(e.args[1]!, item, ctx)})`, ATOM];
@@ -304,7 +355,7 @@ function emitBuiltin(e: Extract<TExpr, { t: "builtin" }>, ctx: ExprContext): [st
     case "remove":
       return [`tuple([item_ for item_ in ${s(0)} if item_ != ${wrap(arg(1), 4)}])`, ATOM];
     case "remove_where":
-      return [`tuple([item_ for item_ in ${s(0)} if not ${wrap(arg(1), 2)}])`, ATOM];
+      return [`tuple([item_ for item_ in ${s(0)} if ${wrap(negated(e.args[1]!, ctx), 2)}])`, ATOM];
     case "replace_where": {
       const item = (e.type as { item: Type }).item;
       return [`tuple([${emitAs(e.args[2]!, item, ctx)} if ${s(1)} else item_ for item_ in ${s(0)}])`, ATOM];
@@ -351,7 +402,7 @@ function emit(e: TExpr, ctx: ExprContext): [string, Prec] {
       return [`${ctx.ports.extensions}.${e.name}(${e.args.map((a) => emitExpr(a, ctx)).join(", ")})`, ATOM];
     }
     case "not":
-      return [`not ${wrap(emit(e.operand, ctx), 2)}`, 2];
+      return negated(e.operand, ctx);
     case "neg":
       return [`-${wrap(emit(e.operand, ctx), ATOM)}`, 6];
     case "isNull":

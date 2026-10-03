@@ -5,7 +5,18 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from cleaning_platform.generated._runtime import DomainError
+
+__all__ = [
+    "ALL_ERRORS",
+    "EmailBlocked",
+    "InvalidInvitationWindow",
+    "InvitationAlreadyClosed",
+    "InvitationNotDeliverable",
+    "InvitationNotFound",
+]
 
 
 class InvalidInvitationWindow(DomainError):
@@ -43,7 +54,7 @@ class EmailBlocked(DomainError):
     default_message = "このメールアドレスには招待を送れません"
 
 
-ALL_ERRORS: tuple[type[DomainError], ...] = (
+ALL_ERRORS: Final[tuple[type[DomainError], ...]] = (
     InvalidInvitationWindow,
     InvitationNotDeliverable,
     InvitationAlreadyClosed,

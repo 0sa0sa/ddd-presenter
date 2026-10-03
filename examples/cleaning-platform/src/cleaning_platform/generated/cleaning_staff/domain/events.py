@@ -5,17 +5,21 @@
 
 from __future__ import annotations
 
+from typing import Annotated, Final, Literal, TypeAlias
 from uuid import UUID
 
-from pydantic import AwareDatetime
+from pydantic import AwareDatetime, Field, TypeAdapter
 
-from cleaning_platform.generated._runtime import DomainEvent
+from cleaning_platform.generated._runtime import DomainEvent, parse_with
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+
+__all__ = ["AnyEvent", "InvitationAccepted", "InvitationIssued", "InvitationRevoked", "parse_event"]
 
 
 class InvitationAccepted(DomainEvent):
     """Emitted by CleaningStaffInvitation.accept."""
 
+    event_type: Literal["CleaningStaff.InvitationAccepted"] = "CleaningStaff.InvitationAccepted"
     id: UUID
     at: AwareDatetime
 
@@ -23,6 +27,7 @@ class InvitationAccepted(DomainEvent):
 class InvitationIssued(DomainEvent):
     """Emitted by CleaningStaffInvitation.issue."""
 
+    event_type: Literal["CleaningStaff.InvitationIssued"] = "CleaningStaff.InvitationIssued"
     id: UUID
     email: EmailAddress
     expires_at: AwareDatetime
@@ -31,4 +36,23 @@ class InvitationIssued(DomainEvent):
 class InvitationRevoked(DomainEvent):
     """Emitted by CleaningStaffInvitation.revoke."""
 
+    event_type: Literal["CleaningStaff.InvitationRevoked"] = "CleaningStaff.InvitationRevoked"
     id: UUID
+
+
+AnyEvent: TypeAlias = Annotated[
+    InvitationAccepted | InvitationIssued | InvitationRevoked,
+    Field(discriminator="event_type"),
+]
+"""Every domain event of the CleaningStaff context, told apart by `event_type`."""
+
+_EVENTS: Final[TypeAdapter[AnyEvent]] = TypeAdapter(AnyEvent)
+
+
+def parse_event(data: object) -> AnyEvent:
+    """Rebuilds an event of this context from its `model_dump()` / `model_dump(mode="json")` form
+    (e.g. an outbox row).
+
+    `event_type` selects the class; invalid data raises ConstraintViolation.
+    """
+    return parse_with(_EVENTS, data, "AnyEvent")

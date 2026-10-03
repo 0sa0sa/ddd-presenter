@@ -11,11 +11,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/_runtime.py",
-      "sha256": "71a3590c24961f1666ae2da76a8b02e03027c736302c350df101e7252452005c"
+      "sha256": "ecf93bf5fa39a64518af96e889d19a4a866407e3f7c1d965e83ba4ad04f3388a"
     },
     {
       "path": "src/cleaning_platform/generated/adapters.py",
-      "sha256": "f165e65ded98b3fd00f50ee04388ce5746bc28ad952adc2a65b16855935116bd"
+      "sha256": "1b0757365ca27fd439e9e01c5c0837fdc19832747aeac50927c78908f9b6525f"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/__init__.py",
@@ -27,11 +27,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/application/ports.py",
-      "sha256": "134a495620f3f5219b8015a1ae1538f4938d5f387b589b55f15e9459bbb589c1"
+      "sha256": "ed875b4fe744fbdff395e6582350500b1d472534f8d9dc90c28f7bb8fb89a5df"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/application/use_cases.py",
-      "sha256": "622fe5d4797d5eb32b114490f922f7d15e4f3c3ae2ef9589d8ac2e985b65bea3"
+      "sha256": "52a2e727ce40e6488affcc9b92f9e06227f8e62b7530cb327a958a83ebe8f0cc"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/__init__.py",
@@ -39,35 +39,35 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/aggregates.py",
-      "sha256": "12d04bf551ba627f58d0a180a96960eb2d3d3fd3435e206851288d8c795cb447"
+      "sha256": "8531fc66bc2fe808492fb6ea0b428fce2fc39f20593b46410bf73cb61f5890ca"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/commands.py",
-      "sha256": "0178413f192f126d67cc2b768d4374157c7b4f38776c352c81faa34332256f4e"
+      "sha256": "f5cfd393bba7556b1ac651b77484e70ee6bfa49fccca7931035559c6f0cd8b7b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/entities.py",
-      "sha256": "2736d76fdfdfa6755e89024c39edb9d8738b4b199e141ec2ef291fc9186fdda9"
+      "sha256": "924c2e757540a1e85cc4b77eaaf5bf8a386b0de615d182e4627f9f599c691d98"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/enums.py",
-      "sha256": "345b6d7d947cf919a844e53c00e825fb7ec24cece28248507a5af6ce8e0adedf"
+      "sha256": "4d82286833349ccfcfb721b54f60dab63537af8f65a40a20234f99f15f382907"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/errors.py",
-      "sha256": "fed43830e53b4f15c599f1d5c10cc3fd583460e7d026f70ab7543322cf6281ff"
+      "sha256": "e286b26689188f51b95712dc0ef30c21b5556fc9786036fcf095d8855cb10fb3"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/events.py",
-      "sha256": "65070611d7eb9304e1dc5f262c20b79e883d96febdf985fcb2ddd80677a7c28b"
+      "sha256": "88974c6dbfc391bea3c1481f843fa064f1cd7fd6c6dd0b38267deb185209674b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/rules.py",
-      "sha256": "7e89141ede549f5758f84c4461f10bd4c903f540210fa451d7323de3960899c4"
+      "sha256": "d31c8bbe6f069a002d65223d67b712489b029a971fd39c35a59b8e6d3aaf7025"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/value_objects.py",
-      "sha256": "c54040cf89322474ee717b82995127f44fe151d9057b6c1851bd079ba34fd3cf"
+      "sha256": "de5e28eededa3c5f698f389541f36fb62468afeecae3115b2eb232d148a3e364"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/README.md",
@@ -75,7 +75,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
-      "sha256": "74130a99394e4de9933cbe003ea03cf509173694774a896c21d10b8f18502a05"
+      "sha256": "6c4128a46e05e6f13305a48e963ad7d53e76f9a2ac5f580ea328b1e396e50f08"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/__init__.py",
@@ -87,15 +87,15 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/policies.py",
-      "sha256": "8f6b507b92a4d78fc1c985ca3c2ba0b0b172556f88fcecf04ab05e9541885266"
+      "sha256": "0423303a10b2855b99ad13c01dfcab7a04de411bde7a56b807b451342e2401c2"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/ports.py",
-      "sha256": "1fe5847bce3bac553f776abadde92d28c10317a511819a6716806c28821fc9ef"
+      "sha256": "4da882f0228483159b231a047d4bc32370e8533a92e7008e30f86cda5a57f47d"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/use_cases.py",
-      "sha256": "a785c440026432352a108c0c22d7fcd40ea94d9114f427026702cef4a9876850"
+      "sha256": "0baddb0a60f6a870091b55209b699bc5b60531262f131544fce5f25eb537f7e1"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/__init__.py",
@@ -103,35 +103,35 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/aggregates.py",
-      "sha256": "e2b16b9952a0513827fefab1e2c652692b37ba3b57237cdc3ec9a53a301cd570"
+      "sha256": "e8e908c5da9695b44a7670281ac2e74bf71681d3d0774549f064e631f5736882"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/commands.py",
-      "sha256": "362a4de8f4eb2b626b892524f3ae94c025fc2d434abb73759c6a3b66b02cbdf4"
+      "sha256": "b826e690ba26f1513101e936663899518fc7d0b53ad18d486e955050412807e1"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/entities.py",
-      "sha256": "d4fedfc6672655b6a472caf6c293107683827db1098a1a24883ee98fff2bd392"
+      "sha256": "b09ef04c6a20a1d5bc73fa86c365815504279607caa5a15fd88666dd450f3ff4"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/enums.py",
-      "sha256": "07535c98222e20e181addbe85aa7e087df4cec19c2f173cee27f2ef492809a34"
+      "sha256": "822290860d2117c06b18533aa85d04c0bd443025f67fc2db7236d4e4167cc341"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/errors.py",
-      "sha256": "33b731bd9bf41d1b21227a7bd87a5b76823745cb9deb296cd2db27b60e276ccc"
+      "sha256": "77e183b0326770625f1f4eb61bf06b204305526a83f36a4f8f16e196f6b50c85"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/events.py",
-      "sha256": "248ba7092bc8af9c69bd3badeb1706b447ef4a04cf9ea6b7bf69d9cd8f309e4b"
+      "sha256": "799eccd477b7a5a94b84039a167a81f378b49ee193808ce2605448cea33cecd1"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/rules.py",
-      "sha256": "d09e51b1569ba7c8df46ce06573505a9cc4c46aea9ff8ffe5afa797c040c1014"
+      "sha256": "c09a0a560609b14449f23643bad058e1c4a721ca7d0f359f13af15ff8b8f7589"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/value_objects.py",
-      "sha256": "cb4d4fec5be76d933e41f38c430ae3f88284ff12c5610808b9f27e56a5adc5ce"
+      "sha256": "8e16ec8fccdcf97133a8040a68e8c3428f15d9b066b497891394b8350e427d0b"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/README.md",
@@ -139,11 +139,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/testing.py",
-      "sha256": "26523c4170435ddbb223833b5f958f9d5ffd88d2275eff2750c6bea4867fd6eb"
+      "sha256": "5cbcb4ace5f54d605753a8715887cfe34fbd90bc17275919c11cafbfc305e565"
     },
     {
       "path": "tests/generated/test_cleaning_staff_accept_invitation.py",
-      "sha256": "4f783cff7230f371086c5f5ad81c9f9e573e942c289b0004d6b6e04517712d41"
+      "sha256": "758821e70063e70b04810c7b4d5d928f114820222af46c9ee43008cb53a8cb2c"
     },
     {
       "path": "tests/generated/test_cleaning_staff_cleaning_staff_invitation.py",
@@ -155,11 +155,11 @@
     },
     {
       "path": "tests/generated/test_cleaning_staff_issue_invitation.py",
-      "sha256": "737e97ea1b729490e30137422f0cbfd6fd010509a8b3bdf0928ef1e37d9af9a8"
+      "sha256": "876209e66e08ce09780e640ef4887d2f7e837ecc62172d77af8c651cee3fe697"
     },
     {
       "path": "tests/generated/test_cleaning_staff_revoke_invitation.py",
-      "sha256": "b3f6a53d42f1c5832603ff3a8754f169cd75fcdf68f2717f622da545c80e47e4"
+      "sha256": "4da962ca4df0965b37faf2045c8168be5e15aa74db4c5a1abcce6217471748de"
     },
     {
       "path": "tests/generated/test_staffing_policies.py",
@@ -167,13 +167,14 @@
     },
     {
       "path": "tests/generated/test_staffing_register_staff.py",
-      "sha256": "cac4ea19d2830423d0ab21a5e1b6f408be059a331d130dd8e60766257a7f704e"
+      "sha256": "cdad1c23f94f1c1e59b60b37e7bba6c21e31a5db834aeb4183081d890041b3c9"
     }
   ],
   "scaffold": [
     "src/cleaning_platform/__init__.py",
     "src/cleaning_platform/extensions/__init__.py",
     "src/cleaning_platform/extensions/cleaning_staff/__init__.py",
-    "src/cleaning_platform/extensions/cleaning_staff/extensions.py"
+    "src/cleaning_platform/extensions/cleaning_staff/extensions.py",
+    "src/cleaning_platform/py.typed"
   ]
 }

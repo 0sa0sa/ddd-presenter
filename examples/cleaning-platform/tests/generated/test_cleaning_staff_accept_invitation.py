@@ -18,7 +18,7 @@ from cleaning_platform.generated.cleaning_staff.domain.errors import (
     InvitationNotDeliverable,
     InvitationNotFound,
 )
-from cleaning_platform.generated.cleaning_staff.domain.events import InvitationAccepted
+from cleaning_platform.generated.cleaning_staff.domain.events import InvitationAccepted, parse_event
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
 from cleaning_platform.generated.cleaning_staff.testing import (
     CapturingEventPublisher,
@@ -66,6 +66,10 @@ def test_pending_invitation_is_accepted() -> None:
     assert stored_0.status == InvitationStatus.ACCEPTED
     assert stored_0.accepted_at == datetime.fromisoformat("2026-01-02T10:00:00+00:00")
     assert [type(event).__name__ for event in event_publisher.published] == ["InvitationAccepted"]
+    # The serialized events come back as the same classes (`event_type` tells them apart).
+    assert [
+        parse_event(event.model_dump(mode="json")) for event in event_publisher.published
+    ] == list(event_publisher.published)
     event_0 = event_publisher.published[0]
     assert isinstance(event_0, InvitationAccepted)
     assert event_0.id == UUID("00000000-0000-0000-0000-000000000001")
