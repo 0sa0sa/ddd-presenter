@@ -11,7 +11,10 @@ import {
   EmailBlocked,
   InvalidInvitationWindow,
 } from "../../src/cleaning_platform/generated/cleaning-staff/domain/errors.js";
-import { InvitationIssued } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
+import {
+  InvitationIssued,
+  parseCleaningStaffEvent,
+} from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import { EmailAddress } from "../../src/cleaning_platform/generated/cleaning-staff/domain/value-objects.js";
 import {
   CapturingEventPublisher,
@@ -24,6 +27,7 @@ import {
   plain,
   SequentialIds,
   StubExtensions,
+  viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
 
@@ -40,7 +44,7 @@ describe("issue_invitation", () => {
   test("invitation_is_issued", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
     const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000aa"]);
@@ -62,16 +66,20 @@ describe("issue_invitation", () => {
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000aa");
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
-      await cleaningStaffInvitationRepository.get(
-        id("CleaningStaffInvitation", "00000000-0000-0000-0000-0000000000aa")
+      cleaningStaffInvitationRepository.get(
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-0000000000aa"),
       ),
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("pending");
     expect(plain(stored0.expiresAt)).toEqual(plain(dateTime("2026-01-08T10:00:00+00:00")));
-    expect(
-      eventPublisher.published.map((event) => event.type)
-    ).toEqual(["CleaningStaff.InvitationIssued"]);
+    expect(eventPublisher.published.map((event) => event.type)).toEqual([
+      "CleaningStaff.InvitationIssued",
+    ]);
+    // Every event survives JSON (e.g. an outbox): parsing its JSON gives an equal event.
+    expect(viaJson(eventPublisher.published, parseCleaningStaffEvent)).toEqual(
+      eventPublisher.published.map(plain),
+    );
     const event0 = expectEvent(eventPublisher.published, 0, InvitationIssued);
     expect(plain(event0.email)).toEqual(plain(EmailAddress.create({ value: "new@example.com" })));
   });
@@ -86,7 +94,7 @@ describe("issue_invitation", () => {
   test("blocked_email_is_rejected", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
     const ids = new SequentialIds([]);
@@ -120,7 +128,7 @@ describe("issue_invitation", () => {
   test("past_expiry_is_rejected", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
-      unitOfWork
+      unitOfWork,
     );
     const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
     const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000aa"]);

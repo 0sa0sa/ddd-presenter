@@ -31,15 +31,10 @@ export function portsFile(L: TsLayout): TsFile {
     });
   }
   const exts = L.ca.ir.extensionPoints;
-  c.line();
-  c.doc(
-    exts.length
-      ? `Customer-owned extension points of ${L.ca.ir.name}.\n\nImplement this interface in the extensions directory; the generator never overwrites it.`
-      : "This context declares no extension points.",
-  );
-  if (!exts.length) {
-    c.line("export interface Extensions {}");
-  } else {
+  // A context without extension points has no Extensions interface (an empty interface would accept any value).
+  if (exts.length) {
+    c.line();
+    c.doc(`Customer-owned extension points of ${L.ca.ir.name}.\n\nImplement this interface in the extensions directory; the generator never overwrites it.`);
     c.block("export interface Extensions", () => {
       exts.forEach((x, i) => {
         if (i) c.line();
@@ -209,7 +204,32 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
       );
     }
     c.doc(doc.join("\n"));
-    c.block(`async execute(command: ${uc.command}): Promise<${ret}>`, () => {
+    // The steps are rendered first: #run takes `command` only if a step reads it, and is async only if it awaits.
+    const run = new Code();
+    if (emits) run.line("const emitted: DomainEvent[] = [];");
+    const ctx: ExprContext = {
+      L,
+      imports: imp,
+      self: "this",
+      inputs: L.fieldTypes(uc.command),
+      ports: { clock: "this.#clock", ids: "this.#ids", extensions: "this.#extensions" },
+    };
+    emitSteps(L, run, uc.steps, ctx, { n: 0 }, bindings(uc.steps), invoked, info.returnType);
+    const runBody = run.toString();
+    const runUsesCommand = /\bcommand\b/.test(runBody.replace(/^\s*\/\/.*$/gm, ""));
+    const runIsAsync = /\bawait\b/.test(runBody);
+    const runArgs = [...(runUsesCommand ? ["command"] : []), ...(afterCommitSteps ? ["afterCommit"] : [])];
+    const runParams = [...(runUsesCommand ? [`command: ${uc.command}`] : []), ...(afterCommitSteps ? ["afterCommit: DomainEvent[]"] : [])];
+    const executeAwaits = runIsAsync || !!uc.idempotencyKey || deps.uow || (afterCommitSteps && deps.publisher);
+    // `_command`: no step reads the (empty) command; the parameter stays for a uniform execute(command).
+    const commandParam = `${runUsesCommand || uc.idempotencyKey ? "" : "_"}command: ${uc.command}`;
+    if (!executeAwaits) {
+      // Nothing to await: errors thrown by the steps still reject the returned promise.
+      c.block(`execute(${commandParam}): Promise<${ret}>`, () => {
+        c.line(`return Promise.resolve().then(() => this.#run(${runArgs.join(", ")}));`);
+      });
+    }
+    if (executeAwaits) c.block(`async execute(${commandParam}): Promise<${ret}>`, () => {
       const useCaseName = tsString(uc.name);
       if (uc.idempotencyKey) {
         c.line(`const key = String(command.${prop(uc.idempotencyKey)});`);
@@ -217,7 +237,7 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
         c.line(`if (recorded !== null) return${ret === "void" ? "" : ` recorded.value as ${ret}`};`);
       }
       if (afterCommitSteps) c.line("const afterCommit: DomainEvent[] = [];");
-      const call = `await this.#run(command${afterCommitSteps ? ", afterCommit" : ""})`;
+      const call = `${runIsAsync ? "await " : ""}this.#run(${runArgs.join(", ")})`;
       const record = () => {
         if (uc.idempotencyKey) c.line(`await this.#idempotencyStore.record(${useCaseName}, key, { value: ${ret === "void" ? "null" : "result"} });`);
       };
@@ -239,21 +259,12 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
         c.line(ret === "void" ? `${call};` : `const result = ${call};`);
         record();
       }
-      if (afterCommitSteps && deps.publisher) c.line("if (afterCommit.length) await this.#eventPublisher.publish(afterCommit);");
+      if (afterCommitSteps && deps.publisher) c.line("if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);");
       if (ret !== "void") c.line("return result;");
     });
     c.line();
-    c.block(`async #run(command: ${uc.command}${afterCommitSteps ? ", afterCommit: DomainEvent[]" : ""}): Promise<${ret}>`, () => {
-      if (emits) c.line("const emitted: DomainEvent[] = [];");
-      const inputs = L.fieldTypes(uc.command);
-      const ctx: ExprContext = {
-        L,
-        imports: imp,
-        self: "this",
-        inputs,
-        ports: { clock: "this.#clock", ids: "this.#ids", extensions: "this.#extensions" },
-      };
-      emitSteps(L, c, uc.steps, ctx, { n: 0 }, bindings(uc.steps), invoked, info.returnType);
+    c.block(`${runIsAsync ? "async " : ""}#run(${runParams.join(", ")}): ${runIsAsync ? `Promise<${ret}>` : ret}`, () => {
+      for (const l of runBody.split("\n")) c.line(l);
     });
   });
 }

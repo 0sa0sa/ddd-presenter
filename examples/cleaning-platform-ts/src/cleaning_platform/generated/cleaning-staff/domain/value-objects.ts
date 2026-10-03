@@ -7,9 +7,11 @@ import { z } from "zod";
 
 import { parseWith } from "../../runtime.js";
 
-const EmailAddressFields = z.strictObject({
-  value: z.string().trim().toLowerCase().min(3).max(254).regex(new RegExp("^[^@\\s]+@[^@\\s]+$")),
-}).readonly();
+const EmailAddressFields = z
+  .strictObject({
+    value: z.string().trim().toLowerCase().min(3).max(254).regex(new RegExp("^[^@\\s]+@[^@\\s]+$")),
+  })
+  .readonly();
 
 /**
  * 招待先のメールアドレス

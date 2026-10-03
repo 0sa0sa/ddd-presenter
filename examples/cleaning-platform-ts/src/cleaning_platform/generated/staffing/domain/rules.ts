@@ -5,5 +5,5 @@
 
 import type { Rule } from "../../runtime.js";
 
-export const RULES: ReadonlyArray<Rule> = [
-];
+// `satisfies` checks every entry against Rule while keeping the literal types (rule names, kinds).
+export const RULES = [] as const satisfies ReadonlyArray<Rule>;

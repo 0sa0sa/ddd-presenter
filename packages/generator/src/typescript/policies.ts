@@ -68,7 +68,7 @@ function commandCall(L: TsLayout, r: Resolved, imp: TsImports): string {
   imp.value(L.mod("commands"), r.useCase.command);
   const ctx = exprCtx(L, imp, { clock: "this.#clock", ids: "this.#ids" });
   const args = r.useCase.input.filter((f) => r.policy.args[f.name] !== undefined).map((f) => entry(prop(f.name), emitExpr(argExpr(L, r.policy, f.name), ctx)));
-  return `${r.useCase.command}.create({ ${args.join(", ")} })`;
+  return `${r.useCase.command}.create(${args.length ? `{ ${args.join(", ")} }` : "{}"})`;
 }
 
 function describeRelationship(rel: RelationshipIR | undefined, info: PolicyInfo): string {
@@ -142,11 +142,14 @@ export function policiesFile(L: TsLayout): TsFile | undefined {
       });
       c.line();
       c.doc(`Runs ${r.useCase.name} for one ${r.info.event.name}.`);
-      c.block(`async handle(event: ${ev}): Promise<void>`, () => {
+      const call = commandCall(L, r, imp);
+      // `_event`: the command takes nothing from the event (TypeScript's convention for an unused parameter).
+      const eventParam = isAcl(r) || /\bevent\b/.test(call) ? "event" : "_event";
+      c.block(`async handle(${eventParam}: ${ev}): Promise<void>`, () => {
         if (isAcl(r)) {
-          c.line(`const command = await this.#translator.${prop(p.name)}(event, ${commandCall(L, r, imp)});`);
+          c.line(`const command = await this.#translator.${prop(p.name)}(event, ${call});`);
         } else {
-          c.line(`const command = ${commandCall(L, r, imp)};`);
+          c.line(`const command = ${call};`);
         }
         c.line("await this.#useCase.execute(command);");
       });
@@ -311,7 +314,10 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
     c.block(`class Recording${pascal(uc.name)} implements ${runnerInterface(uc)}`, () => {
       c.line(`readonly commands: ${uc.command}[] = [];`);
       c.line();
-      c.block(`async execute(command: ${uc.command}): Promise<void>`, () => c.line("this.commands.push(command);"));
+      c.block(`execute(command: ${uc.command}): Promise<void>`, () => {
+        c.line("this.commands.push(command);");
+        c.line("return Promise.resolve();");
+      });
     });
   }
 

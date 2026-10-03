@@ -7,10 +7,12 @@ import { z } from "zod";
 
 import { dateTimeSchema, parseWith, uuidSchema } from "../../runtime.js";
 
-const RegisterStaffFields = z.strictObject({
-  invitationId: uuidSchema,
-  joinedAt: dateTimeSchema,
-}).readonly();
+const RegisterStaffFields = z
+  .strictObject({
+    invitationId: uuidSchema,
+    joinedAt: dateTimeSchema,
+  })
+  .readonly();
 
 /** Input of use case `register_staff` (actor: システム（ポリシー）). */
 export type RegisterStaff = z.output<typeof RegisterStaffFields>;

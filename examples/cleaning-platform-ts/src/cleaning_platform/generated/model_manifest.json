@@ -15,15 +15,15 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/use-cases.ts",
-      "sha256": "1e400be4bae82cc872cae39e6b6683d5029f0cc582b89365c298227b028e4b41"
+      "sha256": "6b4547c5158dfa480271cadf737bc736d1fd78933f712464279ec22fd7d1bd7b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/aggregates.ts",
-      "sha256": "d023f69860a7ecfac84eb0af54001e02158df79fb5b37894de03f1d6e74fe1d4"
+      "sha256": "9e1d1853f4903423437bf1e94991c0d3132a0d739e56e30611f58ac23e56c433"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/commands.ts",
-      "sha256": "4a712f17c43f09a3e4e7ad43c530e0c2e3ae1d9cb064b8f9828ab055454d9f2c"
+      "sha256": "8992f8086f90c02536dda62d296175763615f6f76004ac22d13a1d10979cdce5"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/entities.ts",
@@ -35,19 +35,19 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/errors.ts",
-      "sha256": "ca6f9c176b9cecb5a34f315ae2d3c41330d7b1f8a7d8d35e57aad30174f0b7db"
+      "sha256": "0432c10e0a233c68d2ffecc5d846d6e7957dd5eb4339843334006d4e3387e361"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/events.ts",
-      "sha256": "378004328e2d37f2acb34569e2cf409acdd385ed9b42670671249f51bee36e2f"
+      "sha256": "7d94cf18fadba17c264b1fc4f9ed7d308edd8c09628e00ed44a62e08cb66aeee"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/rules.ts",
-      "sha256": "5644ee71083fef9c8a8b01212d718570453cb5860e7eaeec9e4538963618b91c"
+      "sha256": "f8c39e41a7cc6471cd5f3905ce997ee0423ff3a22388fd894eec5dde21b8b359"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/value-objects.ts",
-      "sha256": "af93fe43ca6edf1d18b591f6472a88a1aa97d23f5fedc7faded8f718a8eddac6"
+      "sha256": "bcd8201a9d0b021e55e561d177550d827f1b60c80261c6c22f35597107a22850"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/index.ts",
@@ -67,27 +67,27 @@
     },
     {
       "path": "src/cleaning_platform/generated/runtime.ts",
-      "sha256": "c393bd42dfe9d763c902f2a57f4b0cf60b1d08db634527fd4c0f053d60653b7f"
+      "sha256": "8d4e8b5b573a6c8267cf3ecd0703ffc20807f955f5177c237398f6f3177f2619"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/policies.ts",
-      "sha256": "eddc75c926b6a7679d2d56b9ec53400a2052adab555e9a64829c76a5256e4bb6"
+      "sha256": "dae41793efcf44d92d82e630b00a761a29f567bb69383c7d639721805040ce3a"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/ports.ts",
-      "sha256": "5bb48e19a6e47d20c45ad07b505a6fa2e7c7457f95dc34c94707228acc9fad08"
+      "sha256": "74bbce33aa93d214b2218197cc8abe9ddb644586c622214e8e37a1ad6a09caba"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/use-cases.ts",
-      "sha256": "971b78461c79922d0c7cb47f511e919ef37d30ec7b03857cd7ffe0338a65d443"
+      "sha256": "598fc985cf913596f821482e30257229b1c86210219ad2e03c075522d2cbb364"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/aggregates.ts",
-      "sha256": "ae1afef5cda58d661d48bd5db757c00ddc4267b94a3487b84fd238dc839e6ada"
+      "sha256": "4b26452c818ae428bc21bc2d9d16ab4ac0f40de7c9dca608e59a9eb2e0e25fbe"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/commands.ts",
-      "sha256": "d691f139b53528f72389e821dcc74d6eea19c4efe7010fb3ff98b267a12741f6"
+      "sha256": "84c58dbefcc215667b58125b9268c414dd382dd3066953eae09147eca61f24dd"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/entities.ts",
@@ -103,11 +103,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/events.ts",
-      "sha256": "636781f776a77947ccc969d5e8d9778bc6734b47c181a5a5565180d1f3c41b54"
+      "sha256": "e3c8f8c25346fdc006efdf6d516a8b069ecbd344d0e93f86ac62de24856c2df3"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/rules.ts",
-      "sha256": "1fc7f9800a1d3e13148a1a59723aebb81bac72936d433117ec4ad5367cedc9b4"
+      "sha256": "9ac0bd4ba32721cf8452522264cf73c8a0d193da5f647d330b987653ab347a06"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/value-objects.ts",
@@ -123,42 +123,43 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/testing.ts",
-      "sha256": "8fbe29aa9544956a8d6f8165d0e42785905dc8cf632c7dafa37bba9f75ff801f"
+      "sha256": "d1b594ecf173101ba1fd916e61f3111817b87e9f575204b8dbe4360d44473280"
     },
     {
       "path": "src/cleaning_platform/generated/testing.ts",
-      "sha256": "88c862db6d73bba0466d77ea6f0e91e89290e50348f366342008f0b05afcb853"
+      "sha256": "8b7d93b062c7e44472b9280029bd5aa4569125e50071ddce1c7c3c282e4010db"
     },
     {
       "path": "tests/generated/cleaning-staff-accept-invitation.test.ts",
-      "sha256": "0e0a79b3141d3b06e3cfba57a3934b3bd0c05f41fd498edf5f652a9c8bb02382"
+      "sha256": "1a56c8bd8f7bff436fc39d0a0f206d1744be4038c863a60da6beb3d1c33a232a"
     },
     {
       "path": "tests/generated/cleaning-staff-cleaning-staff-invitation.test.ts",
-      "sha256": "e62fb38787fd07ca937c1e66b626180362e3d937d8500d7bab8c907ec918caee"
+      "sha256": "0fb108d8b7373fcc0c121eb6f095b1be6b83a23e9a4165b67f7bbc9f427d22f9"
     },
     {
       "path": "tests/generated/cleaning-staff-invariants.test.ts",
-      "sha256": "02a2486e84300d9d5fea99f4965769cbf059afa2c2372d041d864bb45558aeb9"
+      "sha256": "7e14bbac76d8a0699c12139e6bfd7648efbbeae2186f14fe4c6ef7d9d36c4568"
     },
     {
       "path": "tests/generated/cleaning-staff-issue-invitation.test.ts",
-      "sha256": "48a105efc5cde3d2d6147d0694482bc911408f7901f3b82f1d68fa92fd3e7f43"
+      "sha256": "2222568e715e061d5bcc3d56e7f67da9e9ebddd2cc484b396a08b527878cd0cf"
     },
     {
       "path": "tests/generated/cleaning-staff-revoke-invitation.test.ts",
-      "sha256": "da0d950e98d4e9323a396f4b7aa2ddd0f81785f6cec598d966af92dc63a9b80e"
+      "sha256": "e4fdc2f6a234c0660f1f405dd16dd8d27be7b6223a9ae52e805539b4d9d4e6c8"
     },
     {
       "path": "tests/generated/staffing-policies.test.ts",
-      "sha256": "c8af21f38f5b3fa4cda4447d2235f141b183bf5059aa016be694077c58a5028f"
+      "sha256": "a4d37e1d67c680389166be104af0b065518599ba248ada65e929615976bf2df4"
     },
     {
       "path": "tests/generated/staffing-register-staff.test.ts",
-      "sha256": "cedd57ac95c72034d101de75ddbb8d0b296fdd6771fa58901d3d3e4632aa008b"
+      "sha256": "07afec09ad185a967fcf23876045fd30229605f0d8df349ceb21732411eda378"
     }
   ],
   "scaffold": [
+    ".prettierrc.json",
     "package.json",
     "src/cleaning_platform/extensions/cleaning-staff/extensions.ts",
     "src/cleaning_platform/index.ts",

@@ -8,10 +8,12 @@ import { z } from "zod";
 import { dateTimeSchema, parseWith, uuidSchema } from "../../runtime.js";
 import { EmailAddressSchema } from "./value-objects.js";
 
-const IssueInvitationFields = z.strictObject({
-  email: EmailAddressSchema,
-  validUntil: dateTimeSchema,
-}).readonly();
+const IssueInvitationFields = z
+  .strictObject({
+    email: EmailAddressSchema,
+    validUntil: dateTimeSchema,
+  })
+  .readonly();
 
 /** Input of use case `issue_invitation` (actor: 清掃会社の管理者). */
 export type IssueInvitation = z.output<typeof IssueInvitationFields>;
@@ -27,9 +29,11 @@ export const IssueInvitation = {
   },
 } as const;
 
-const AcceptInvitationFields = z.strictObject({
-  invitationId: uuidSchema,
-}).readonly();
+const AcceptInvitationFields = z
+  .strictObject({
+    invitationId: uuidSchema,
+  })
+  .readonly();
 
 /** Input of use case `accept_invitation` (actor: スタッフ候補). */
 export type AcceptInvitation = z.output<typeof AcceptInvitationFields>;
@@ -45,9 +49,11 @@ export const AcceptInvitation = {
   },
 } as const;
 
-const RevokeInvitationFields = z.strictObject({
-  invitationId: uuidSchema,
-}).readonly();
+const RevokeInvitationFields = z
+  .strictObject({
+    invitationId: uuidSchema,
+  })
+  .readonly();
 
 /** Input of use case `revoke_invitation` (actor: 清掃会社の管理者). */
 export type RevokeInvitation = z.output<typeof RevokeInvitationFields>;

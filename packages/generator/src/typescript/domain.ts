@@ -85,7 +85,7 @@ export function errorsFile(L: TsLayout): TsFile {
       c.line(`static override readonly code = ${tsString(e.code)};`);
       c.line(`override readonly code = ${tsString(e.code)};`);
       c.line();
-      c.block(`constructor(details: ${detailsType} = {}, message = ${tsString(e.message)})`, () => c.line("super(details, message);"));
+      c.block(`constructor(details: ${detailsType} = {}, message = ${tsString(e.message)}, options?: ErrorOptions)`, () => c.line("super(details, message, options);"));
     });
   }
   c.line();
@@ -139,6 +139,19 @@ function fieldSchemas(L: TsLayout, owner: string, fields: { name: string; constr
   });
 }
 
+/** `const X = z.strictObject({…}).readonly();` in Prettier's member-chain layout (expanded once the object is). */
+function readonlyStrictObject(c: Code, name: string, fields: string[]): void {
+  if (!fields.length) {
+    c.line(`const ${name} = z.strictObject({}).readonly();`);
+    return;
+  }
+  c.line(`const ${name} = z`);
+  c.indent(() => {
+    c.block(".strictObject(", () => c.lines_(fields), ")");
+    c.line(".readonly();");
+  });
+}
+
 function invariantDoc(inv: InvariantIR): string {
   return `Invariant \`${inv.name}\`: ${inv.expression}${inv.description ? `\n\n${inv.description}` : ""}\nChecked on: ${inv.checkOn.join(", ")}. Violation raises ${inv.error}.`;
 }
@@ -157,7 +170,7 @@ function valueObject(L: TsLayout, c: Code, vo: ValueObjectIR, imp: TsImports): v
   const fields = `${vo.name}Fields`;
   const norm = Object.entries(vo.normalize);
   c.line();
-  c.block(`const ${fields} = z.strictObject(`, () => c.lines_(fieldSchemas(L, vo.name, vo.fields, imp, vo.normalize)), ").readonly();");
+  readonlyStrictObject(c, fields, fieldSchemas(L, vo.name, vo.fields, imp, vo.normalize));
   c.line();
   const doc = [vo.description ?? `Value object ${vo.name}.`];
   if (norm.length) doc.push("", `Normalization runs before constraints: ${norm.map(([f, s]) => `${f}: ${s.join(" → ")}`).join(", ")}.`);
@@ -371,13 +384,8 @@ function guards(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports, base: Exp
     d.push("", `Violation raises ${g.error}.${usedBy.length ? ` Required by: ${usedBy.join(", ")}.` : ""}`);
     c.doc(d.join("\n"));
     c.block(`${prop(g.name)}(${sig.join(", ")}): StateGuard`, () => {
-      c.line("return new StateGuard(");
-      c.indent(() => {
-        c.line(`${tsString(g.name)},`);
-        c.line(`${emitExpr(expr(L, [...g.path, "expression"]), ctx)},`);
-        c.line(`() => new ${g.error}({ guard: ${tsString(g.name)}${details} }),`);
-      });
-      c.line(");");
+      const holds = emitExpr(expr(L, [...g.path, "expression"]), ctx);
+      c.line(`return new StateGuard(${tsString(g.name)}, ${holds}, () => new ${g.error}({ guard: ${tsString(g.name)}${details} }));`);
     });
   }
 }
@@ -484,31 +492,42 @@ export function eventsFile(L: TsLayout): TsFile {
   for (const ev of events) {
     imp.value("zod", "z");
     imp.value(L.runtime, "parseWith");
-    imp.type(L.runtime, "DomainEvent");
-    const payload = `${ev.name}Payload`;
-    const type = eventType(L.ca.ir.name, ev.name);
+    imp.type(L.runtime, "DomainEvent", "EventType");
+    const schema = `${ev.name}Schema`;
+    const type = tsString(eventType(L.ca.ir.name, ev.name));
     c.line();
-    c.block(`const ${payload} = z.strictObject(`, () => {
-      for (const f of ev.fields) c.line(`${prop(f.name)}: ${zodSchema(f.type, imp, L)},`);
-    }, ");");
+    readonlyStrictObject(c, schema, [`type: z.literal(${type}),`, ...ev.fields.map((f) => `${prop(f.name)}: ${zodSchema(f.type, imp, L)},`)]);
     c.line();
     c.doc(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.`);
-    c.line(`export type ${ev.name} = Readonly<{ type: ${tsString(type)} } & z.output<typeof ${payload}>>;`);
-    c.line(`export type ${ev.name}Input = z.input<typeof ${payload}>;`);
+    c.line(`export type ${ev.name} = z.output<typeof ${schema}>;`);
+    c.doc(`Payload of \`${ev.name}.create\`: the event without its \`type\`.`);
+    c.line(`export type ${ev.name}Input = Omit<z.input<typeof ${schema}>, "type">;`);
     c.line();
     c.block(`export const ${ev.name} =`, () => {
-      c.line(`type: ${tsString(type)},`);
-      c.doc("Builds the event (the payload is validated and frozen).");
+      c.line(`type: ${type},`);
+      c.doc("Strict schema of the whole event, `type` included (unknown keys are rejected).");
+      c.line(`schema: ${schema},`);
+      c.doc("Builds the event: the payload is validated, the event is frozen.");
       c.block(`create(payload: ${ev.name}Input): ${ev.name}`, () => {
-        c.line(`return Object.freeze({ type: ${ev.name}.type, ...parseWith(${payload}, payload, ${tsString(ev.name)}) });`);
+        c.line(`return parseWith(${schema}, { ...payload, type: ${type} }, ${tsString(ev.name)});`);
       }, ",");
-      c.block(`is(event: DomainEvent): event is ${ev.name}`, () => c.line(`return event.type === ${ev.name}.type;`), ",");
-    }, " as const;");
+      c.doc("Parses a serialized event (e.g. JSON read from an outbox).");
+      c.block(`parse(input: unknown): ${ev.name}`, () => c.line(`return parseWith(${schema}, input, ${tsString(ev.name)});`), ",");
+      c.doc("Type guard (an arrow function: safe to pass unbound, e.g. `events.filter(X.is)`).");
+      c.line(`is: (event: DomainEvent): event is ${ev.name} => event.type === ${type},`);
+    }, ` as const satisfies EventType<${ev.name}, ${ev.name}Input>;`);
   }
   if (events.length) {
+    const union = `${L.ca.ir.name}Event`;
     c.line();
     c.doc(`Every domain event of the ${L.ca.ir.name} context.`);
-    c.line(`export type ${L.ca.ir.name}Event = ${events.map((e) => e.name).join(" | ")};`);
+    c.line(`export type ${union} = ${events.map((e) => e.name).join(" | ")};`);
+    c.line();
+    c.doc(`Schema of any ${L.ca.ir.name} event, discriminated by \`type\`.`);
+    c.line(`export const ${union}Schema = z.discriminatedUnion("type", [${events.map((e) => `${e.name}Schema`).join(", ")}]);`);
+    c.line();
+    c.doc(`Parses a serialized ${L.ca.ir.name} event (strict: an unknown \`type\` or key is rejected).`);
+    c.block(`export function parse${union}(input: unknown): ${union}`, () => c.line(`return parseWith(${union}Schema, input, ${tsString(union)});`));
   } else {
     c.line("// This context declares no domain events.").line("export {};");
   }
@@ -524,7 +543,7 @@ export function commandsFile(L: TsLayout): TsFile {
     imp.value(L.runtime, "parseWith");
     const fields = `${uc.command}Fields`;
     c.line();
-    c.block(`const ${fields} = z.strictObject(`, () => c.lines_(fieldSchemas(L, uc.command, uc.input, imp)), ").readonly();");
+    readonlyStrictObject(c, fields, fieldSchemas(L, uc.command, uc.input, imp));
     c.line();
     c.doc(`Input of use case \`${uc.name}\`${uc.actor ? ` (actor: ${uc.actor})` : ""}.`);
     c.line(`export type ${uc.command} = z.output<typeof ${fields}>;`);
@@ -546,25 +565,27 @@ export function rulesFile(L: TsLayout): TsFile {
   imp.type(L.runtime, "Rule");
   const c = new Code();
   const list = (xs: string[]) => `[${xs.map(tsString).join(", ")}]`;
+  const entries: string[] = [];
+  const owners: (EntityIR | ValueObjectIR)[] = [...L.ca.ir.valueObjects, ...L.ca.ir.aggregates.flatMap((a) => [a, ...a.entities])];
+  for (const o of owners) {
+    for (const inv of o.invariants) {
+      const ag = L.ca.ir.aggregates.find((a) => a.name === o.name);
+      const applied = ag ? [...ag.factories.map((f) => f.name), ...ag.operations.map((op) => op.name)] : [];
+      entries.push(
+        `{ name: ${tsString(inv.name)}, kind: "invariant", owner: ${tsString(o.name)}, expression: ${tsString(inv.expression)}, error: ${tsString(inv.error)}, checkOn: ${list(inv.checkOn)}, appliedBy: ${list(applied)} }`,
+      );
+    }
+  }
+  for (const ag of L.ca.ir.aggregates) {
+    for (const g of ag.stateGuards) {
+      entries.push(
+        `{ name: ${tsString(g.name)}, kind: "state_guard", owner: ${tsString(ag.name)}, expression: ${tsString(g.expression)}, error: ${tsString(g.error)}, checkOn: [], appliedBy: ${list(requiredBy(L, ag, g.name))} }`,
+      );
+    }
+  }
   c.line();
-  c.open("export const RULES: ReadonlyArray<Rule> = [", () => {
-    const owners: (EntityIR | ValueObjectIR)[] = [...L.ca.ir.valueObjects, ...L.ca.ir.aggregates.flatMap((a) => [a, ...a.entities])];
-    for (const o of owners) {
-      for (const inv of o.invariants) {
-        const ag = L.ca.ir.aggregates.find((a) => a.name === o.name);
-        const applied = ag ? [...ag.factories.map((f) => f.name), ...ag.operations.map((op) => op.name)] : [];
-        c.line(
-          `{ name: ${tsString(inv.name)}, kind: "invariant", owner: ${tsString(o.name)}, expression: ${tsString(inv.expression)}, error: ${tsString(inv.error)}, checkOn: ${list(inv.checkOn)}, appliedBy: ${list(applied)} },`,
-        );
-      }
-    }
-    for (const ag of L.ca.ir.aggregates) {
-      for (const g of ag.stateGuards) {
-        c.line(
-          `{ name: ${tsString(g.name)}, kind: "state_guard", owner: ${tsString(ag.name)}, expression: ${tsString(g.expression)}, error: ${tsString(g.error)}, checkOn: [], appliedBy: ${list(requiredBy(L, ag, g.name))} },`,
-        );
-      }
-    }
-  }, "];");
+  c.comment("`satisfies` checks every entry against Rule while keeping the literal types (rule names, kinds).");
+  if (!entries.length) c.line("export const RULES = [] as const satisfies ReadonlyArray<Rule>;");
+  else c.open("export const RULES = [", () => c.lines_(entries.map((e) => `${e},`)), "] as const satisfies ReadonlyArray<Rule>;");
   return file(L, mod, `Catalogue of the named rules in the ${L.ca.ir.name} context.`, imp, c.toString());
 }

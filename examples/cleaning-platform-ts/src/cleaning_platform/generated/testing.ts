@@ -153,7 +153,7 @@ export function expectThrows<E>(fn: () => unknown, type: ErrorClass<E>): E {
     if (error instanceof type) return error;
     throw error;
   }
-  throw new Error("Expected " + type.name + " to be thrown");
+  throw new Error(`Expected ${type.name} to be thrown`);
 }
 
 /** Awaits `fn()` and returns its rejection; fails if it resolves or rejects with another class. */
@@ -167,12 +167,12 @@ export async function expectRejects<E>(
     if (error instanceof type) return error;
     throw error;
   }
-  throw new Error("Expected " + type.name + " to be thrown");
+  throw new Error(`Expected ${type.name} to be thrown`);
 }
 
 /** `value`, checked to be present (not null or undefined). */
 export function expectPresent<T>(value: T | null | undefined, what = "value"): T {
-  if (value === null || value === undefined) throw new Error("Expected " + what + " to be present");
+  if (value === null || value === undefined) throw new Error(`Expected ${what} to be present`);
   return value;
 }
 
@@ -185,7 +185,7 @@ export function expectEvent<E extends DomainEvent>(
   const event = events[index];
   if (event === undefined || !type.is(event)) {
     const actual = event?.type ?? "nothing";
-    throw new Error("Expected " + type.type + " at index " + index + ", got " + actual);
+    throw new Error(`Expected ${type.type} at index ${String(index)}, got ${actual}`);
   }
   return event;
 }
@@ -203,4 +203,15 @@ export function plain(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]));
   }
   return value;
+}
+
+/**
+ * `events` serialized to JSON and parsed back with `parse` (a context's `parse<Context>Event`), in
+ * plain form: compare with `events.map(plain)` to check that every event round-trips.
+ */
+export function viaJson(
+  events: ReadonlyArray<DomainEvent>,
+  parse: (input: unknown) => DomainEvent,
+): unknown[] {
+  return events.map((event) => plain(parse(JSON.parse(JSON.stringify(event)))));
 }

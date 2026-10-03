@@ -21,13 +21,14 @@ describe("CleaningStaff invariants", () => {
    */
   test("invariant_cleaning_staff_invitation_expiry_after_creation", () => {
     const error = expectThrows(
-      () => CleaningStaffInvitation.from({
-        id: "00000000-0000-0000-0000-000000000001",
-        email: { value: "staff@example.com" },
-        status: "pending",
-        createdAt: "2026-01-01T10:00:00+00:00",
-        expiresAt: "2026-01-01T10:00:00+00:00",
-      }),
+      () =>
+        CleaningStaffInvitation.from({
+          id: "00000000-0000-0000-0000-000000000001",
+          email: { value: "staff@example.com" },
+          status: "pending",
+          createdAt: "2026-01-01T10:00:00+00:00",
+          expiresAt: "2026-01-01T10:00:00+00:00",
+        }),
       InvalidInvitationWindow,
     );
     expect(error.details.rule).toBe("expiry_after_creation");
@@ -42,13 +43,14 @@ describe("CleaningStaff invariants", () => {
    */
   test("invariant_cleaning_staff_invitation_accepted_invitation_has_accepted_at", () => {
     const error = expectThrows(
-      () => CleaningStaffInvitation.from({
-        id: "00000000-0000-0000-0000-000000000001",
-        email: { value: "staff@example.com" },
-        status: "accepted",
-        createdAt: "2026-01-01T10:00:00+00:00",
-        expiresAt: "2026-01-08T10:00:00+00:00",
-      }),
+      () =>
+        CleaningStaffInvitation.from({
+          id: "00000000-0000-0000-0000-000000000001",
+          email: { value: "staff@example.com" },
+          status: "accepted",
+          createdAt: "2026-01-01T10:00:00+00:00",
+          expiresAt: "2026-01-08T10:00:00+00:00",
+        }),
       InvalidInvitationWindow,
     );
     expect(error.details.rule).toBe("accepted_invitation_has_accepted_at");

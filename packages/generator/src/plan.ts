@@ -227,9 +227,10 @@ function tsSymbols(src: string): Map<string, string> {
       else if (ch === ")" || ch === "]") depth--;
     }
     if (depth <= 0) {
-      // Normalize the wrapping itself away (keeping the indentation): "( a, b, )" and "(a, b)" are the same signature.
+      // Normalize the wrapping itself away (keeping the indentation): "( a, b, )" and "(a, b)" are the same signature,
+      // and so are "{ a: A; b: B }" and the expanded type literal "{ a: A; b: B; }".
       const indent = /^ */.exec(buf)![0];
-      lines.push(indent + buf.slice(indent.length).replace(/ {2,}/g, " ").replace(/([([{]) +/g, "$1").replace(/,? +([)\]}])/g, "$1"));
+      lines.push(indent + buf.slice(indent.length).replace(/ {2,}/g, " ").replace(/([([{]) +/g, "$1").replace(/[,;]? +([)\]}])/g, "$1"));
       buf = undefined;
       depth = 0;
     }

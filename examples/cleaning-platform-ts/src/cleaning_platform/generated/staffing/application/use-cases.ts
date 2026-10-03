@@ -28,14 +28,12 @@ export class RegisterStaffUseCase {
   readonly #eventPublisher: EventPublisher;
   readonly #unitOfWork: UnitOfWork;
 
-  constructor(
-    deps: {
-      readonly staffMemberRepository: StaffMemberRepository;
-      readonly ids: IdGenerator;
-      readonly eventPublisher: EventPublisher;
-      readonly unitOfWork: UnitOfWork;
-    }
-  ) {
+  constructor(deps: {
+    readonly staffMemberRepository: StaffMemberRepository;
+    readonly ids: IdGenerator;
+    readonly eventPublisher: EventPublisher;
+    readonly unitOfWork: UnitOfWork;
+  }) {
     this.#staffMemberRepository = deps.staffMemberRepository;
     this.#ids = deps.ids;
     this.#eventPublisher = deps.eventPublisher;
@@ -56,7 +54,7 @@ export class RegisterStaffUseCase {
       await this.#unitOfWork.rollback();
       throw error;
     }
-    if (afterCommit.length) await this.#eventPublisher.publish(afterCommit);
+    if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);
     return result;
   }
 

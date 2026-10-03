@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { computePlan, generate, generatePython, generateTypeScript, renderManifest, sha256 } from "../src/index.ts";
-import { TsImports, wrapLongLines } from "../src/typescript/code.ts";
+import { TsImports, tsString } from "../src/typescript/code.ts";
+import { formatExpression, formatSource, strWidth } from "../src/typescript/format.ts";
 import { emitExpr, type ExprContext } from "../src/typescript/expr.ts";
 import { TS_DEPENDENCIES } from "../src/typescript/index.ts";
 import { TsLayout } from "../src/typescript/layout.ts";
@@ -282,33 +283,100 @@ describe("TypeScript target: expression emission", () => {
   });
 });
 
-describe("TypeScript target: line wrapping", () => {
-  test("a long boolean return is parenthesized on the same line (never `return` alone: ASI)", () => {
-    const out = wrapLongLines("    return command.allowOrdersThatAreCurrentlyOnHold || (purchaseOrder.status === PurchaseOrderStatus.placed);");
-    expect(out.split("\n")).toEqual([
+describe("TypeScript target: Prettier-compatible formatting", () => {
+  // Every expected output below is what Prettier 3 (printWidth 100) prints for the input; the run suite checks the
+  // generated projects with the real Prettier.
+  const fmt = (line: string) => formatSource(line).split("\n");
+
+  test("a long boolean return is parenthesized on the same line; operators end the lines (never `return` alone: ASI)", () => {
+    expect(fmt("    return command.allowOrdersThatAreCurrentlyOnHold || (purchaseOrder.status === PurchaseOrderStatus.placed);")).toEqual([
       "    return (",
-      "      command.allowOrdersThatAreCurrentlyOnHold",
-      "      || (purchaseOrder.status === PurchaseOrderStatus.placed)",
+      "      command.allowOrdersThatAreCurrentlyOnHold ||",
+      "      purchaseOrder.status === PurchaseOrderStatus.placed",
       "    );",
     ]);
   });
 
-  test("a single object argument hugs the parentheses; argument lists get trailing commas", () => {
-    const out = wrapLongLines("    const aggregate = CleaningStaffInvitation.from({ id: id, email, status: InvitationStatus.pending, createdAt: at });");
-    expect(out.split("\n")[0]).toBe("    const aggregate = CleaningStaffInvitation.from({");
-    expect(out.split("\n").at(-1)).toBe("    });");
-    expect(out).toContain("      createdAt: at,\n");
+  test("a single object argument hugs the parentheses; broken argument lists get trailing commas", () => {
+    const out = fmt("    const aggregate = CleaningStaffInvitation.from({ id: id, email, status: InvitationStatus.pending, createdAt: at });");
+    expect(out[0]).toBe("    const aggregate = CleaningStaffInvitation.from({");
+    expect(out.at(-1)).toBe("    });");
+    expect(out).toContain("      createdAt: at,");
+    expect(fmt('    expect(plain(transition.aggregate.total)).toEqual(plain(Money.create({ amount: "10.50", currency: "USD" })));')).toEqual([
+      "    expect(plain(transition.aggregate.total)).toEqual(",
+      '      plain(Money.create({ amount: "10.50", currency: "USD" })),',
+      "    );",
+    ]);
   });
 
-  test("a long boolean argument splits before its operators; grouping parentheses never get a comma", () => {
-    const out = wrapLongLines("      this.status === OrderStatus.delivered && this.deliveredAt !== null && at.getTime() <= this.deliveredAt.getTime(),");
-    expect(out.split("\n")).toEqual([
-      "      this.status === OrderStatus.delivered",
-      "        && this.deliveredAt !== null",
-      "        && at.getTime() <= this.deliveredAt.getTime(),",
+  test("a long boolean argument continues indented; a negated condition hugs `if (!(`", () => {
+    expect(fmt("      this.status === OrderStatus.delivered && this.deliveredAt !== null && at.getTime() <= this.deliveredAt.getTime(),")).toEqual([
+      "      this.status === OrderStatus.delivered &&",
+      "        this.deliveredAt !== null &&",
+      "        at.getTime() <= this.deliveredAt.getTime(),",
     ]);
-    const cond = wrapLongLines("    if (!(this.refunded === null || (this.captured !== null && this.refunded.amount.lte(this.captured.amount)))) {");
-    expect(cond).not.toMatch(/,\s*\n\s*\)/);
+    expect(fmt("    if (!(this.refunded === null || (this.captured !== null && this.refunded.amount.lte(this.captured.amount)))) {")).toEqual([
+      "    if (!(",
+      "      this.refunded === null ||",
+      "      (this.captured !== null && this.refunded.amount.lte(this.captured.amount))",
+      "    )) {",
+    ]);
+  });
+
+  test("the last argument expands: arrays, objects and arrow functions (the body breaks after `=>`)", () => {
+    expect(fmt('    expect(eventPublisher.published.map((event) => event.type)).toEqual(["Ordering.BigOrderPlaced", "Ordering.OrderPlaced"]);')).toEqual([
+      "    expect(eventPublisher.published.map((event) => event.type)).toEqual([",
+      '      "Ordering.BigOrderPlaced",',
+      '      "Ordering.OrderPlaced",',
+      "    ]);",
+    ]);
+    expect(fmt("    const total: Decimal = sumDecimals(order.lines, (item) => item.unitPrice.amount.times(item.quantity)).minus(order.discount);")).toEqual([
+      "    const total: Decimal = sumDecimals(order.lines, (item) =>",
+      "      item.unitPrice.amount.times(item.quantity),",
+      "    ).minus(order.discount);",
+    ]);
+  });
+
+  test("member chains with several calls and non-trivial arguments put one call per line", () => {
+    expect(fmt("      discount: sumDecimals(this.lines, (item) => item.unitPrice.amount.times(item.quantity)).times(new Decimal(percent).div(100)).toDecimalPlaces(2, Decimal.ROUND_HALF_UP),")).toEqual([
+      "      discount: sumDecimals(this.lines, (item) => item.unitPrice.amount.times(item.quantity))",
+      "        .times(new Decimal(percent).div(100))",
+      "        .toDecimalPlaces(2, Decimal.ROUND_HALF_UP),",
+    ]);
+  });
+
+  test("parentheses are Prettier's: redundant ones go, clarifying ones are added", () => {
+    expect(formatExpression("f((a as T), (await b.c()))")).toBe("f(a as T, await b.c())");
+    expect(formatExpression("x(a && b || c, a * b % c, (a + b) - c)")).toBe("x((a && b) || c, (a * b) % c, a + b - c)");
+    expect(formatExpression("(a as T).b + -(-c) + (await d).e")).toBe("(a as T).b + -(-c) + (await d).e");
+  });
+
+  test("signatures: a sole object type parameter hugs; other parameter lists break one per line", () => {
+    expect(fmt("  static start(args: { readonly id: UUID; readonly customerId: Id<\"Customer\">; readonly lines: ReadonlyArray<OrderLine> }): Transition<Order> {")).toEqual([
+      "  static start(args: {",
+      "    readonly id: UUID;",
+      '    readonly customerId: Id<"Customer">;',
+      "    readonly lines: ReadonlyArray<OrderLine>;",
+      "  }): Transition<Order> {",
+    ]);
+    expect(fmt('  constructor(details: ErrorDetails = {}, message = "招待の有効期限は作成日時より後である必要があります", options?: ErrorOptions) {')).toEqual([
+      "  constructor(",
+      "    details: ErrorDetails = {},",
+      '    message = "招待の有効期限は作成日時より後である必要があります",',
+      "    options?: ErrorOptions,",
+      "  ) {",
+    ]);
+  });
+
+  test("type aliases, import lists, strings and display width", () => {
+    expect(fmt("export type SalesEvent = LineAdded | LineRemoved | OrderCancelled | OrderOpened | OrderPlaced | QuantityChanged;")).toEqual([
+      "export type SalesEvent =",
+      "  LineAdded | LineRemoved | OrderCancelled | OrderOpened | OrderPlaced | QuantityChanged;",
+    ]);
+    expect(fmt('import { AggregateRoot, dateTimeSchema, type DomainEvent, type Id, idSchema, parseWith, StateGuard } from "../../runtime.js";')[0]).toBe("import {");
+    expect(tsString('currency != "JPY"')).toBe("'currency != \"JPY\"'");
+    expect(tsString("it's")).toBe('"it\'s"');
+    expect(strWidth("招待")).toBe(4);
   });
 
   test.each([
@@ -317,11 +385,12 @@ describe("TypeScript target: line wrapping", () => {
     ["the context-map model", asTypeScript(CONTEXT_MAP)],
     ["the ordering model", asTypeScript(ORDERING)],
     ["the long-rules model", asTypeScript(LONG_RULES)],
-  ])("%s: lines stay within 100 characters (imports aside); no line starts with `=>` or ends after return/throw", (_label, text) => {
+  ])("%s: lines fit in 100 columns unless Prettier keeps them (one import, one string); never `=>` first or `return` alone", (_label, text) => {
     for (const f of gen(text).files) {
       if (!f.path.endsWith(".ts")) continue;
       const lines = f.content.split("\n");
-      expect({ path: f.path, long: lines.filter((l) => l.length > 100 && !/^(import|export) /.test(l)) }).toEqual({ path: f.path, long: [] });
+      const unbreakable = (l: string) => /^(import|export) /.test(l) || /^\s*(?:[\w$]+: )?(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'),?$/.test(l);
+      expect({ path: f.path, long: lines.filter((l) => strWidth(l) > 100 && !unbreakable(l)) }).toEqual({ path: f.path, long: [] });
       expect({ path: f.path, bad: lines.filter((l) => /^\s*=>/.test(l) || /^\s*(return|throw)\s*$/.test(l)) }).toEqual({ path: f.path, bad: [] });
     }
   });
@@ -330,12 +399,10 @@ describe("TypeScript target: line wrapping", () => {
     const src = gen(asTypeScript(LONG_RULES)).files.find((f) => f.path.endsWith("billing/domain/aggregates.ts"))!.content;
     expect(src).toContain(
       [
-        "    if (",
-        "      !(",
-        "        this.refunded === null",
-        "        || (this.captured !== null && this.refunded.amount.lte(this.captured.amount))",
-        "      )",
-        "    ) {",
+        "    if (!(",
+        "      this.refunded === null ||",
+        "      (this.captured !== null && this.refunded.amount.lte(this.captured.amount))",
+        "    )) {",
         '      throw new RefundExceedsCapture({ rule: "refund_not_more_than_captured_amount", id: this.id });',
       ].join("\n"),
     );
@@ -377,9 +444,8 @@ describe("TypeScript target: policies, context map and idempotency", () => {
  * Installs zod, decimal.js, typescript, vitest and the type packages once into a cache directory keyed by the
  * dependency versions; every generated project links its node_modules there.
  */
-function installDependencies(): { dir?: string; reason?: string } {
-  const deps = { ...TS_DEPENDENCIES };
-  const dir = join(tmpdir(), `ddd-ts-deps-${createHash("sha256").update(JSON.stringify(deps)).digest("hex").slice(0, 12)}`);
+function installDependencies(deps: Record<string, string> = { ...TS_DEPENDENCIES }, prefix = "ddd-ts-deps"): { dir?: string; reason?: string } {
+  const dir = join(tmpdir(), `${prefix}-${createHash("sha256").update(JSON.stringify(deps)).digest("hex").slice(0, 12)}`);
   const ready = join(dir, "node_modules/.ddd-ready");
   if (existsSync(ready)) return { dir };
   mkdirSync(dir, { recursive: true });
@@ -400,15 +466,51 @@ function installDependencies(): { dir?: string; reason?: string } {
 const DEPS = process.env.DDD_SKIP_TS_RUN ? { reason: "DDD_SKIP_TS_RUN is set" } : installDependencies();
 if (!DEPS.dir) console.warn(`skipping "generated TypeScript actually runs": ${DEPS.reason} (needs network once to install zod, decimal.js, typescript and vitest)`);
 
-function writeProject(text: string): string {
+/**
+ * Prettier and typescript-eslint, installed once like DEPS. typescript-eslint needs the TypeScript 6 compiler API
+ * (TypeScript 7 has no programmatic API before 7.1), so this cache pins typescript ~6.0 next to the runtime deps.
+ */
+const LINT_DEPENDENCIES = {
+  zod: TS_DEPENDENCIES.zod,
+  "decimal.js": TS_DEPENDENCIES["decimal.js"],
+  typescript: "~6.0.0",
+  vitest: TS_DEPENDENCIES.vitest,
+  "@types/node": TS_DEPENDENCIES["@types/node"],
+  prettier: "^3.9.0",
+  eslint: "^10.0.0",
+  "typescript-eslint": "^8.71.0",
+};
+const LINT = !DEPS.dir ? { reason: DEPS.reason } : process.env.DDD_SKIP_TS_LINT ? { reason: "DDD_SKIP_TS_LINT is set" } : installDependencies(LINT_DEPENDENCIES, "ddd-ts-lint");
+if (DEPS.dir && !LINT.dir) console.warn(`skipping the Prettier / typescript-eslint checks: ${LINT.reason}`);
+
+/**
+ * typescript-eslint's strictest type-aware preset (https://typescript-eslint.io/users/configs), with the usual
+ * `^_` convention for intentionally unused parameters (the one TypeScript's noUnusedParameters already follows).
+ */
+const ESLINT_CONFIG = `import tseslint from "typescript-eslint";
+
+export default tseslint.config(
+  { ignores: ["node_modules/**", "eslint.config.mjs"] },
+  ...tseslint.configs.strictTypeChecked,
+  { languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname } } },
+  { rules: { "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }] } },
+);
+`;
+
+function writeProject(text: string, deps = DEPS.dir!): string {
   const dir = mkdtempSync(join(tmpdir(), "ddd-ts-gen-"));
   const out = generateTypeScript(analyze(text), text);
   for (const f of out.files) {
     mkdirSync(dirname(join(dir, f.path)), { recursive: true });
     writeFileSync(join(dir, f.path), f.content);
   }
-  symlinkSync(join(DEPS.dir!, "node_modules"), join(dir, "node_modules"));
+  symlinkSync(join(deps, "node_modules"), join(dir, "node_modules"));
   return dir;
+}
+
+/** `prettier --check` over the generated TypeScript (the scaffolded .prettierrc.json sets printWidth 100). */
+function prettierCheck(dir: string) {
+  return run([join(LINT.dir!, "node_modules/.bin/prettier"), "--check", "src/**/*.ts", "tests/**/*.ts"], dir);
 }
 
 const run = (cmd: string[], cwd: string) => {
@@ -446,6 +548,10 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       const tsc = run(["node_modules/.bin/tsc", "-p", "tsconfig.json"], dir);
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
+      if (LINT.dir) {
+        const prettier = prettierCheck(dir);
+        expect({ code: prettier.code, out: prettier.code ? prettier.out : "" }).toEqual({ code: 0, out: "" });
+      }
       const tests = run(["bun", "test"], dir);
       if (existsSync(join(dir, "tests/generated"))) {
         expect(tests.out).toMatch(/\b0 fail/);
@@ -469,4 +575,29 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 300_000);
+
+  test.skipIf(!LINT.dir)("typescript-eslint strict-type-checked and Prettier find nothing in any generated project", () => {
+    const models: [string, string][] = [
+      ["sample", MODEL],
+      ["kitchen-sink", asTypeScript(KITCHEN_SINK)],
+      ["context-map", asTypeScript(CONTEXT_MAP)],
+      ["ordering", asTypeScript(ORDERING)],
+      ["long-rules", asTypeScript(LONG_RULES)],
+      ["from-board", asTypeScript(FROM_BOARD)],
+      ["proposed", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
+    ];
+    // One project at a time: typed linting loads a whole TypeScript program.
+    for (const [name, text] of models) {
+      const dir = writeProject(text, LINT.dir!);
+      try {
+        writeFileSync(join(dir, "eslint.config.mjs"), ESLINT_CONFIG);
+        const eslint = run(["node_modules/.bin/eslint", "--max-warnings", "0", "."], dir);
+        expect({ name, code: eslint.code, out: eslint.out.trim() }).toEqual({ name, code: 0, out: "" });
+        const prettier = prettierCheck(dir);
+        expect({ name, code: prettier.code, out: prettier.code ? prettier.out : "" }).toEqual({ name, code: 0, out: "" });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }, 600_000);
 });

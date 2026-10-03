@@ -5,32 +5,48 @@
 
 import { z } from "zod";
 
-import { type DomainEvent, parseWith, uuidSchema } from "../../runtime.js";
+import { type DomainEvent, type EventType, parseWith, uuidSchema } from "../../runtime.js";
 
-const StaffRegisteredPayload = z.strictObject({
-  id: uuidSchema,
-  invitationId: uuidSchema,
-});
+const StaffRegisteredSchema = z
+  .strictObject({
+    type: z.literal("Staffing.StaffRegistered"),
+    id: uuidSchema,
+    invitationId: uuidSchema,
+  })
+  .readonly();
 
 /** Emitted by StaffMember.register. */
-export type StaffRegistered = Readonly<{
-  type: "Staffing.StaffRegistered"
-} & z.output<typeof StaffRegisteredPayload>>;
-export type StaffRegisteredInput = z.input<typeof StaffRegisteredPayload>;
+export type StaffRegistered = z.output<typeof StaffRegisteredSchema>;
+/** Payload of `StaffRegistered.create`: the event without its `type`. */
+export type StaffRegisteredInput = Omit<z.input<typeof StaffRegisteredSchema>, "type">;
 
 export const StaffRegistered = {
   type: "Staffing.StaffRegistered",
-  /** Builds the event (the payload is validated and frozen). */
+  /** Strict schema of the whole event, `type` included (unknown keys are rejected). */
+  schema: StaffRegisteredSchema,
+  /** Builds the event: the payload is validated, the event is frozen. */
   create(payload: StaffRegisteredInput): StaffRegistered {
-    return Object.freeze({
-      type: StaffRegistered.type,
-      ...parseWith(StaffRegisteredPayload, payload, "StaffRegistered"),
-    });
+    return parseWith(
+      StaffRegisteredSchema,
+      { ...payload, type: "Staffing.StaffRegistered" },
+      "StaffRegistered",
+    );
   },
-  is(event: DomainEvent): event is StaffRegistered {
-    return event.type === StaffRegistered.type;
+  /** Parses a serialized event (e.g. JSON read from an outbox). */
+  parse(input: unknown): StaffRegistered {
+    return parseWith(StaffRegisteredSchema, input, "StaffRegistered");
   },
-} as const;
+  /** Type guard (an arrow function: safe to pass unbound, e.g. `events.filter(X.is)`). */
+  is: (event: DomainEvent): event is StaffRegistered => event.type === "Staffing.StaffRegistered",
+} as const satisfies EventType<StaffRegistered, StaffRegisteredInput>;
 
 /** Every domain event of the Staffing context. */
 export type StaffingEvent = StaffRegistered;
+
+/** Schema of any Staffing event, discriminated by `type`. */
+export const StaffingEventSchema = z.discriminatedUnion("type", [StaffRegisteredSchema]);
+
+/** Parses a serialized Staffing event (strict: an unknown `type` or key is rejected). */
+export function parseStaffingEvent(input: unknown): StaffingEvent {
+  return parseWith(StaffingEventSchema, input, "StaffingEvent");
+}

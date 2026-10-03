@@ -30,13 +30,20 @@ export type UUID = z.output<typeof uuidSchema>;
 /** Identity of the aggregate (or entity) `A`: a UUID that cannot be mixed up with other ids. */
 export type Id<A extends string> = UUID & z.$brand<A>;
 
-export function idSchema<A extends string>(_owner: A): z.ZodType<Id<A>, string> {
-  return uuidSchema as unknown as z.ZodType<Id<A>, string>;
+/**
+ * Schema of the identity of `owner`. `Id<A>` is the intersection Zod's `.brand<A>()` produces; the
+ * cast is needed because TypeScript cannot resolve `.brand<A>()` for a generic `A`.
+ */
+export function idSchema<A extends string>(owner: A): z.ZodType<Id<A>, string> {
+  return uuidSchema.describe(`Identity of ${owner}`) as unknown as z.ZodType<Id<A>, string>;
 }
 
-/** Point in time: a `Date`, or an ISO 8601 string with an offset (`2026-01-01T10:00:00+00:00`). */
+/**
+ * Point in time: a `Date`, or an ISO 8601 string with an offset (`2026-01-01T10:00:00+00:00`).
+ * A `Date` input is copied, so changing the caller's object later cannot change validated state.
+ */
 export const dateTimeSchema = z.union([
-  z.date(),
+  z.date().transform((value) => new Date(value.getTime())),
   z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
 ]);
 
@@ -72,24 +79,27 @@ export function decimalSchema(
 ): z.ZodType<Decimal, string | number | Decimal> {
   const { min, max, maxDigits, decimalPlaces } = constraints;
   return decimalInput.transform((value, ctx) => {
+    // Zod 4: a transform reports problems on `ctx.issues` (it must not throw for invalid input).
+    const issue = (message: string): void => {
+      ctx.issues.push({ code: "custom", message, input: value });
+    };
     let result: Decimal | undefined;
     try {
       result = new Decimal(value);
     } catch {
       result = undefined;
     }
-    if (!result || !result.isFinite()) {
-      ctx.addIssue({ code: "custom", message: "Invalid decimal" });
+    if (!result?.isFinite()) {
+      issue("Invalid decimal");
       return z.NEVER;
     }
-    const issue = (message: string) => ctx.addIssue({ code: "custom", message });
-    if (min !== undefined && result.lt(min)) issue("Too small: expected >=" + min);
-    if (max !== undefined && result.gt(max)) issue("Too big: expected <=" + max);
+    if (min !== undefined && result.lt(min)) issue(`Too small: expected >=${String(min)}`);
+    if (max !== undefined && result.gt(max)) issue(`Too big: expected <=${String(max)}`);
     if (maxDigits !== undefined && digits(result) > maxDigits) {
-      issue("Expected at most " + maxDigits + " digits");
+      issue(`Expected at most ${String(maxDigits)} digits`);
     }
     if (decimalPlaces !== undefined && result.decimalPlaces() > decimalPlaces) {
-      issue("Expected at most " + decimalPlaces + " decimal places");
+      issue(`Expected at most ${String(decimalPlaces)} decimal places`);
     }
     return result;
   });
@@ -102,7 +112,7 @@ export function uuid(value: string): UUID {
 
 /** Parses the identity of `owner` (throws ConstraintViolation). */
 export function id<A extends string>(owner: A, value: string): Id<A> {
-  return parseWith(idSchema(owner), value, "Id<" + owner + ">");
+  return parseWith(idSchema(owner), value, `Id<${owner}>`);
 }
 
 /** Parses an ISO 8601 date-time with a UTC offset (throws ConstraintViolation). */
@@ -128,22 +138,25 @@ export interface ErrorDetails {
 
 /**
  * Base class of all domain errors. `message` is safe to show to end users; `details` is internal
- * diagnostic data. Domain errors never depend on HTTP or web framework types.
+ * diagnostic data; `options.cause` (ES2022) keeps the underlying error, e.g. the ZodError of a
+ * ConstraintViolation. Domain errors never depend on HTTP or web framework types.
  */
 export class DomainError<D extends ErrorDetails = ErrorDetails> extends Error {
   static readonly code: string = "domain_error";
   readonly code: string = "domain_error";
   readonly details: D;
 
-  constructor(details: D, message: string) {
-    super(message);
+  constructor(details: D, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = new.target.name;
     this.details = details;
   }
 }
 
+/** One failed field constraint: dotted path, Zod issue code (`too_small`, ...), message. */
 export interface ConstraintIssue {
   readonly path: string;
+  readonly code: string;
   readonly message: string;
 }
 
@@ -160,8 +173,9 @@ export class ConstraintViolation extends DomainError<ConstraintViolationDetails>
   constructor(
     details: ConstraintViolationDetails = {},
     message = "A field constraint was violated",
+    options?: ErrorOptions,
   ) {
-    super(details, message);
+    super(details, message, options);
   }
 }
 
@@ -177,14 +191,16 @@ export class AggregateNotFound extends DomainError<AggregateNotFoundDetails> {
   constructor(
     details: AggregateNotFoundDetails = {},
     message = "The requested aggregate does not exist",
+    options?: ErrorOptions,
   ) {
-    super(details, message);
+    super(details, message, options);
   }
 }
 
 /**
- * Validates `input` with `schema`. Constraint failures become a `ConstraintViolation`; domain
- * errors raised by invariants inside the schema propagate unchanged.
+ * Validates `input` with `schema` (`safeParse`). Constraint failures become a `ConstraintViolation`
+ * whose `details.issues` lists them and whose `cause` is the ZodError; domain errors raised by
+ * invariants inside the schema propagate unchanged.
  */
 export function parseWith<S extends z.ZodType>(
   schema: S,
@@ -195,10 +211,11 @@ export function parseWith<S extends z.ZodType>(
   if (result.success) return result.data;
   const issues = result.error.issues.map((issue) => ({
     path: issue.path.map(String).join("."),
+    code: issue.code,
     message: issue.message,
   }));
-  const text = issues.map((issue) => (issue.path || "(root)") + ": " + issue.message).join("; ");
-  throw new ConstraintViolation({ model, issues }, model + ": " + text);
+  const text = issues.map((issue) => `${issue.path || "(root)"}: ${issue.message}`).join("; ");
+  throw new ConstraintViolation({ model, issues }, `${model}: ${text}`, { cause: result.error });
 }
 
 // ---------------------------------------------------------------------------
@@ -219,10 +236,17 @@ export interface DomainEvent {
   readonly type: string;
 }
 
-/** The companion object of a generated event type. */
-export interface EventType<E extends DomainEvent> {
+/**
+ * The companion object of a generated event type: the strict schema of the whole event (including
+ * `type`), `create` from a payload, `parse` for serialized events, and the type guard `is` (an
+ * arrow function, so it can be passed around unbound, e.g. `events.filter(X.is)`).
+ */
+export interface EventType<E extends DomainEvent, I = Omit<E, "type">> {
   readonly type: E["type"];
-  is(event: DomainEvent): event is E;
+  readonly schema: z.ZodType<E>;
+  create(payload: I): E;
+  parse(input: unknown): E;
+  readonly is: (event: DomainEvent) => event is E;
 }
 
 /** Result of a factory or operation: the new aggregate state plus the events it emitted. */

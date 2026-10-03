@@ -19,8 +19,9 @@ import { expectPresent, plain } from "../../src/cleaning_platform/generated/staf
 class RecordingRegisterStaff implements RegisterStaffRunner {
   readonly commands: RegisterStaff[] = [];
 
-  async execute(command: RegisterStaff): Promise<void> {
+  execute(command: RegisterStaff): Promise<void> {
     this.commands.push(command);
+    return Promise.resolve();
   }
 }
 

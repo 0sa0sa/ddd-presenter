@@ -5,7 +5,7 @@
 
 import type { Id } from "../runtime.js";
 import { type FakeUnitOfWork, InMemoryRepository } from "../testing.js";
-import type { Extensions, StaffMemberRepository } from "./application/ports.js";
+import type { StaffMemberRepository } from "./application/ports.js";
 import type { StaffMember } from "./domain/aggregates.js";
 
 // Shared test doubles (unit of work, clock, ids, event publisher, assertions).
@@ -19,9 +19,4 @@ export class InMemoryStaffMemberRepository
   constructor(unitOfWork?: FakeUnitOfWork) {
     super((aggregate) => aggregate.id, unitOfWork);
   }
-}
-
-/** Test double for the Extensions interface; each extension returns a fixed value. */
-export class StubExtensions implements Extensions {
-  // This context declares no extension points.
 }

@@ -61,9 +61,11 @@ export class StaffMember extends AggregateRoot {
    * Factory: construct-time invariants are checked on the new instance.
    * Emits: StaffRegistered.
    */
-  static register(
-    args: { readonly id: UUID; readonly invitationId: UUID; readonly joinedAt: Date }
-  ): Transition<StaffMember> {
+  static register(args: {
+    readonly id: UUID;
+    readonly invitationId: UUID;
+    readonly joinedAt: Date;
+  }): Transition<StaffMember> {
     const { id, invitationId, joinedAt } = args;
     const aggregate = StaffMember.from({ id, invitationId, joinedAt });
     const events: DomainEvent[] = [];
