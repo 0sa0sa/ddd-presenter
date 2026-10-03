@@ -171,3 +171,74 @@ EC の試行（明細つきの注文・Money・返金・期限）で、合計・
 - **生成器のテスト**（`packages/generator/test/typescript.test.ts`）: 式の出力の単体テスト、TypeScript の例の golden test と決定性、plan（手編集・stale・破壊的変更）、検証と補完。「生成した TypeScript が実際に動く」テストは、zod・decimal.js・typescript・vitest・型定義を依存の版の hash ごとの一時ディレクトリに一度だけ `bun install` し、サンプル・kitchen-sink・context-map・ordering・long-rules を `test_runner: bun` で生成して `tsc` と `bun test` を通す（速いので）。サンプルは vitest でも実行する。さらに Invariant の `throw` をすべて無効にして導出テストを実行し、すべて失敗することを確かめる（検査が消えたらテストが気づく）。インストールできなければ理由を表示して skip する（`DDD_SKIP_TS_RUN=1` で明示的に skip）。
 - **例**: `examples/cleaning-platform-ts/`（同じドメイン、生成物・顧客の拡張・手書きテストを含む）と `bun run verify:example:ts`（`diff --check` → `bun install` → `tsc --noEmit` → vitest）。ルートの `bunfig.toml` で `bun test` の対象を `packages/` に限った（例の生成テストは各例のランナーと依存で動かす）。
 - **既知の制限・Python との違い**: `Date` は JavaScript では可変（生成コードは変更しないが、凍結もできない）で、精度はミリ秒（Python はマイクロ秒）。文字列の長さ（`min_length` / `max_length` / `length()`）は UTF-16 の単位で数える（Python はコードポイント。絵文字などで差が出る）。`pattern` は JavaScript の正規表現として解釈する（どちらも部分一致）。Decimal は末尾の0を付けずに文字列にする（`"2.5"`。値としては等しい）。Python の lax モードのような型の変換（`"1"` を Integer にする）はしない。破壊的変更の検出は行単位の簡易な解析で、型の変更までは見ない。Web の生成プレビューは TypeScript のファイルもそのまま表示する（Python と同じく構文の色付けはない）。scaffold の `package.json` は `typescript@^7`（このリポジトリと同じ版）を指定する。
+
+## 15. 生成コードのベストプラクティス（Python / Pydantic, 2026-10-03）
+
+生成する Python（`packages/generator/src/python/**`）を、公式ドキュメントと識者の推奨に照らして監査した。対象は例（`examples/cleaning-platform`）と生成器のテスト用モデル（kitchen-sink・context-map・ordering・long-rules・ボードから反映したモデル）の出力。表の「**従う**」はすべて実装した。互換性への影響と移行の手順は docs/05 §4.1。
+
+### 監査結果
+
+| ベストプラクティス | 出典 | 変更前の生成コード | 判定 |
+|---|---|---|---|
+| `model_copy(update=...)` は検証しないので、信頼できないデータを渡さない | [Pydantic API: `model_copy`](https://pydantic.dev/docs/validation/latest/api/pydantic/base_model/)（"the data is not validated before creating the new model"） | 生成コード自身の遷移は `_replace`（`model_validate`）で検証していた。しかし公開 API の `model_copy(update=...)` では Invariant・制約・正規化を飛ばせた（受諾済みなのに `accepted_at` がない招待や、不正なメールアドレスを作れることを確認） | **従う**: `DomainModel.model_copy` を上書きし、`update` があれば新しいインスタンスと同じく検証する（`copy.replace` も同じ経路）。検証しないのは `model_construct` だけ（逃げ道として文書化） |
+| `frozen=True`・`extra="forbid"`・`validate_default` | [Pydantic: Models](https://pydantic.dev/docs/validation/latest/concepts/models/)、[Fowler: ValueObject](https://martinfowler.com/bliki/ValueObject.html)（"Value objects should be immutable"） | 設定済み。リストは `tuple` | 既に OK |
+| `validate_assignment` / `revalidate_instances` | [Pydantic: Models](https://pydantic.dev/docs/validation/latest/concepts/models/) | 未設定 | 従わない: frozen なので代入はできず、新しい状態は必ず検証を通る（上の行）。入れ子のインスタンスを再検証しても、毎回コストがかかるだけ |
+| strict モード | [Pydantic: Strict mode](https://pydantic.dev/docs/validation/latest/concepts/strict_mode/)、[Colvin: Pydantic V2 Plan](https://pydantic.dev/articles/pydantic-v2) | lax（`"123"` → int、ISO 文字列 → datetime） | 従わない（理由は下） |
+| after の model_validator はインスタンスメソッド、before / wrap は classmethod | [Pydantic: Validators](https://pydantic.dev/docs/validation/latest/concepts/validators/) | そのとおり | 既に OK |
+| 制約は `Field(...)` で書く（`constr` / `conint` は使わない） | [Pydantic: Fields](https://pydantic.dev/docs/validation/latest/concepts/fields/) | `x: str = Field(min_length=...)` | 既に OK（`Annotated[...]` 形式も意味は同じ。差分が増えるだけなので変えない） |
+| Decimal は `max_digits` / `decimal_places`、日時は `AwareDatetime`、float は使わない | [Pydantic: Standard library types](https://pydantic.dev/docs/validation/latest/api/standard_library_types/) | そのとおり（`Integer / Integer` も Decimal） | 既に OK |
+| 例外の連鎖を残す（`raise ... from exc`） | [Python tutorial: Exception chaining](https://docs.python.org/3/tutorial/errors.html#exception-chaining) | `ConstraintViolation` を `from None` で送出し、`ValidationError` の traceback を捨てていた | **従う**: `from exc`。`details["errors"]` は `errors(include_url=False)` |
+| 共用体はタグ（discriminator）付きにする | [Pydantic: Unions](https://pydantic.dev/docs/validation/latest/concepts/unions/)、[Pydantic: Performance](https://pydantic.dev/docs/validation/latest/concepts/performance/) | イベントにタグがなく、保存したイベント（outbox など）からクラスを復元できなかった | **従う**: 各イベントに `event_type: Literal["<Context>.<Event>"]`（TypeScript の `type` と同じ値）を持たせ、events.py に `AnyEvent`（タグ付き共用体）と `parse_event()` を置く。タグなしの共用体はここでは正しく動かない。生成コードは制約違反を `ConstraintViolation`（`ValueError` ではない）として送出するので、Pydantic は最初の候補で止まってしまう |
+| `TypeAdapter` は一度だけ作る | [Pydantic: Performance](https://pydantic.dev/docs/validation/latest/concepts/performance/) | — | **従う**（`_EVENTS: Final[TypeAdapter[AnyEvent]]` をモジュールに1つ） |
+| `str` を混ぜた Enum ではなく `StrEnum`（3.11+） | [Python: enum.StrEnum](https://docs.python.org/3/library/enum.html#enum.StrEnum)、[ruff UP042](https://docs.astral.sh/ruff/rules/replace-str-enum/)、[Wojcik: Python 3.11 str Enum breaking change](https://tomwojcik.com/posts/2023-01-02/python-311-str-enum-breaking-change/) | `class X(str, Enum)` | **従う**: `str(member)` と f-string が値そのものになる（3.11 で `format()` の結果が変わった問題も避けられる） |
+| `datetime.UTC`（3.11+） | [Python: datetime.UTC](https://docs.python.org/3/library/datetime.html#datetime.UTC)、[ruff UP017](https://docs.astral.sh/ruff/rules/datetime-timezone-utc/) | `timezone.utc` | **従う** |
+| 定数に `Final`、型の別名に `TypeAlias` | [typing spec: Final](https://typing.python.org/en/latest/spec/qualifiers.html#final)、[typing: Best practices](https://typing.python.org/en/latest/reference/best_practices.html) | `ALL_ERRORS` と `RULES` は注釈なし、`EventHandler = Callable[...]` | **従う** |
+| PEP 695 の型引数と `type` 文 | [PEP 695](https://peps.python.org/pep-0695/) | `TypeVar` + `Generic` | 従わない: 対象は Python 3.11+（docs/05 §4）。3.11 の保守は 2027-10 まで続く |
+| Pydantic が要らない値は `@dataclass(frozen=True, slots=True)` | [Python: dataclasses](https://docs.python.org/3/library/dataclasses.html)、[cosmicpython ch.8](https://www.cosmicpython.com/book/chapter_08_events_and_message_bus.html) | `Transition`・`StateGuard`・`Rule`・`RecordedResult` は frozen の dataclass（slots なし） | **従う**（`slots=True`） |
+| ポートは `Protocol`、引数は `collections.abc` の抽象型 | [typing: Best practices](https://typing.python.org/en/latest/reference/best_practices.html)、[Hynek: Subclassing in Python Redux](https://hynek.me/articles/python-subclassing-redux/) | Protocol と `Sequence` / `Mapping` | 既に OK。policy の `event_type` だけ注釈がなかったので `ClassVar[type[X]]` を付けた |
+| 公開する名前を `__all__` で示す | [typing spec: Import conventions](https://typing.python.org/en/latest/spec/distributing.html#import-conventions) | なし | **従う**: 生成モジュールごとに `__all__`（ruff RUF022 の順）。テストと顧客所有の雛形には付けない |
+| パッケージに `py.typed` を置く | [typing: Libraries](https://typing.python.org/en/latest/guides/libraries.html)、[PEP 561](https://peps.python.org/pep-0561/) | なし | **従う**: `src/<package>/py.typed` を雛形（顧客所有、初回だけ作る）にした |
+| mypy は `--strict` と Pydantic プラグイン（`init_typed` / `init_forbid_extra`） | [Pydantic: mypy](https://pydantic.dev/docs/validation/latest/integrations/dev-tools/mypy/) | strict のみ | **従う**: 例の `pyproject.toml` に設定した。生成器のテストは全モデルをこの設定で検査する |
+| ポートは同期か非同期か | 公式の指針なし（参考: [Seemann: Functional architecture is Ports and Adapters](https://blog.ploeh.dk/2016/03/18/functional-architecture-is-ports-and-adapters/)） | 同期の Protocol | 従わない（理由は下） |
+| 予期された業務上の拒否は、例外でなく結果の値で返す | [Wlaschin: Against Railway-Oriented Programming](https://fsharpforfunandprofit.com/posts/against-railway-oriented-programming/) | Domain Error を送出 | 従わない（理由は下） |
+| テストダブルはモックでなくフェイク（契約を守る実装）にする | [cosmicpython ch.3](https://www.cosmicpython.com/book/chapter_03_abstractions.html)、[Seemann: Fakes are Test Doubles with contracts](https://blog.ploeh.dk/2023/11/13/fakes-are-test-doubles-with-contracts/)、[Hynek: "Don't Mock What You Don't Own" in 5 Minutes](https://hynek.me/articles/what-to-mock-in-5-mins/) | `testing.py` の In-memory 実装（UoW と連動する） | 既に OK |
+| 1トランザクションで変える Aggregate は1つ、他の Aggregate は識別子で参照し、イベントはコミット後に公開する | [Vernon: Effective Aggregate Design](https://www.dddcommunity.org/library/vernon_2011/)、[Fowler: DDD_Aggregate](https://martinfowler.com/bliki/DDD_Aggregate.html) | `Ref<…>` は UUID、`publish_after_commit` | 既に OK |
+| pytest: 例外は型だけでなく内容まで確かめる。`== True` ではなく `is True` | [pytest: assert](https://docs.pytest.org/en/stable/how-to/assert.html)、[ruff E712](https://docs.astral.sh/ruff/rules/true-false-comparison/) | `details["rule"]` まで確かめていた。戻り値は `== True` | **従う**（`is True` / `is False` / `is None`） |
+| ruff の lint と format を通る | [ruff: rules](https://docs.astral.sh/ruff/rules/)、[ruff: formatter](https://docs.astral.sh/ruff/formatter/) | ruff check で 49 件（F401 未使用の import、I001 import の順、RET501 `return None`、SIM201/208 の否定、C419 any/all のリスト、RET505、E712、UP017/042）、ruff format で 32 ファイルに差分 | **従う**（次節） |
+
+### ruff に合わせた出力
+
+- **規則**: 例の `pyproject.toml` に書いた。`target-version = "py311"`、`line-length = 100`、`select = E, W, F, I, UP, B, SIM, C4, PIE, RET, PT, RUF`。モデルの文章は日本語が多いので `RUF001`〜`RUF003`（全角の句読点）は除外した。
+- **テスト**: 生成器のテスト `generated Python is ruff-clean` は、ruff が見つかれば（例の venv、PATH、`uvx` の順に探す）全モデルの出力に `ruff check` と `ruff format --check` をかける。見つからなければ skip する。
+- **import と式**:
+  - import は ruff の isort と同じ順にした。モジュール名は大文字小文字を区別せずに並べ、名前は CONSTANT → Class → その他の順。
+  - 否定は最も簡単な形にする。`not a == b` は `a != b`、`not is_empty(x)` は `len(x) != 0`、`not x == null` は `x is not None`、比較の否定は `not (a <= b)`。
+  - `any` / `all` は短絡するジェネレータ式にした。
+  - `_check_transition_invariants` の本体が空のときは docstring だけを書く。
+  - `if` の分岐が `return` / `raise` で終わるときは `else:` を書かない。
+- **折り返し**（ruff format、つまり Black スタイルと同じ規則）:
+  - 文の値は、最も結合の弱い演算子の前で折る。その演算子が1つだけで、最初の項が括弧で始まる（または最後の項が括弧で終わる）なら、その括弧を開く。それ以外は値全体を括弧でくくる。
+  - 代入は値だけを折り、注釈は折らない。
+  - 1行に括弧が複数あれば、「次の括弧まで収まらない最初の括弧」を開く。関数定義は引数の括弧を開く。
+  - 内包表記は `for` / `if` の前で折る。
+  - 1行に収まらない docstring は、閉じ引用符が単独の行に残るように2行にする。
+  - 文字列に `"` があって `'` がなければ単一引用符を使う。
+  - 条件をタプルにしない規則（§10）は変えていない。
+
+### 意図的に従わない項目
+
+- **strict モード**: 生成モデルは JSON やデータベースの行からも作られる（`parse_event(event.model_dump(mode="json"))`、Repository での復元）。strict は Python の入力について、`tuple` にリストを、`UUID` / `datetime` / Enum に文字列を受け付けない（確認済み）。境界ごとに変換を書かせることになるので採らない。型の取り違えは、mypy の `init_typed` で静的に見つける。
+- **PEP 695**: 上の表のとおり、対象が 3.11+ だから。最低版を 3.12 に上げるときに切り替える。
+- **非同期のポート**: Python の生成物は同期の `Protocol` のまま（TypeScript は `Awaitable`）。非同期にすると Use case・テストダブル・生成テストがすべて `async` になる破壊的変更で、同期のアプリには余計な負担になる。必要になったら生成の選択肢として足す。
+- **Result 型**: 業務上の拒否も Domain Error として送出する。Python の慣習（cosmicpython も例外を使う）と、HTTP などへの変換を1か所にまとめられることを優先した。ただし cosmicpython の指摘どおり、同じ事実をイベントと例外の両方で表すことはしない（イベントは遷移の結果だけ）。
+- **`validate_call` による操作の引数の検証**: 引数は候補状態を作るとき（`_replace`）に検証されるので、二重になる。naive な datetime を渡すとガードの比較で `TypeError` になりうるが、Clock ポートの契約（aware な datetime を返す）で防ぐ。
+
+### 識者の見解と生成器の選択
+
+- **ドメインに Pydantic を使うか**:
+  - 反対の立場: Hynek Schlawack（[attrs: Why not…](https://www.attrs.org/en/latest/why.html)）は「信頼できるデータベースから読むたびに再検証が要るのか」「Web API の形がドメインの設計を左右してよいのか」と問い、Pydantic は Command に使い、ドメインは attrs / dataclass で書くべきだとする（ORM のモデルについても、使いたい API を持つ自前のモデルを先に書けと勧める: [Know Your Models](https://hynek.me/articles/know-your-models/)）。cosmicpython（[Appendix: Validation](https://www.cosmicpython.com/book/appendix_validation.html)）もドメインは素の Python で書き、構文の検証は境界で行う。
+  - 賛成の根拠: Alexis King（[Parse, don't validate](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/)）と Scott Wlaschin（[Making illegal states unrepresentable](https://fsharpforfunandprofit.com/posts/designing-with-types-making-illegal-states-unrepresentable/)）は、不正な状態を作れない型を求める。
+  - 生成器の選択: Pydantic のモデルをドメインに使い続ける。生成器はモデルから決定的にコードを作るので、手書きの境界変換に頼らず、構築・検証・コピーのどの経路でも不正な状態を作れないことを保証したい。
+  - 懸念への対処: 再検証のコストは、frozen と `revalidate_instances="never"`（入れ子のインスタンスを再検証しない）で抑える。API の形が設計に及ぼす影響は、生成物を DTO として扱わないことで避ける（ドメインのフィールドはモデルが決め、Web 層は別に変換する）。今回の `model_copy` の修正は、この選択の前提（どの経路でも検証される）を守るためのもの。
+- **状態を型で分けるか**: Wlaschin は状態ごとに別の型（タグ付き共用体）を勧める。生成器は、モデルの DSL の書き方に合わせて状態を Enum・Invariant・State guard で表す。Invariant はすべての構築で評価されるので、不正な状態を作れない点は同じ。足りないのは型による網羅性の検査だけ。
+- **イベント**: Fowler（[Domain Event](https://martinfowler.com/eaaDev/DomainEvent.html)）と cosmicpython は不変のイベントを勧める（生成物は frozen）。cosmicpython はイベントを Aggregate の `events` リストに溜めるが、生成器では操作が `Transition`（新しい状態とイベント）を返す純粋な形にした。Seemann の「ポートは I/O、中心は純粋な関数」と同じ考え方。

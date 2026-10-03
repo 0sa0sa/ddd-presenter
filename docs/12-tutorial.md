@@ -166,17 +166,27 @@ operations:
 
    ```sh
    cd ~/work/staff
-   uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydantic>=2.6,<3" pytest mypy
+   uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydantic>=2.6,<3" pytest mypy ruff
    cat > pyproject.toml <<'EOF'
    [tool.pytest.ini_options]
    pythonpath = ["src"]
    [tool.mypy]
    strict = true
    mypy_path = "src"
+   plugins = ["pydantic.mypy"]
+   [tool.pydantic-mypy]
+   init_forbid_extra = true
+   init_typed = true
+   [tool.ruff]
+   target-version = "py311"
+   line-length = 100
    EOF
    .venv/bin/python -m pytest -q
    .venv/bin/mypy src tests
+   .venv/bin/ruff check . && .venv/bin/ruff format --check .
    ```
+
+   生成コードは ruff の lint と format をそのまま通る。例と同じ規則を使うなら、`examples/cleaning-platform/pyproject.toml` の `[tool.ruff.lint]` を写す。
 
 4. 生成物を読む。
    - `src/<package>/generated/<context>/domain/aggregates.py` — ルールが `_invariant_…` や State guard のメソッドとして確かめられている
