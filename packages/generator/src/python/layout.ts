@@ -214,6 +214,12 @@ function wrapLine(line: string, max: number): string[] {
   const inner = indent + "    ";
   const rewrap = (lines: string[]) => lines.flatMap((l) => wrapLine(l, max));
 
+  // A trailing comment must not end up inside the brackets: move it to its own line above the code.
+  const hash = topLevel(line, "#").find((i) => i > indent.length && /\s/.test(line[i - 1]!));
+  if (hash !== undefined) {
+    return [...wrapComment(`${indent}${line.slice(hash)}`, max), ...wrapLine(line.slice(0, hash).trimEnd(), max)];
+  }
+
   // A boolean value outside any bracket: put it in grouping parentheses, one operand per line.
   const m = STATEMENT.exec(line.slice(indent.length));
   if (m) {

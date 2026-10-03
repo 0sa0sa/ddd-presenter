@@ -386,6 +386,30 @@ describe("line wrapping (regression: a grouping parenthesis must never become a 
     expect(tupleConditions(ret)).toEqual([]);
   });
 
+  test("a trailing comment moves above the code instead of into the wrapped brackets", () => {
+    const out = wrapLongLines("    assert len(use_case_0.commands) == number_of_samples_for_this_event_type or strict_mode_is_on_for_this_run  # samples and retries or replays reach it");
+    expect(out).toBe(
+      [
+        "    # samples and retries or replays reach it",
+        "    assert (",
+        "        len(use_case_0.commands) == number_of_samples_for_this_event_type",
+        "        or strict_mode_is_on_for_this_run",
+        "    )",
+      ].join("\n"),
+    );
+  });
+
+  test.skipIf(!existsSync(VENV))("the Python ast check reports a tuple condition (it is not a no-op)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-ast-"));
+    try {
+      writeFileSync(join(dir, "bad.py"), "def f(a: object, b: object) -> None:\n    if not (\n        a is None or b,\n    ):\n        raise ValueError()\n");
+      const r = Bun.spawnSync([VENV, "-c", NO_TUPLE_CONDITIONS, dir]);
+      expect(r.stdout.toString()).toContain("bad.py:2: condition is a tuple (always true)");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a single generator-expression argument gets no trailing comma (that would be a SyntaxError)", () => {
     const out = wrapLongLines("        self._event_publisher.publish(tuple(event for event in emitted if isinstance(event, SomeRatherLongEventName)))");
     expect(out.split("\n").length).toBeGreaterThan(1);
