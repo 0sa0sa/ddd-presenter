@@ -9,6 +9,7 @@ contexts:
       - { name: InvalidOrder, code: invalid_order, message: invalid order }
       - { name: OrderClosed, code: order_closed, message: order is closed }
       - { name: OrderNotFound, code: order_not_found, message: not found }
+      - { name: CustomerNameMissing, code: customer_name_missing, message: a customer needs a name }
       - name: CreditRejected
         code: credit_rejected
         message: credit rejected
@@ -33,6 +34,11 @@ contexts:
         fields:
           - { name: id, type: UUID }
           - { name: name, type: String }
+        factories:
+          - name: register
+            parameters: [{ name: id, type: UUID }, { name: name, type: String }]
+            fields: { id: id, name: name }
+            emits: [{ name: CustomerRegistered, fields: [id, name] }]
       - name: Order
         identity: id
         fields:
@@ -173,6 +179,7 @@ contexts:
       - name: ping_order
         command: PingOrder
         transaction: none
+        idempotency_key: order_id
         input: [{ name: order_id, type: UUID }]
         steps:
           - load: { aggregate: Order, by: order_id, as: order }
@@ -190,3 +197,30 @@ contexts:
           - name: missing_order_uses_generic_not_found
             when: { input: { order_id: "00000000-0000-0000-0000-000000000009" } }
             then: { raises: AggregateNotFound }
+      - name: register_customer
+        description: Idempotent (a retried request returns the first result) and declared as retried by the caller
+        command: RegisterCustomer
+        idempotency_key: request_id
+        retry: true
+        input:
+          - { name: request_id, type: UUID }
+          - { name: name, type: String }
+        steps:
+          - if:
+              condition: 'name == ""'
+              then: [{ fail: CustomerNameMissing }]
+          - create: { aggregate: Customer, factory: register, as: customer, args: { id: ids.new, name: name } }
+          - save: customer
+          - publish_after_commit: CustomerRegistered
+          - return: customer.id
+        scenarios:
+          - name: customer_is_registered_once_per_request
+            given:
+              ids: ["00000000-0000-0000-0000-0000000000c9"]
+            when: { input: { request_id: "00000000-0000-0000-0000-00000000aaaa", name: Ada } }
+            then:
+              returns: "00000000-0000-0000-0000-0000000000c9"
+              emits: [{ event: CustomerRegistered, fields: { name: Ada } }]
+          - name: a_failed_request_is_not_recorded
+            when: { input: { request_id: "00000000-0000-0000-0000-00000000aaaa", name: "" } }
+            then: { raises: CustomerNameMissing }

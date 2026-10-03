@@ -1115,13 +1115,23 @@ class ContextValidator {
     this.checkSnake(uc.name, "Use case name", [...uc.path, "name"], el);
     const inputTypes = this.checkFields(uc.command, uc.input, { element: el });
     for (const name of this.brokenFields.get(uc.command) ?? []) this.markBroken(this.brokenNames, el, name);
-    if (uc.idempotencyKey && !inputTypes.has(uc.idempotencyKey)) {
-      this.bag.error("unknown-field", `idempotency_key "${uc.idempotencyKey}" is not an input field`, [...uc.path, "idempotency_key"], { element: el });
+    if (uc.idempotencyKey) {
+      const kt = inputTypes.get(uc.idempotencyKey);
+      if (!kt && !this.brokenFields.get(uc.command)?.has(uc.idempotencyKey)) {
+        this.bag.error("unknown-field", `idempotency_key "${uc.idempotencyKey}" is not an input field`, [...uc.path, "idempotency_key"], { element: el });
+      } else if (kt && !(kt.k === "ref" || (kt.k === "primitive" && ["String", "UUID", "Integer"].includes(kt.name)))) {
+        // The generated use case stores results under str(<key>); only scalar keys have a stable text form.
+        this.bag.error("invalid-idempotency-key", `idempotency_key "${uc.idempotencyKey}" must be a required String, UUID, Integer or Ref input, got ${typeToString(kt)}`, [...uc.path, "idempotency_key"], {
+          element: el,
+          hint: "Add a request id input (e.g. request_id: UUID) that the caller repeats when it retries",
+        });
+      }
     }
     if (uc.retry && !uc.idempotencyKey) {
-      this.bag.warning("missing-idempotency-key", `Use case ${uc.name} may be retried but declares no idempotency_key`, [...uc.path, "retry"], {
+      // retry: true declares that callers re-send the same command; without a key every retry would run again.
+      this.bag.error("missing-idempotency-key", `Use case ${uc.name} may be retried but declares no idempotency_key`, [...uc.path, "retry"], {
         element: el,
-        hint: "Retries without an idempotency key can apply the same change twice",
+        hint: "Add an input the caller repeats on retry (e.g. request_id: UUID) and name it in idempotency_key",
       });
     }
     if (uc.steps.length === 0) this.bag.warning("empty-use-case", `Use case ${uc.name} has no steps`, [...uc.path, "steps"], { element: el });

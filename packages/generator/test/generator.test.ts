@@ -420,3 +420,27 @@ describe("line wrapping (regression: a grouping parenthesis must never become a 
     );
   });
 });
+
+describe("idempotency_key", () => {
+  const out = generate(KITCHEN_SINK);
+  const file = (suffix: string) => out.files.find((f) => f.path.endsWith(suffix))!.content;
+
+  test("the use case returns the recorded result for a known key and records successful runs before commit", () => {
+    const py = file("ordering/application/use_cases.py");
+    const body = py.slice(py.indexOf("class RegisterCustomerUseCase"), py.indexOf("def _run", py.indexOf("class RegisterCustomerUseCase")));
+    expect(body).toContain("idempotency_store: IdempotencyStore,");
+    expect(body).toContain('        key = str(command.request_id)\n        recorded = self._idempotency_store.get("register_customer", key)\n        if recorded is not None:\n            return cast(UUID, recorded.value)');
+    expect(body.indexOf("self._idempotency_store.record(")).toBeLessThan(body.indexOf("self._unit_of_work.commit()"));
+    expect(body.indexOf("self._idempotency_store.record(")).toBeGreaterThan(body.indexOf("result = self._run(command, after_commit)"));
+  });
+
+  test("ports, test doubles and generated tests exist only where a use case is idempotent", () => {
+    expect(file("ordering/application/ports.py")).toContain("class IdempotencyStore(Protocol):");
+    expect(file("ordering/testing.py")).toContain("class InMemoryIdempotencyStore:");
+    const t = file("tests/generated/test_ordering_register_customer.py");
+    expect(t).toContain("assert use_case.execute(command) == result");
+    expect(t).toContain('assert idempotency_store.get("register_customer", str(command.request_id)) is None');
+    const sample = generate();
+    expect(sample.files.some((f) => f.content.includes("IdempotencyStore"))).toBe(false);
+  });
+});

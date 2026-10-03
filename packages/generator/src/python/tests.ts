@@ -103,6 +103,44 @@ export function testingFile(L: Layout): PyFile {
     });
   }
 
+  if (L.ca.ir.useCases.some((u) => u.idempotencyKey)) {
+    imp.from(L.ports, "RecordedResult");
+    c.line().line();
+    c.line("class InMemoryIdempotencyStore:");
+    c.indent(() => {
+      c.docstring("In-memory IdempotencyStore. Records are staged until the unit of work commits, like the repositories.");
+      c.line();
+      c.line("def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:");
+      c.indent(() => {
+        c.line("self._committed: dict[tuple[str, str], RecordedResult] = {}");
+        c.line("self._pending: dict[tuple[str, str], RecordedResult] = {}");
+        c.line("self._unit_of_work = unit_of_work");
+        c.line("if unit_of_work is not None:");
+        c.indent(() => c.line("unit_of_work.enlist(self)"));
+      });
+      c.line();
+      c.line("def get(self, use_case: str, key: str) -> RecordedResult | None:");
+      c.indent(() => c.line("return self._pending.get((use_case, key), self._committed.get((use_case, key)))"));
+      c.line();
+      c.line("def record(self, use_case: str, key: str, result: RecordedResult) -> None:");
+      c.indent(() => {
+        c.line("if self._unit_of_work is None:");
+        c.indent(() => c.line("self._committed[(use_case, key)] = result"));
+        c.line("else:");
+        c.indent(() => c.line("self._pending[(use_case, key)] = result"));
+      });
+      c.line();
+      c.line("def _commit(self) -> None:");
+      c.indent(() => {
+        c.line("self._committed.update(self._pending)");
+        c.line("self._pending.clear()");
+      });
+      c.line();
+      c.line("def _rollback(self) -> None:");
+      c.indent(() => c.line("self._pending.clear()"));
+    });
+  }
+
   c.line().line();
   c.line("class FixedClock:");
   c.indent(() => {
@@ -347,6 +385,10 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       imp.from(L.testing, "CapturingEventPublisher");
       c.line("event_publisher = CapturingEventPublisher()");
     }
+    if (deps.idempotency) {
+      imp.from(L.testing, "InMemoryIdempotencyStore");
+      c.line(`idempotency_store = InMemoryIdempotencyStore(${deps.uow ? "unit_of_work" : ""})`);
+    }
     const params = depParams(deps);
     c.line(`use_case = ${cls}(${params.map((p) => `${p.name}=${p.name}`).join(", ")})`);
     const cmd = construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx);
@@ -380,6 +422,19 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
     if (then.emits) {
       if (deps.publisher) eventAsserts(L, c, "event_publisher.published", then, imp, vctx);
       else c.line(`# ${uc.name} publishes no events`);
+    }
+    if (uc.idempotencyKey) {
+      const recorded = `idempotency_store.get(${pyString(uc.name)}, str(command.${uc.idempotencyKey}))`;
+      if (then.raises) {
+        c.line("# A failed run is not recorded, so a retry with the same key runs again.");
+        c.line(`assert ${recorded} is None`);
+      } else {
+        c.line("# Idempotency: the same command again returns the recorded result and runs no step.");
+        c.line(`assert ${recorded} is not None`);
+        if (deps.publisher) c.line("published = len(event_publisher.published)");
+        c.line(info.returnType ? "assert use_case.execute(command) == result" : "use_case.execute(command)");
+        if (deps.publisher) c.line("assert len(event_publisher.published) == published");
+      }
     }
   });
 }

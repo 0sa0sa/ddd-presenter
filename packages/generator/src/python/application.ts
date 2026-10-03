@@ -1,7 +1,7 @@
 import { formatPath, resolveType, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { Code, emitExpr, pascal, pyType, toSnake, type ExprContext, type Imports } from "./support.ts";
+import { Code, emitExpr, pascal, pyString, pyType, toSnake, type ExprContext, type Imports } from "./support.ts";
 
 export function repoAttr(aggregate: string): string {
   return `${toSnake(aggregate)}_repository`;
@@ -52,6 +52,32 @@ export function portsFile(L: Layout): PyFile {
     c.line();
     c.line("def publish(self, events: Sequence[DomainEvent]) -> None: ...");
   });
+  if (L.ca.ir.useCases.some((u) => u.idempotencyKey)) {
+    imp.from("dataclasses", "dataclass");
+    c.line().line();
+    c.line("@dataclass(frozen=True)");
+    c.line("class RecordedResult:");
+    c.indent(() => {
+      c.docstring("What an idempotent use case returned for one idempotency key.");
+      c.line();
+      c.line("value: object");
+    });
+    c.line().line();
+    c.line("class IdempotencyStore(Protocol):");
+    c.indent(() => {
+      c.docstring(
+        [
+          "Results of idempotent use cases by key: a repeated command returns the first result instead of running again.",
+          "",
+          "record() is called inside the use case's transaction, before commit. Store the record in the same transaction as the aggregates, so a rolled-back run leaves none, and make (use_case, key) unique so that two concurrent runs with the same key cannot both commit. Only successful runs are recorded; a failed one may be retried.",
+        ].join("\n"),
+      );
+      c.line();
+      c.line("def get(self, use_case: str, key: str) -> RecordedResult | None: ...");
+      c.line();
+      c.line("def record(self, use_case: str, key: str, result: RecordedResult) -> None: ...");
+    });
+  }
   c.line().line();
   c.line("class UnitOfWork(Protocol):");
   c.indent(() => {
@@ -98,6 +124,8 @@ interface Deps {
   extensions: boolean;
   publisher: boolean;
   uow: boolean;
+  /** The use case declares an idempotency_key. */
+  idempotency: boolean;
 }
 
 export function useCaseDeps(L: Layout, uc: UseCaseIR): Deps {
@@ -109,6 +137,7 @@ export function useCaseDeps(L: Layout, uc: UseCaseIR): Deps {
     extensions: info.extensions.length > 0,
     publisher: info.publishes.length > 0,
     uow: uc.transaction === "required",
+    idempotency: !!uc.idempotencyKey,
   };
 }
 
@@ -120,6 +149,7 @@ export function depParams(d: Deps): { name: string; type: string }[] {
   if (d.extensions) out.push({ name: "extensions", type: "Extensions" });
   if (d.publisher) out.push({ name: "event_publisher", type: "EventPublisher" });
   if (d.uow) out.push({ name: "unit_of_work", type: "UnitOfWork" });
+  if (d.idempotency) out.push({ name: "idempotency_store", type: "IdempotencyStore" });
   return out;
 }
 
@@ -191,7 +221,8 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
     const d = [uc.description ?? `Use case ${uc.name}.`, ""];
     if (uc.actor) d.push(`Actor: ${uc.actor}`);
     d.push(`Transaction: ${uc.transaction}`);
-    if (uc.idempotencyKey) d.push(`Idempotency key: ${uc.idempotencyKey}`);
+    if (uc.idempotencyKey) d.push(`Idempotency key: ${uc.idempotencyKey} (a repeated key returns the recorded result)`);
+    if (uc.retry) d.push("Retried by callers: safe, because a retry with the same key does not run the steps again.");
     d.push("", "Steps:", ...describeSteps(uc.steps));
     c.docstring(d.join("\n"));
     c.line();
@@ -203,17 +234,42 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
     c.line();
     c.line(`def execute(self, command: ${uc.command}) -> ${ret}:`);
     c.indent(() => {
-      c.docstring(
+      const doc = [
         deps.uow
           ? "Runs the steps in one transaction. Events marked publish_after_commit are published only after a successful commit."
           : "Runs the steps without a transaction boundary.",
-      );
+      ];
+      if (uc.idempotencyKey) {
+        doc.push(
+          "",
+          `Idempotent by command.${uc.idempotencyKey}: a key that already succeeded returns the recorded result without running the steps, saving or publishing again. Failed runs are not recorded.`,
+        );
+      }
+      c.docstring(doc.join("\n"));
+      const record = () => {
+        if (!uc.idempotencyKey) return;
+        imp.from(L.ports, "RecordedResult");
+        c.line(`self._idempotency_store.record(${pyString(uc.name)}, key, RecordedResult(value=${ret === "None" ? "None" : "result"}))`);
+      };
+      if (uc.idempotencyKey) {
+        c.line(`key = str(command.${uc.idempotencyKey})`);
+        c.line(`recorded = self._idempotency_store.get(${pyString(uc.name)}, key)`);
+        c.line("if recorded is not None:");
+        c.indent(() => {
+          if (ret === "None") c.line("return None");
+          else {
+            imp.from("typing", "cast");
+            c.line(`return cast(${ret}, recorded.value)`);
+          }
+        });
+      }
       c.line("after_commit: list[DomainEvent] = []");
       const call = `self._run(command, after_commit)`;
       if (deps.uow) {
         c.line("try:");
         c.indent(() => {
           c.line(ret === "None" ? call : `result = ${call}`);
+          record();
           c.line("self._unit_of_work.commit()");
         });
         c.line("except BaseException:");
@@ -223,6 +279,7 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
         });
       } else {
         c.line(ret === "None" ? call : `result = ${call}`);
+        record();
       }
       if (deps.publisher && info.publishes.length) {
         c.line("if after_commit:");

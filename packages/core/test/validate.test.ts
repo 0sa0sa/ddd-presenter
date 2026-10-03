@@ -254,9 +254,12 @@ ${steps}
     expect(codes(text)).toContain("missing-return");
   });
 
-  test("retry without idempotency key warns", () => {
+  test("retry needs an idempotency key, and the key must be a scalar input", () => {
     const text = withUseCase(`          - fail: Invalid`, "        retry: true");
-    expect(validateModelText(text).diagnostics.map((d) => d.code)).toContain("missing-idempotency-key");
+    expect(codes(text)).toContain("missing-idempotency-key");
+    expect(codes(withUseCase(`          - fail: Invalid`, "        retry: true\n        idempotency_key: order_id"))).toEqual([]);
+    const listKey = withUseCase(`          - fail: Invalid`, "        idempotency_key: order_id").replace("input: [{ name: order_id, type: UUID }]", 'input: [{ name: order_id, type: "List[UUID]" }]');
+    expect(codes(listKey)).toEqual(["invalid-idempotency-key"]);
   });
 });
 
