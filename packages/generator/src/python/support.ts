@@ -50,6 +50,49 @@ export class Imports {
 
 const STDLIB = new Set(["dataclasses", "datetime", "decimal", "enum", "typing", "uuid", "collections", "re", "abc"]);
 
+/** Maximum length of a generated line (code is wrapped in layout.ts, docstrings and comments here). */
+export const MAX_LINE = 100;
+
+/** Greedy word wrap; a single word longer than `width` stays on its own line. */
+export function wrapWords(text: string, width: number): string[] {
+  const out: string[] = [];
+  let cur = "";
+  for (const w of text.split(" ")) {
+    if (cur && cur.length + 1 + w.length > width) {
+      out.push(cur);
+      cur = w;
+    } else {
+      cur = cur ? `${cur} ${w}` : w;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * A docstring as indented lines, word-wrapped to MAX_LINE. Continuation lines keep the indentation of the line they
+ * continue (plus the width of a "1. " list marker), so step lists stay readable.
+ */
+export function docstringLines(text: string, pad: string, max = MAX_LINE): string[] {
+  const safe = text.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"');
+  const src = safe.split("\n");
+  const single = `${pad}"""${safe}"""`;
+  if (src.length === 1 && single.length <= max) return [single];
+  const out: string[] = [];
+  src.forEach((raw, i) => {
+    const lead = /^ */.exec(raw)![0];
+    const marker = /^\d+\. /.exec(raw.slice(lead.length))?.[0] ?? "";
+    const prefix = i === 0 ? `${pad}"""` : pad + lead;
+    const cont = pad + lead + " ".repeat(marker.length);
+    const words = raw.slice(lead.length);
+    const first = wrapWords(words, Math.max(20, max - prefix.length));
+    const rest = first.length > 1 ? wrapWords(first.slice(1).join(" "), Math.max(20, max - cont.length)) : [];
+    out.push(prefix + first[0], ...rest.map((l) => cont + l));
+  });
+  out.push(`${pad}"""`);
+  return out;
+}
+
 /** Indentation-aware line builder. */
 export class Code {
   private readonly lines: string[] = [];
@@ -74,12 +117,9 @@ export class Code {
 
   docstring(text: string | undefined): this {
     if (!text) return this;
-    const safe = text.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"');
-    const parts = safe.split("\n");
-    if (parts.length === 1) return this.line(`"""${parts[0]}"""`);
-    this.line(`"""${parts[0]}`);
-    for (const p of parts.slice(1)) this.line(p);
-    return this.line(`"""`);
+    const pad = "    ".repeat(this.depth);
+    for (const l of docstringLines(text, pad)) this.lines.push(l.trim() ? l : "");
+    return this;
   }
 
   toString(): string {

@@ -40,7 +40,9 @@ relationships: [...]                # コンテキストマップ（§9）
 | `List[T]` | `tuple[T, ...]` | 不変 |
 | `Ref[Aggregate]` | `UUID` | 別Aggregateは直接保持せずIDで参照 |
 
-`required: false` で省略可能（`T | None`, 既定 `None`）。`{ ... }` の中で `List[X]` を書くときは `type: "List[X]"` と引用符で囲む。
+`required: false` で省略可能（`T | None`, 既定 `None`）。`{ ... }` の中で `List[X]` を書くときは `type: "List[X]"` と引用符で囲む（囲まないと YAML はリストの始まりと読む。診断はその位置と、引用符で囲んだ書き方を示す）。
+
+YAML のアンカーとエイリアス（`&name` / `*name`）は使えるが、展開が合計50回を超えるとエラー `yaml-aliases` になる（巨大な展開でツールを止めないため）。モデルではふつう必要ない。
 
 制約 (`constraints`): `min_length` `max_length` `pattern`（String）、`min` `max`（数値）、`max_digits` `decimal_places`（Decimal）、`min_items` `max_items`（List）。違反は `ConstraintViolation` になる。
 
@@ -79,6 +81,8 @@ aggregates:
 
 `construct` を含むInvariantはすべてのインスタンス化（状態遷移の候補状態を含む）で評価される。`transition` だけのものは操作の候補状態に対して評価される。
 
+違反時のエラーには `details["rule"]` にInvariant名が入る。`construct` を含むInvariantについては、シナリオの値（`given` のAggregate、成功する `construct`、Use caseの入力など）を少しだけ変えて「そのルールだけが最初に破れる」値を探し、見つかれば `tests/generated/test_<context>_invariants.py` にそのオブジェクトを作るテストを生成する（エラーの型と `details["rule"]` の両方を確かめる）。見つからないとき（引数を使う式、Value Objectどうしの比較、制約上破れない式など）はテストを作らず、`ddd rules` では未検証のまま表示する。
+
 ### State guard
 
 ```yaml
@@ -100,7 +104,7 @@ factories:
     emits: [{ name: InvitationIssued, fields: [id, email] }]
 operations:
   - name: accept
-    parameters: [{ name: at, type: DateTime }]
+    parameters: [{ name: at, type: DateTime }]   # 内部Entity型の引数は警告（下記）
     require: [pending_until_expiry(at)]      # 操作が自動で assert_holds する
     changes: { status: accepted, accepted_at: at }   # 変更前の状態で評価
     emits:
@@ -111,13 +115,15 @@ operations:
 
 操作は `Transition[Aggregate]`（新しいAggregateと発生イベント）を返す。元のインスタンスは変わらない。
 
+内部Entity型（`OrderLine`、`List[OrderLine]` など）の引数を持つFactory / Operationは警告 `entity-parameter` になる。Commandの入力は値だけを運び、式でEntityを作ることもできないため、Use caseが渡せるのは読み込んだAggregateがすでに持つEntity（`order.lines` など）だけである。呼び出し側が新しい項目を渡すなら、その値（単純なフィールドかValue Object）を引数にする。そうでなければその操作は手書きコードからだけ呼ぶ。
+
 ## 4. Rule式
 
 | 要素 | 例 |
 |---|---|
 | フィールド・引数・Value Objectのフィールド | `expires_at`, `at`, `email.value` |
 | リテラル | `1`, `-1`, `1.5`, `"text"`, `true`, `null`, `[]`, `[1, 2]` |
-| Enum値 | `status == pending`（比較相手がEnumなら裸の名前で可）、`InvitationStatus.pending` |
+| Enum値 | `status == pending`（比較相手がEnumなら裸の名前で可）、`InvitationStatus.pending`（常にEnum値を指す） |
 | 比較 | `==` `!=` `<` `<=` `>` `>=`（連鎖比較は不可） |
 | 算術 | `+` `-` `*` `/`、単項 `-`、括弧（→ 4.1） |
 | 論理 | `and` `or` `not`、括弧 |
@@ -130,6 +136,8 @@ operations:
 優先順位（弱い順）: `or` < `and` < `not` < 比較 < `+ -` < `* /` < 単項 `-` < `.`・呼び出し。
 
 使えないもの: 代入、Pythonコード、import、ラムダ、隠れた時計（`now`）、DB・HTTP・ファイル・環境変数。時刻は引数で渡す。
+
+裸の名前はフィールド・引数・入力が優先される。Enum値と同じ名前のフィールドがあると（`status == authorized` で、`authorized: Money` というフィールドもある）、`authorized` はフィールドを指し、型の不一致として報告される。このとき診断はその名前がフィールドに解決されたことを示すので、Enum値は `PaymentStatus.authorized` と書く（フィールド名を変えてもよい）。
 
 Use case の中だけで使えるもの: `clock.now`、`ids.new`、読み込んだAggregateのガード（`invitation.is_open`, `invitation.pending_until_expiry(clock.now)`）、Extension point の呼び出し。
 
@@ -222,7 +230,8 @@ extension_points:
   actor: スタッフ候補
   command: AcceptInvitation
   transaction: required            # required | none
-  idempotency_key: request_id      # retry: true のとき推奨
+  idempotency_key: request_id      # 同じキーの2回目は記録した結果を返す（下記）
+  retry: true                      # 呼び出し側が同じコマンドを再送しうる（idempotency_key が必須）
   input: [{ name: invitation_id, type: UUID }]
   steps:
     - load: { aggregate: CleaningStaffInvitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
@@ -241,7 +250,16 @@ extension_points:
 
 `let` の名前は Use case の中で一意（`as` と同じ。別の if の枝どうしでも重ねない）。`if` の枝の中で付けた名前はその枝の中だけで使える。Aggregate には付けられない（`load` / `create` の `as` を使う）。生成コードは型注釈付きの変数（`total: Decimal = ...`）。`command` `emitted` `after_commit` `self` は生成コードが使うので変数名にできない。
 
-検査: 未定義の変数（枝の外からの `let` の参照を含む）、保存されない変更、先に発生していないイベントの公開、到達できない手順、すべての経路で `return` しているか、複数Aggregateを1トランザクションで変更していないか。
+検査: 未定義の変数（枝の外からの `let` の参照を含む）、保存されない変更、先に発生していないイベントの公開、到達できない手順、すべての経路で `return` しているか、複数Aggregateを1トランザクションで変更していないか（数えるのは型ではなく変数。同じ型の2つのインスタンスを変更しても警告 `multi-aggregate-transaction` になる）。
+
+**冪等性（`idempotency_key`）:** 入力フィールド（必須の `String` / `UUID` / `Integer` / `Ref[...]`）を指定すると、生成されるUse caseは `IdempotencyStore` Port を受け取る。
+
+- 実行の最初に `str(command.<key>)` で記録を探し、あれば手順を実行せず（保存も公開もせず）記録した結果を返す。
+- 成功した実行の結果だけを記録する。`transaction: required` ではコミットの直前、同じトランザクションの中で記録するので、ロールバックされた実行は記録を残さない。失敗した実行は記録されないので、同じキーで再試行すると手順がもう一度動く。
+- Adapterは記録をAggregateと同じトランザクションに保存し、`(use_case, key)` を一意にする（同じキーの同時実行の片方がコミットに失敗するように）。テスト用には `testing.py` の `InMemoryIdempotencyStore` がある。
+- 生成テストは、成功するシナリオで同じコマンドをもう一度実行し、同じ結果が返り、イベントが増えないことを確かめる。失敗するシナリオでは記録がないことを確かめる。
+
+**`retry: true`:** 呼び出し側（キューの再配信、HTTPクライアントの再送など）が同じコマンドを送り直しうるという宣言。生成コードは再試行のループを持たない。再試行を安全にするのは `idempotency_key` なので、`retry: true` で `idempotency_key` がないとエラー `missing-idempotency-key` になる。
 
 ## 7. シナリオ（生成テスト）
 
@@ -274,6 +292,10 @@ scenarios:
 ```
 
 `then` が空のシナリオはエラー（期待結果が曖昧なものを成功扱いしない）。値はフィールドの型で検査される（UUID形式、タイムゾーン付き日時、Enum値など）。
+
+**どのルールを検証したことになるか（`ddd rules`）:** シナリオが書くのは期待するエラーの型だけなので、そのシナリオの経路でそのエラー型を送出しうるものが**そのルールただ一つ**のときだけ、そのルールのテストとして数える。経路とは、`construct` ならそのクラスと中に持てるValue Object / EntityのInvariant、Operation / Factoryなら `require` のガード・Aggregate自身のInvariant・引数のValue ObjectのInvariant、Use caseならすべての `create` / `invoke` の分に加えて `fail` 手順と `load` の `not_found`（指定がなければ `AggregateNotFound`）である。同じエラーを送出しうるものがほかにもあるシナリオは「not counted」として、競合するものと一緒に表示する（通っても、どのルールが働いたのかを示さないため）。ルールごとに専用のエラーを宣言すると、シナリオがそのまま検証として数えられる。これに加えて、上のInvariantの節で述べた導出テストもそのルールのテストとして数える。
+
+`ddd validate --strict` は警告を失敗として扱うのに加えて、どのテストも検証していないルール（`untested-rule`）、何も送出しないエラー（`unused-error`）、どのUse caseからも呼ばれないExtension point（`unused-extension-point`）を警告する（エディタでは表示しない）。
 
 ## 8. ポリシー（イベント → Use case）
 

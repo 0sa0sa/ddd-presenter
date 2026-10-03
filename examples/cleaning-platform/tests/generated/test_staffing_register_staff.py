@@ -24,7 +24,10 @@ def test_accepted_invitation_registers_staff() -> None:
 
     Given: nothing
     When: register_staff
-    Then: returns "00000000-0000-0000-0000-0000000000bb"; state [{"aggregate":"StaffMember","id":"00000000-0000-0000-0000-0000000000bb","fields":{"invitation_id":"00000000-0000-0000-0000-000000000001","joined_at":"2026-01-02T10:00:00+00:00"}}]; emits StaffRegistered
+    Then: returns "00000000-0000-0000-0000-0000000000bb"; state [{"aggregate": "StaffMember", "id":
+    "00000000-0000-0000-0000-0000000000bb", "fields": {"invitation_id":
+    "00000000-0000-0000-0000-000000000001", "joined_at": "2026-01-02T10:00:00+00:00"}}]; emits
+    StaffRegistered
     """
     unit_of_work = FakeUnitOfWork()
     staff_member_repository = InMemoryStaffMemberRepository(unit_of_work)

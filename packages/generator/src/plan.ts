@@ -21,6 +21,13 @@ export interface PlanEntry {
   reason?: string;
   /** Stale file whose content differs from what the generator wrote. */
   modified?: boolean;
+  /** Stale file under the generated tests directory (tests of code the model no longer produces). */
+  generatedTest?: boolean;
+  /**
+   * Stale generated test left exactly as the generator wrote it: deleted by `generate` without --prune, because it
+   * imports removed code and would only fail. Stale source modules are never deleted without --prune.
+   */
+  autoPrune?: boolean;
   before?: string;
   after?: string;
 }
@@ -35,6 +42,8 @@ export interface Plan {
   entries: PlanEntry[];
   conflicts: PlanEntry[];
   stale: PlanEntry[];
+  /** Stale generated tests edited by hand: they would fail to import, so `generate` refuses until resolved. */
+  staleEditedTests: PlanEntry[];
   breaking: BreakingChange[];
   changed: boolean;
 }
@@ -52,6 +61,7 @@ export function computePlan(
   options: { prune?: boolean; force?: boolean } = {},
 ): Plan {
   const entries: PlanEntry[] = [];
+  const testsPrefix = `${output.testsDir}/generated/`;
   const prevHashes = new Map(previous?.files.map((f) => [f.path, f.sha256]) ?? []);
   const newPaths = new Set(output.files.map((f) => f.path));
 
@@ -85,13 +95,21 @@ export function computePlan(
     const disk = read(p.path);
     if (disk === undefined) continue;
     const modified = hash(disk) !== p.sha256;
-    if (!options.prune || (modified && !options.force)) keptStale.push(p);
+    const generatedTest = p.path.startsWith(testsPrefix);
+    const autoPrune = generatedTest && !modified;
+    if (!autoPrune && (!options.prune || (modified && !options.force))) keptStale.push(p);
     entries.push({
       path: p.path,
       action: "stale",
       ownership: "generated",
-      reason: modified ? "no longer produced by the model (and edited by hand)" : "no longer produced by the model",
+      reason: autoPrune
+        ? "test of code the model no longer produces; deleted"
+        : modified
+          ? "no longer produced by the model (and edited by hand)"
+          : "no longer produced by the model",
       modified,
+      generatedTest,
+      autoPrune,
       before: disk,
     });
   }
@@ -114,6 +132,7 @@ export function computePlan(
     entries,
     conflicts: entries.filter((e) => e.action === "conflict"),
     stale: entries.filter((e) => e.action === "stale"),
+    staleEditedTests: entries.filter((e) => e.action === "stale" && e.generatedTest && e.modified && !(options.prune && options.force)),
     breaking,
     changed: entries.some((e) => e.action === "create" || e.action === "update" || e.action === "stale" || e.action === "conflict"),
   };
@@ -135,10 +154,40 @@ function detectBreaking(entries: PlanEntry[]): BreakingChange[] {
   return out;
 }
 
+/** Source lines with bracketed continuations joined, so wrapped signatures read as one line. */
+function logicalLines(src: string): string[] {
+  const out: string[] = [];
+  let buf: string | undefined;
+  let depth = 0;
+  let inDoc = false;
+  for (const line of src.split("\n")) {
+    const quotes = (line.match(/"""/g) ?? []).length;
+    if (buf === undefined && (inDoc || quotes > 0)) {
+      // Docstring text never takes part in bracket matching.
+      if (quotes % 2 === 1) inDoc = !inDoc;
+      out.push(line);
+      continue;
+    }
+    buf = buf === undefined ? line : `${buf} ${line.trim()}`;
+    for (const ch of line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, "")) {
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) depth--;
+    }
+    if (depth <= 0) {
+      // Normalize the wrapping itself away: "( a, b, )" and "(a, b)" are the same signature.
+      out.push(buf.replace(/([([{]) /g, "$1").replace(/,? ([)\]}])/g, "$1"));
+      buf = undefined;
+      depth = 0;
+    }
+  }
+  if (buf !== undefined) out.push(buf);
+  return out;
+}
+
 function symbols(src: string): Map<string, string> {
   const out = new Map<string, string>();
   let cls: string | undefined;
-  for (const line of src.split("\n")) {
+  for (const line of logicalLines(src)) {
     const c = /^class (\w+)/.exec(line);
     if (c) {
       cls = c[1];

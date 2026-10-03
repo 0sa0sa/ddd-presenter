@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkExpression, makeEnv, parseExpr, parseModel, ruleUsage, T, validateModelText, type ContextIR, type Type } from "../src/index.ts";
+import { checkExpression, coverageDiagnostics, deriveViolations, evaluateOnValues, makeEnv, parseExpr, parseModel, ruleUsage, T, validateModelText, type ContextIR, type Type } from "../src/index.ts";
 
 const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform/model.ddd.yaml"), "utf8");
 
@@ -254,9 +254,12 @@ ${steps}
     expect(codes(text)).toContain("missing-return");
   });
 
-  test("retry without idempotency key warns", () => {
+  test("retry needs an idempotency key, and the key must be a scalar input", () => {
     const text = withUseCase(`          - fail: Invalid`, "        retry: true");
-    expect(validateModelText(text).diagnostics.map((d) => d.code)).toContain("missing-idempotency-key");
+    expect(codes(text)).toContain("missing-idempotency-key");
+    expect(codes(withUseCase(`          - fail: Invalid`, "        retry: true\n        idempotency_key: order_id"))).toEqual([]);
+    const listKey = withUseCase(`          - fail: Invalid`, "        idempotency_key: order_id").replace("input: [{ name: order_id, type: UUID }]", 'input: [{ name: order_id, type: "List[UUID]" }]');
+    expect(codes(listKey)).toEqual(["invalid-idempotency-key"]);
   });
 });
 
@@ -353,5 +356,231 @@ describe("expressions", () => {
     expect(checkExpression("not is_empty(tags) and contains(tags, 'vip')", env(), T.Boolean).errors).toEqual([]);
     expect(checkExpression("contains(tags, 3)", env(), T.Boolean).errors.length).toBe(1);
     expect(checkExpression("length(total) > 1", env(), T.Boolean).errors.length).toBe(1);
+  });
+});
+
+describe("QA fixes (2026-10-03)", () => {
+  const twoOrders = (extraInput = "") =>
+    model(
+      `        operations:
+          - name: place
+            changes: { status: placed }`,
+    ) +
+    `    use_cases:
+      - name: place_both
+        command: PlaceBoth
+        transaction: required
+        input: [{ name: first_id, type: UUID }, { name: second_id, type: UUID }${extraInput}]
+        steps:
+          - load: { aggregate: Order, by: first_id, as: first, not_found: Invalid }
+          - load: { aggregate: Order, by: second_id, as: second, not_found: Invalid }
+          - invoke: { target: first, operation: place }
+          - invoke: { target: second, operation: place }
+          - save: first
+          - save: second
+`;
+
+  test("two instances of the same aggregate changed in one transaction are reported", () => {
+    const d = validateModelText(twoOrders()).diagnostics.find((x) => x.code === "multi-aggregate-transaction");
+    expect(d?.severity).toBe("warning");
+    expect(d?.message).toBe("Use case place_both changes several aggregates (first: Order, second: Order) in one transaction");
+    // One instance changed twice is still one aggregate.
+    const once = twoOrders().replace("          - invoke: { target: second, operation: place }\n", "          - invoke: { target: first, operation: place }\n").replace("          - save: second\n", "");
+    expect(validateModelText(once).diagnostics.map((x) => x.code)).not.toContain("multi-aggregate-transaction");
+  });
+
+  test("YAML that expands too many aliases is a positioned diagnostic, not a crash", () => {
+    const yaml = "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nd: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]\n";
+    const r = validateModelText(yaml);
+    expect(r.ok).toBe(false);
+    expect(r.diagnostics).toHaveLength(1);
+    expect(r.diagnostics[0]).toMatchObject({ severity: "error", code: "yaml-aliases", line: 2, column: 8, path: ["b", 0] });
+  });
+
+  test("an unquoted bracket in a flow map gets a precise hint and location", () => {
+    const text = model().replace("          - { name: total, type: Integer }", "          - { name: tags, type: List[String] }");
+    const ds = validateModelText(text).diagnostics;
+    expect(ds).toHaveLength(1); // the parser's follow-up errors on the same line are dropped
+    expect(ds[0]).toMatchObject({ code: "yaml-syntax", path: ["contexts", 0, "aggregates", 0, "fields", 2, "type"] });
+    expect(ds[0]!.hint).toBe('Write it quoted: type: "List[String]"');
+    expect(ds[0]!.line).toBeGreaterThan(0);
+  });
+
+  test("a field named like an enum value: the diagnostic names the shadowing and the qualified form", () => {
+    const text = model(
+      `        invariants:
+          - { name: r, expression: status == placed, error: Invalid }`,
+    ).replace("          - { name: note, type: String, required: false }", "          - { name: placed, type: Integer }");
+    const d = validateModelText(text).diagnostics.find((x) => x.severity === "error")!;
+    expect(d.message).toBe('Cannot compare Status with Integer: "placed" is the field placed (Integer), not the enum value Status.placed');
+    expect(d.hint).toContain("Write Status.placed for the enum value");
+    // The qualified form works end to end.
+    expect(codes(text.replace("status == placed", "status == Status.placed"))).toEqual([]);
+  });
+
+  test("a field whose type is wrong is reported once, not again where it is used", () => {
+    const text = model(
+      `        invariants:
+          - { name: r, expression: other != null, error: Invalid }
+        operations:
+          - name: relink
+            changes: { other: other }
+        scenarios:
+          - name: s
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", status: draft, total: 1, other: "00000000-0000-0000-0000-000000000002" }
+            then: { raises: Invalid }`,
+    ).replace("          - { name: note, type: String, required: false }", '          - { name: other, type: "Ref[Status]", required: false }');
+    const errors = validateModelText(text).diagnostics.filter((d) => d.severity === "error");
+    expect(errors.map((d) => d.code)).toEqual(["unknown-type"]);
+  });
+
+  test("entity-typed parameters are flagged: a use case can only pass entities it already holds", () => {
+    const text = model(
+      `        entities:
+          - name: Line
+            identity: line_id
+            fields: [{ name: line_id, type: Integer }]
+        operations:
+          - name: replace_lines
+            parameters: [{ name: lines, type: "List[Line]" }]
+            changes: { lines: lines }`,
+    ).replace("          - { name: note, type: String, required: false }", '          - { name: lines, type: "List[Line]" }');
+    const d = validateModelText(text).diagnostics.find((x) => x.code === "entity-parameter");
+    expect(d).toMatchObject({ severity: "warning", path: ["contexts", 0, "aggregates", 0, "operations", 0, "parameters", 0, "type"] });
+    expect(d!.message).toBe('Operation replace_lines takes entity List[Line] as "lines", which a use case cannot create');
+    // Passing the lines of a loaded aggregate is the one way a use case can call it.
+    const withUseCase =
+      text +
+      `    use_cases:
+      - name: copy_lines
+        command: CopyLines
+        input: [{ name: from_id, type: UUID }, { name: to_id, type: UUID }]
+        steps:
+          - load: { aggregate: Order, by: from_id, as: source, not_found: Invalid }
+          - load: { aggregate: Order, by: to_id, as: target, not_found: Invalid }
+          - invoke: { target: target, operation: replace_lines, args: { lines: source.lines } }
+          - save: target
+`;
+    expect(codes(withUseCase)).toEqual([]);
+  });
+});
+
+describe("rule coverage is credited only when it is sound (QA 2026-10-03)", () => {
+  const usageOf = (text: string) => {
+    const r = validateModelText(text);
+    if (!r.analysis) throw new Error(JSON.stringify(r.diagnostics));
+    return ruleUsage(r.analysis);
+  };
+
+  test("a scenario raising an error that two rules share counts for neither", () => {
+    const usage = usageOf(SAMPLE);
+    for (const rule of ["expiry_after_creation", "accepted_invitation_has_accepted_at"]) {
+      const u = usage.find((x) => x.rule === rule)!;
+      expect(u.scenarios).toEqual([]);
+      expect(u.ambiguous.map((a) => a.name)).toEqual(["invitation_window_must_be_positive", "past_expiry_is_rejected"]);
+    }
+    expect(usage.find((x) => x.rule === "expiry_after_creation")!.ambiguous[0]!.alsoRaisedBy).toEqual(["invariant accepted_invitation_has_accepted_at"]);
+    // Both are still covered, by tests built from violating values derived from the scenarios.
+    expect(usage.find((x) => x.rule === "expiry_after_creation")!.derived).toEqual({
+      test: "test_invariant_cleaning_staff_invitation_expiry_after_creation",
+      from: "email_is_normalized",
+      changed: ["expires_at"],
+    });
+    expect(usage.find((x) => x.rule === "accepted_invitation_has_accepted_at")!.tests).toEqual(["test_invariant_cleaning_staff_invitation_accepted_invitation_has_accepted_at"]);
+  });
+
+  test("with its own error, the same scenario counts for the rule it exercises", () => {
+    const text = SAMPLE.replace(
+      "            expression: status != accepted or accepted_at != null\n            error: InvalidInvitationWindow",
+      "            expression: status != accepted or accepted_at != null\n            error: InvitationNotDeliverable",
+    );
+    const u = usageOf(text).find((x) => x.rule === "expiry_after_creation")!;
+    expect(u.scenarios.map((s) => s.name)).toEqual(["invitation_window_must_be_positive", "past_expiry_is_rejected"]);
+    expect(u.ambiguous).toEqual([]);
+  });
+
+  test("a guard whose error a use case's fail step can raise too is ambiguous for that use case's scenarios", () => {
+    const withUseCase = (failStep: string) =>
+      model(
+        `        state_guards:
+          - { name: is_draft, expression: status == draft, error: Invalid }
+        operations:
+          - name: place
+            require: [is_draft]
+            changes: { status: placed }`,
+      ) +
+      `    use_cases:
+      - name: place_order
+        command: PlaceOrder
+        input: [{ name: order_id, type: UUID }]
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order }
+${failStep}          - invoke: { target: order, operation: place }
+          - save: order
+        scenarios:
+          - name: placed_order_cannot_be_placed_again
+            given:
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", status: placed, total: 1 } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001" } }
+            then: { raises: Invalid }
+`;
+    const plain = usageOf(withUseCase("")).find((x) => x.rule === "is_draft")!;
+    expect(plain.scenarios.map((s) => s.name)).toEqual(["placed_order_cannot_be_placed_again"]);
+    const withFail = usageOf(withUseCase("          - if: { condition: order.total > 100, then: [{ fail: Invalid }] }\n")).find((x) => x.rule === "is_draft")!;
+    expect(withFail.scenarios).toEqual([]);
+    expect(withFail.ambiguous).toEqual([expect.objectContaining({ name: "placed_order_cannot_be_placed_again", alsoRaisedBy: ["fail step in place_order"] })]);
+  });
+
+  test("violating values: found when a small change breaks only the target rule, absent when the rule cannot fail", () => {
+    const r = validateModelText(SAMPLE);
+    const d = deriveViolations(r.analysis!.contexts.get("CleaningStaff")!);
+    expect(d.map((x) => `${x.owner}.${x.rule}:${x.changed.join("+")}`)).toEqual([
+      "CleaningStaffInvitation.expiry_after_creation:expires_at",
+      "CleaningStaffInvitation.accepted_invitation_has_accepted_at:status",
+    ]);
+    expect(d[1]!.record).toMatchObject({ status: "accepted", email: { value: "staff@example.com" } }); // normalized like Python does
+    // total >= 0 can never fail for a field constrained to min: 0.
+    const never = model(
+      `        invariants:
+          - { name: non_negative, expression: total >= 0, error: Invalid }
+        scenarios:
+          - name: ok
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", status: draft, total: 1 }
+            then: { state: { total: 1 } }`,
+    ).replace("{ name: total, type: Integer }", "{ name: total, type: Integer, constraints: { min: 0 } }");
+    expect(deriveViolations(validateModelText(never).analysis!.contexts.get("Sales")!)).toEqual([]);
+  });
+
+  test("evaluation over scenario values follows Python semantics for the generated operators", () => {
+    const ctx: ContextIR = { name: "X", glossary: [], errors: [], enums: [{ name: "Status", values: ["draft", "placed"], path: [] }], valueObjects: [], aggregates: [], extensionPoints: [], useCases: [], policies: [], path: [] };
+    const fields = new Map<string, Type>([
+      ["status", { k: "enum", name: "Status" }],
+      ["total", T.Integer],
+      ["at", { k: "optional", inner: T.DateTime }],
+      ["tags", { k: "list", item: T.String }],
+    ]);
+    const e = (src: string) => checkExpression(src, makeEnv(ctx, { self: { name: "Order", fields } }), T.Boolean).expr!;
+    expect(evaluateOnValues(e("status == placed and total >= 1"), { status: "placed", total: 1 })).toBe(true);
+    expect(evaluateOnValues(e("at == null or at > at"), { at: null })).toBe(true);
+    expect(evaluateOnValues(e("not is_empty(tags) and contains(tags, 'vip')"), { tags: ["vip"] })).toBe(true);
+    expect(evaluateOnValues(e("at != null"), {})).toBe(false);
+    expect(evaluateOnValues(e("at != null and at > at"), { at: "2026-01-01T10:00:00+00:00" })).toBe(false);
+  });
+
+  test("strict coverage diagnostics: untested rules, unused errors, unused extension points", () => {
+    const r = validateModelText(SAMPLE);
+    expect(coverageDiagnostics(r.analysis!)).toEqual([]);
+    const text = SAMPLE.replace(
+      "      - name: EmailBlocked\n",
+      "      - name: NeverRaised\n        code: never_raised\n        message: never\n      - name: EmailBlocked\n",
+    ).replace(
+      "    extension_points:\n",
+      "    extension_points:\n      - { name: never_called, parameters: [], returns: Boolean, test_default: true }\n",
+    );
+    const ds = coverageDiagnostics(validateModelText(text).analysis!, parseModel(text).locate);
+    expect(ds.map((d) => d.code).sort()).toEqual(["unused-error", "unused-extension-point"]);
+    expect(ds.every((d) => d.severity === "warning" && (d.line ?? 0) > 0)).toBe(true);
   });
 });

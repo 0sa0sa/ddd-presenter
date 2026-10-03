@@ -6,6 +6,8 @@ const HELP = `ddd — DDD Presenter CLI (model-driven Python domain code)
 
 Usage:
   ddd validate [model] [--strict] [--format json]   Check the model; non-zero exit on errors
+                                                   (--strict: warnings fail too, plus untested rules,
+                                                   unused errors and unused extension points)
   ddd diff     [model] [--patch] [--check]          Show what generate would change (--check: fail if out of date)
   ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock]
   ddd rules    [model] [--format json]              Where each named rule is applied and tested
@@ -82,7 +84,12 @@ if (import.meta.main) {
   try {
     process.exit(run(process.argv.slice(2), io));
   } catch (e) {
-    console.error(`ddd: internal error: ${(e as Error).stack ?? e}`);
+    // Problems in the user's input are diagnostics with exit code 1; reaching this point is a bug in ddd itself.
+    // The stack trace is for whoever fixes it, so it is shown only on request.
+    const err = e as Error;
+    console.error(`ddd: internal error: ${err.message ?? e}`);
+    if (process.env.DDD_DEBUG) console.error(err.stack ?? "");
+    else console.error("Please report this. Set DDD_DEBUG=1 to print the stack trace.");
     process.exit(3);
   }
 }

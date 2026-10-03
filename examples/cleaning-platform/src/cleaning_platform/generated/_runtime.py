@@ -9,7 +9,13 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
-from pydantic import BaseModel, ConfigDict, ModelWrapValidatorHandler, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ModelWrapValidatorHandler,
+    ValidationError,
+    model_validator,
+)
 
 
 class DomainError(Exception):
@@ -28,7 +34,10 @@ class DomainError(Exception):
         super().__init__(self.message)
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(code={self.code!r}, message={self.message!r}, details={self.details!r})"
+        return (
+            f"{type(self).__name__}(code={self.code!r}, message={self.message!r}, "
+            f"details={self.details!r})"
+        )
 
 
 class ConstraintViolation(DomainError):
@@ -46,7 +55,9 @@ class AggregateNotFound(DomainError):
 
 
 def _describe(exc: ValidationError) -> str:
-    return "; ".join(f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}" for e in exc.errors())
+    return "; ".join(
+        f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}" for e in exc.errors()
+    )
 
 
 class DomainModel(BaseModel):
@@ -56,11 +67,15 @@ class DomainModel(BaseModel):
 
     @model_validator(mode="wrap")
     @classmethod
-    def _constraint_errors_as_domain_errors(cls, data: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+    def _constraint_errors_as_domain_errors(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
         try:
             return handler(data)
         except ValidationError as exc:
-            raise ConstraintViolation(f"{cls.__name__}: {_describe(exc)}", model=cls.__name__, errors=exc.errors()) from None
+            raise ConstraintViolation(
+                f"{cls.__name__}: {_describe(exc)}", model=cls.__name__, errors=exc.errors()
+            ) from None
 
 
 class ValueObject(DomainModel):
@@ -105,13 +120,17 @@ class DomainEvent(DomainModel):
 
 
 EventHandler = Callable[[DomainEvent], None]
-"""Reacts to a domain event, e.g. a generated policy (see `subscriptions()` in application/policies.py)."""
+"""Reacts to a domain event, e.g. a generated policy (see `subscriptions()` in policies.py)."""
 
 
-def dispatch(subscriptions: Mapping[type[DomainEvent], Sequence[EventHandler]], events: Iterable[DomainEvent]) -> None:
-    """Minimal in-process event bus: runs the handlers subscribed to each event's exact type, in order.
+def dispatch(
+    subscriptions: Mapping[type[DomainEvent], Sequence[EventHandler]], events: Iterable[DomainEvent]
+) -> None:
+    """Minimal in-process event bus: runs the handlers subscribed to each event's exact type,
+    in order.
 
-    Production buses (outbox, message broker) call the same handlers; this helper is for tests and simple apps.
+    Production buses (outbox, message broker) call the same handlers; this helper is for tests
+    and simple apps.
     """
     for event in events:
         for handler in subscriptions.get(type(event), ()):
@@ -149,4 +168,7 @@ class StateGuard:
             raise self.error()
 
     def __bool__(self) -> bool:
-        raise TypeError(f"Use {self.name}(...).checks() or .assert_holds() instead of truth-testing a StateGuard")
+        raise TypeError(
+            f"Use {self.name}(...).checks() or .assert_holds() "
+            "instead of truth-testing a StateGuard"
+        )

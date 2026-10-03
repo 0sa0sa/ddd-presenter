@@ -84,7 +84,7 @@ function constructValidator(c: Code, invariants: InvariantIR[], imp: Imports): v
   c.line(`@model_validator(mode="after")`);
   c.line(`def _check_invariants(self) -> Self:`);
   c.indent(() => {
-    c.docstring("Construct-time invariants. Runs for every new instance, including transition candidates.");
+    c.docstring("Construct-time invariants. Run for every new instance (transition candidates too).");
     for (const i of construct) c.line(`self._invariant_${i.name}()`);
     c.line("return self");
   });

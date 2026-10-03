@@ -26,7 +26,8 @@ class RegisterStaffUseCase:
     Transaction: required
 
     Steps:
-        1. create StaffMember via register(id=ids.new, invitation_id=invitation_id, joined_at=joined_at) as staff
+        1. create StaffMember via register(id=ids.new, invitation_id=invitation_id,
+           joined_at=joined_at) as staff
         2. save staff
         3. publish StaffRegistered after commit
         4. return staff.id
@@ -46,7 +47,9 @@ class RegisterStaffUseCase:
         self._unit_of_work = unit_of_work
 
     def execute(self, command: RegisterStaff) -> UUID:
-        """Runs the steps in one transaction. Events marked publish_after_commit are published only after a successful commit."""
+        """Runs the steps in one transaction. Events marked publish_after_commit are published only
+        after a successful commit.
+        """
         after_commit: list[DomainEvent] = []
         try:
             result = self._run(command, after_commit)

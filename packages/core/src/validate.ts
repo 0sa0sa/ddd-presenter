@@ -502,6 +502,23 @@ class ContextValidator {
   readonly policies = new Map<string, PolicyInfo>();
   /** Names that become Python classes in the context namespace. */
   readonly typeNames = new Map<string, { kind: string; path: Path }>();
+  /**
+   * Fields (by owner) and parameters / inputs (by element) whose declared type is already reported as an error.
+   * Later references to them are not reported again ("Unknown name", "has no field"): one mistake, one diagnostic.
+   */
+  readonly brokenFields = new Map<string, Set<string>>();
+  readonly brokenNames = new Map<string, Set<string>>();
+
+  markBroken(map: Map<string, Set<string>>, key: string, name: string): void {
+    map.set(key, (map.get(key) ?? new Set()).add(name));
+  }
+
+  /** True when `name` of `owner` (a type, or "Aggregate.member" for parameters) has a declared type in error. */
+  isBroken(owner: string, name: string): boolean {
+    if (this.brokenFields.get(owner)?.has(name)) return true;
+    const dot = owner.indexOf(".");
+    return dot > 0 && !!this.brokenNames.get(`${this.el(owner.slice(0, dot))} › ${owner.slice(dot + 1)}`)?.has(name);
+  }
 
   constructor(
     readonly bag: DiagnosticBag,
@@ -616,13 +633,17 @@ class ContextValidator {
     for (const f of fields) {
       this.checkSnake(f.name, "Field name", [...f.path, "name"], opts.element);
       const t = this.resolve(f.type, [...f.path, "type"], opts.aggregate, opts.element);
-      if (!t) continue;
+      if (!t) {
+        this.markBroken(this.brokenFields, ownerName, f.name);
+        continue;
+      }
       const base = t.k === "list" ? t.item : t;
       if (base.k === "aggregate") {
         this.bag.error("aggregate-boundary", `Field "${f.name}" holds aggregate ${base.name} directly`, [...f.path, "type"], {
           element: opts.element,
           hint: `Reference other aggregates by identity: Ref[${base.name}]`,
         });
+        this.markBroken(this.brokenFields, ownerName, f.name);
         continue;
       }
       if (base.k === "entity" && !opts.allowEntity) {
@@ -630,6 +651,7 @@ class ContextValidator {
           element: opts.element,
           hint: "Value objects, commands and events may only contain values, not entities",
         });
+        this.markBroken(this.brokenFields, ownerName, f.name);
         continue;
       }
       if (t.k === "optional") {
@@ -792,6 +814,16 @@ class ContextValidator {
   expr(src: string, path: Path, env: ExprEnv, expected: Type | undefined, element: string): TExpr | undefined {
     const r = checkExpression(src, env, expected);
     for (const err of r.errors) {
+      const unknown = /^Unknown name "(\w+)"$/.exec(err.message)?.[1];
+      if (unknown && (this.brokenFields.get(env.self?.name ?? "")?.has(unknown) || this.brokenNames.get(element)?.has(unknown))) continue;
+      const shadow = /^(Cannot compare|Expected |"\S+" is not defined for)/.test(err.message) ? shadowedEnumValue(src, env) : undefined;
+      if (shadow) {
+        this.bag.error("invalid-expression", `${err.message}: "${shadow.name}" is the ${shadow.kind} ${shadow.name} (${typeToString(shadow.type)}), not the enum value ${shadow.enumName}.${shadow.name}`, path, {
+          element,
+          hint: `A bare name means the ${shadow.kind} when one exists. Write ${shadow.enumName}.${shadow.name} for the enum value (or rename the ${shadow.kind})`,
+        });
+        continue;
+      }
       this.bag.error("invalid-expression", err.message, path, {
         element,
         hint: err.hint ?? `in "${src}" at column ${err.start + 1}`,
@@ -824,6 +856,7 @@ class ContextValidator {
       this.checkLocalName(p.name, "Parameter name", [...p.path, "name"], el);
       const t = this.resolve(p.type, [...p.path, "type"], aggregate, el);
       if (t) m.set(p.name, p.required ? t : { k: "optional", inner: t });
+      else this.markBroken(this.brokenNames, el, p.name);
     }
     return m;
   }
@@ -910,6 +943,7 @@ class ContextValidator {
       const fel = `${el} › ${f.name}`;
       this.checkSnake(f.name, "Factory name", [...f.path, "name"], fel);
       const params = this.params(f.parameters, fel, ag.name);
+      this.checkEntityParameters(ag, "Factory", f.name, f.parameters, params, fel);
       if (f.require.length) {
         this.bag.error("invalid-require", "Factories cannot require state guards because no state exists yet", [...f.path, "require"], {
           element: fel,
@@ -920,7 +954,7 @@ class ContextValidator {
       for (const [field, src] of Object.entries(f.fields)) {
         const t = types.get(field);
         if (!t) {
-          this.bag.error("unknown-field", `${ag.name} has no field "${field}"`, [...f.path, "fields", field], { element: fel });
+          if (!this.isBroken(ag.name, field)) this.bag.error("unknown-field", `${ag.name} has no field "${field}"`, [...f.path, "fields", field], { element: fel });
           continue;
         }
         this.expr(src, [...f.path, "fields", field], env, t, fel);
@@ -937,6 +971,7 @@ class ContextValidator {
       const oel = `${el} › ${op.name}`;
       this.checkSnake(op.name, "Operation name", [...op.path, "name"], oel);
       const params = this.params(op.parameters, oel, ag.name);
+      this.checkEntityParameters(ag, "Operation", op.name, op.parameters, params, oel);
       for (const p of params.keys()) {
         if (types.has(p)) {
           this.bag.warning("shadowed-field", `Parameter "${p}" shadows field ${ag.name}.${p} inside ${op.name}`, [...op.path, "parameters"], {
@@ -963,6 +998,7 @@ class ContextValidator {
       for (const [field, src] of Object.entries(op.changes)) {
         const t = types.get(field);
         if (!t) {
+          if (this.isBroken(ag.name, field)) continue;
           this.bag.error("unknown-field", `${ag.name} has no field "${field}"`, [...op.path, "changes", field], {
             element: oel,
             hint: closest(field, [...types.keys()]) ? `Did you mean "${closest(field, [...types.keys()])}"?` : undefined,
@@ -979,6 +1015,23 @@ class ContextValidator {
         this.bag.warning("noop-operation", `Operation ${op.name} neither changes state nor emits events`, [...op.path, "name"], { element: oel });
       }
       this.checkEmits(ag, op.name, "operation", op.emits, params, types, oel);
+    }
+  }
+
+  /**
+   * Entity-typed parameters validate, but a use case can only pass entities it already holds (fields of a loaded
+   * aggregate): command inputs carry values and expressions cannot create entities.
+   */
+  checkEntityParameters(ag: AggregateIR, kind: string, member: string, decl: ParameterIR[], params: Map<string, Type>, el: string): void {
+    for (const p of decl) {
+      const t = params.get(p.name);
+      let base = t;
+      while (base && (base.k === "optional" || base.k === "list")) base = base.k === "optional" ? base.inner : base.item;
+      if (!t || base?.k !== "entity") continue;
+      this.bag.warning("entity-parameter", `${kind} ${member} takes entity ${typeToString(t)} as "${p.name}", which a use case cannot create`, [...p.path, "type"], {
+        element: el,
+        hint: `Use cases can only pass entities already held by a loaded ${ag.name} (e.g. ${toSnake(ag.name)}.${p.name}); command inputs carry values and expressions cannot build entities. If callers supply new items, take their values (plain fields or a value object) as parameters; otherwise call ${member} only from hand-written code`,
+      });
     }
   }
 
@@ -1088,13 +1141,24 @@ class ContextValidator {
     const el = this.el(uc.name);
     this.checkSnake(uc.name, "Use case name", [...uc.path, "name"], el);
     const inputTypes = this.checkFields(uc.command, uc.input, { element: el });
-    if (uc.idempotencyKey && !inputTypes.has(uc.idempotencyKey)) {
-      this.bag.error("unknown-field", `idempotency_key "${uc.idempotencyKey}" is not an input field`, [...uc.path, "idempotency_key"], { element: el });
+    for (const name of this.brokenFields.get(uc.command) ?? []) this.markBroken(this.brokenNames, el, name);
+    if (uc.idempotencyKey) {
+      const kt = inputTypes.get(uc.idempotencyKey);
+      if (!kt && !this.brokenFields.get(uc.command)?.has(uc.idempotencyKey)) {
+        this.bag.error("unknown-field", `idempotency_key "${uc.idempotencyKey}" is not an input field`, [...uc.path, "idempotency_key"], { element: el });
+      } else if (kt && !(kt.k === "ref" || (kt.k === "primitive" && ["String", "UUID", "Integer"].includes(kt.name)))) {
+        // The generated use case stores results under str(<key>); only scalar keys have a stable text form.
+        this.bag.error("invalid-idempotency-key", `idempotency_key "${uc.idempotencyKey}" must be a required String, UUID, Integer or Ref input, got ${typeToString(kt)}`, [...uc.path, "idempotency_key"], {
+          element: el,
+          hint: "Add a request id input (e.g. request_id: UUID) that the caller repeats when it retries",
+        });
+      }
     }
     if (uc.retry && !uc.idempotencyKey) {
-      this.bag.warning("missing-idempotency-key", `Use case ${uc.name} may be retried but declares no idempotency_key`, [...uc.path, "retry"], {
+      // retry: true declares that callers re-send the same command; without a key every retry would run again.
+      this.bag.error("missing-idempotency-key", `Use case ${uc.name} may be retried but declares no idempotency_key`, [...uc.path, "retry"], {
         element: el,
-        hint: "Retries without an idempotency key can apply the same change twice",
+        hint: "Add an input the caller repeats on retry (e.g. request_id: UUID) and name it in idempotency_key",
       });
     }
     if (uc.steps.length === 0) this.bag.warning("empty-use-case", `Use case ${uc.name} has no steps`, [...uc.path, "steps"], { element: el });
@@ -1137,9 +1201,11 @@ class ContextValidator {
       }
       info.returnType = returnType;
     }
-    const dirtyAggregates = new Set([...state.aggregatesTouched ?? []]);
-    if (uc.transaction === "required" && dirtyAggregates.size > 1) {
-      this.bag.warning("multi-aggregate-transaction", `Use case ${uc.name} changes several aggregates (${[...dirtyAggregates].join(", ")}) in one transaction`, [...uc.path, "steps"], {
+    // Count aggregate instances (variables), not types: changing two orders is two consistency boundaries too.
+    const touched = [...(state.aggregatesTouched ?? new Map<string, string>())];
+    if (uc.transaction === "required" && touched.length > 1) {
+      const list = touched.map(([v, ag]) => `${v}: ${ag}`).join(", ");
+      this.bag.warning("multi-aggregate-transaction", `Use case ${uc.name} changes several aggregates (${list}) in one transaction`, [...uc.path, "steps"], {
         element: el,
         hint: "Aggregates are consistency boundaries; prefer one aggregate per transaction and domain events for the rest",
       });
@@ -1216,7 +1282,7 @@ class ContextValidator {
           for (const em of f.emits) state.produced.add(em.name);
           this.bind(step.as, ag.name, [...step.path, "as"], state, el);
           state.dirty.set(step.as, step.path);
-          (state.aggregatesTouched ??= new Set()).add(ag.name);
+          (state.aggregatesTouched ??= new Map()).set(step.as, ag.name);
           break;
         }
         case "invoke": {
@@ -1241,7 +1307,7 @@ class ContextValidator {
           this.checkArgs(ag, op.name, op.parameters, step.args, [...step.path, "args"], state, info, el);
           for (const em of op.emits) state.produced.add(em.name);
           if (Object.keys(op.changes).length) state.dirty.set(step.target, step.path);
-          (state.aggregatesTouched ??= new Set()).add(ag.name);
+          (state.aggregatesTouched ??= new Map()).set(step.target, ag.name);
           break;
         }
         case "save": {
@@ -1457,6 +1523,7 @@ class ContextValidator {
     for (const [k, v] of Object.entries(rec)) {
       const t = fields.get(k);
       if (!t) {
+        if (this.isBroken(owner, k)) continue;
         const s = closest(k, [...fields.keys()]);
         this.bag.error("unknown-field", `${owner} has no field "${k}"`, [...path, k], { element: el, hint: s ? `Did you mean "${s}"?` : undefined });
         continue;
@@ -1620,7 +1687,8 @@ interface StepState {
   dirty: Map<string, Path>;
   saved: Set<string>;
   terminated: boolean;
-  aggregatesTouched?: Set<string>;
+  /** Aggregate variables changed (created or invoked) so far → their aggregate type. */
+  aggregatesTouched?: Map<string, string>;
   /** Every variable name declared so far in the use case (shared by all branches). */
   declared: Set<string>;
 }
@@ -1633,7 +1701,7 @@ function cloneState(s: StepState): StepState {
     dirty: new Map(s.dirty),
     saved: new Set(s.saved),
     terminated: s.terminated,
-    aggregatesTouched: new Set(s.aggregatesTouched ?? []),
+    aggregatesTouched: new Map(s.aggregatesTouched ?? []),
     declared: s.declared,
   };
 }
@@ -1641,7 +1709,7 @@ function cloneState(s: StepState): StepState {
 /** After an if-step: continue with what holds on all non-terminated branches. */
 function mergeState(target: StepState, a: StepState, b: StepState): void {
   const live = [a, b].filter((s) => !s.terminated);
-  target.aggregatesTouched = new Set([...(a.aggregatesTouched ?? []), ...(b.aggregatesTouched ?? [])]);
+  target.aggregatesTouched = new Map([...(a.aggregatesTouched ?? []), ...(b.aggregatesTouched ?? [])]);
   if (live.length === 0) {
     target.terminated = true;
     return;
@@ -1653,6 +1721,37 @@ function mergeState(target: StepState, a: StepState, b: StepState): void {
   }
   target.produced = new Set([...first.produced].filter((e) => rest.every((s) => s.produced.has(e))));
   target.saved = new Set([...first.saved].filter((e) => rest.every((s) => s.saved.has(e))));
+}
+
+/**
+ * A bare name in `src` that is both a field / parameter / input and a value of an enum (`status == authorized` while
+ * the aggregate also has a field `authorized`). Bare names resolve to the field first, which makes the type error
+ * that follows confusing; the qualified form `PaymentStatus.authorized` always means the enum value.
+ */
+function shadowedEnumValue(src: string, env: ExprEnv): { name: string; kind: string; type: Type; enumName: string } | undefined {
+  const bare = [...src.replace(/"[^"]*"|'[^']*'/g, '""').matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w.(])/g)].map((m) => m[1]!);
+  const lookup = (n: string): { kind: string; type: Type } | undefined => {
+    const p = env.params.get(n) ?? env.locals.get(n);
+    if (p) return { kind: env.params.has(n) ? "parameter" : "input", type: p };
+    const f = env.self?.fields.get(n);
+    return f ? { kind: "field", type: f } : undefined;
+  };
+  const enumsInPlay = new Set(
+    bare.flatMap((n) => {
+      const t = lookup(n)?.type;
+      const u = t?.k === "optional" ? t.inner : t;
+      return u?.k === "enum" ? [u.name] : [];
+    }),
+  );
+  for (const name of bare) {
+    const hit = lookup(name);
+    if (!hit) continue;
+    const enums = env.context.enums.filter((e) => e.values.includes(name));
+    const en = enums.find((e) => enumsInPlay.has(e.name)) ?? enums[0];
+    const u = hit.type.k === "optional" ? hit.type.inner : hit.type;
+    if (en && !(u.k === "enum" && u.name === en.name)) return { name, ...hit, enumName: en.name };
+  }
+  return undefined;
 }
 
 function walk(e: TExpr, fn: (n: TExpr) => void): void {

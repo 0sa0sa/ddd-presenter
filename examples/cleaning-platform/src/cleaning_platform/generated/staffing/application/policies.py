@@ -39,7 +39,9 @@ class RegisterStaffOnAcceptancePolicy:
     def __call__(self, event: DomainEvent) -> None:
         """Event bus entry point (EventHandler)."""
         if not isinstance(event, cleaning_staff_events.InvitationAccepted):
-            raise TypeError(f"RegisterStaffOnAcceptancePolicy handles InvitationAccepted, got {type(event).__name__}")
+            raise TypeError(
+                f"{type(self).__name__} handles InvitationAccepted, not {type(event).__name__}"
+            )
         self.handle(event)
 
 

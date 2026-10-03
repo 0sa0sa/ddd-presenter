@@ -1,4 +1,4 @@
-import { LineCounter, parseDocument, isMap, isNode, isScalar, type Document } from "yaml";
+import { LineCounter, parseDocument, isMap, isNode, isScalar, isSeq, visit, type Document, type Node } from "yaml";
 import { DiagnosticBag, type Diagnostic, type Path } from "./diagnostics.ts";
 import type {
   AggregateIR,
@@ -738,6 +738,37 @@ function readRelationship(r: Reader, value: unknown, path: Path): RelationshipIR
   };
 }
 
+/** Path of the innermost map entry / list item whose range contains `offset` (best effort; [] when none). */
+function pathAt(doc: Document, offset: number): Path {
+  const out: Path = [];
+  const inRange = (n: unknown) => isNode(n) && !!n.range && n.range[0] <= offset && offset <= n.range[2];
+  let node: unknown = doc.contents;
+  for (let guard = 0; guard < 100 && (isMap(node) || isSeq(node)); guard++) {
+    let next: unknown;
+    if (isMap(node)) {
+      for (const pair of node.items) {
+        const key = isScalar(pair.key) ? pair.key.value : undefined;
+        if (key === undefined || key === null) continue;
+        if (inRange(pair.value) || inRange(pair.key)) {
+          out.push(String(key));
+          next = pair.value;
+          break;
+        }
+      }
+    } else {
+      node.items.forEach((item, i) => {
+        if (next === undefined && inRange(item)) {
+          out.push(i);
+          next = item;
+        }
+      });
+    }
+    if (next === undefined) break;
+    node = next;
+  }
+  return out;
+}
+
 function makeRange(doc: Document) {
   return (path: Path): [number, number] | undefined => {
     const node = path.length === 0 ? doc.contents : doc.getIn(path, true);
@@ -776,22 +807,66 @@ function makeLocator(doc: Document, lc: LineCounter) {
 export function parseModel(text: string): ParseResult {
   const bag = new DiagnosticBag();
   const lc = new LineCounter();
-  const doc = parseDocument(text, { lineCounter: lc, uniqueKeys: true, prettyErrors: false });
+  let doc: Document;
+  try {
+    doc = parseDocument(text, { lineCounter: lc, uniqueKeys: true, prettyErrors: false });
+  } catch (e) {
+    // The yaml library reports problems in doc.errors; anything thrown is still the input's fault, not ours.
+    bag.error("yaml-syntax", `The YAML could not be read: ${(e as Error).message}`, [], { line: 1, column: 1 });
+    const empty = parseDocument("");
+    return { diagnostics: bag.items, locate: makeLocator(empty, lc), rangeOf: makeRange(empty), keyRangeOf: makeKeyRange(empty) };
+  }
   const locate = makeLocator(doc, lc);
   const rangeOf = makeRange(doc);
   const keyRangeOf = makeKeyRange(doc);
 
+  const reportedLines = new Set<number>();
   for (const err of doc.errors) {
     const pos = err.linePos?.[0] ?? lc.linePos(err.pos[0]);
-    bag.error("yaml-syntax", err.message.split("\n")[0] ?? err.message, [], {
-      line: pos?.line,
-      column: pos?.col,
-      hint: /flow-seq-start/.test(err.message) ? 'Type expressions with brackets must be quoted inside { ... }, e.g. type: "List[EmailAddress]"' : undefined,
-    });
+    // Follow-up errors on the same line (the parser losing its place) add nothing.
+    if (pos && reportedLines.has(pos.line)) continue;
+    if (pos) reportedLines.add(pos.line);
+    const path = pathAt(doc, err.pos[0]);
+    const lineText = text.split("\n")[(pos?.line ?? 1) - 1] ?? "";
+    if (/flow-seq-start/.test(err.message)) {
+      // `{ name: tags, type: List[String] }`: inside { ... } an unquoted [ starts a YAML list.
+      const at = (pos?.col ?? 1) - 1;
+      const pair = [...lineText.matchAll(/([\w-]+):\s*([^,{}\s]*\[[^\]]*\][^,{}]*?)\s*(?=[,}]|$)/g)].find((m) => m.index! <= at && at <= m.index! + m[0].length);
+      bag.error("yaml-syntax", 'Unquoted "[" inside { ... }: YAML reads it as the start of a list', path, {
+        line: pos?.line,
+        column: pos?.col,
+        hint: pair ? `Write it quoted: ${pair[1]}: "${pair[2]}"` : 'Values containing [ ] must be quoted inside { ... }, e.g. type: "List[EmailAddress]"',
+      });
+      // The parser loses its place after this; whatever it reports next follows from the same mistake.
+      break;
+    }
+    bag.error("yaml-syntax", err.message.split("\n")[0] ?? err.message, path, { line: pos?.line, column: pos?.col });
   }
   if (doc.errors.length > 0) return { diagnostics: bag.items, locate, rangeOf, keyRangeOf };
 
-  const data: unknown = doc.toJS({ maxAliasCount: 50 });
+  let data: unknown;
+  try {
+    data = doc.toJS({ maxAliasCount: 50 });
+  } catch (e) {
+    // e.g. "Excessive alias count indicates a resource exhaustion attack" (a ReferenceError from the yaml library).
+    const message = (e as Error).message;
+    let alias: Node | undefined;
+    visit(doc, { Alias: (_k, n) => ((alias = n), visit.BREAK) });
+    const offset = (alias as Node | undefined)?.range?.[0];
+    const pos = offset !== undefined ? lc.linePos(offset) : undefined;
+    const aliases = /alias/i.test(message);
+    bag.error(
+      aliases ? "yaml-aliases" : "yaml-syntax",
+      aliases ? "The YAML expands too many aliases (*name references to &name anchors)" : `The YAML could not be read: ${message}`,
+      offset !== undefined ? pathAt(doc, offset) : [],
+      {
+        line: pos?.line ?? 1,
+        column: pos?.col ?? 1,
+        hint: aliases ? "Models do not need anchors and aliases; write the values out (at most 50 alias expansions are allowed)" : undefined,
+      },
+    );
+    return { diagnostics: bag.items, locate, rangeOf, keyRangeOf };
+  }
   const r = new Reader(bag);
   const root = r.obj(data, [], "model");
   let model: ModelIR | undefined;

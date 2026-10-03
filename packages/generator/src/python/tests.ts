@@ -1,4 +1,4 @@
-import type { AggregateIR, AggregateScenarioIR, ScenarioThenIR, Type, UseCaseIR, UseCaseScenarioIR } from "@ddd/core";
+import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
 import { depParams, repoAttr, resolveReturn, useCaseDeps } from "./application.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
@@ -103,6 +103,44 @@ export function testingFile(L: Layout): PyFile {
     });
   }
 
+  if (L.ca.ir.useCases.some((u) => u.idempotencyKey)) {
+    imp.from(L.ports, "RecordedResult");
+    c.line().line();
+    c.line("class InMemoryIdempotencyStore:");
+    c.indent(() => {
+      c.docstring("In-memory IdempotencyStore. Records are staged until the unit of work commits, like the repositories.");
+      c.line();
+      c.line("def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:");
+      c.indent(() => {
+        c.line("self._committed: dict[tuple[str, str], RecordedResult] = {}");
+        c.line("self._pending: dict[tuple[str, str], RecordedResult] = {}");
+        c.line("self._unit_of_work = unit_of_work");
+        c.line("if unit_of_work is not None:");
+        c.indent(() => c.line("unit_of_work.enlist(self)"));
+      });
+      c.line();
+      c.line("def get(self, use_case: str, key: str) -> RecordedResult | None:");
+      c.indent(() => c.line("return self._pending.get((use_case, key), self._committed.get((use_case, key)))"));
+      c.line();
+      c.line("def record(self, use_case: str, key: str, result: RecordedResult) -> None:");
+      c.indent(() => {
+        c.line("if self._unit_of_work is None:");
+        c.indent(() => c.line("self._committed[(use_case, key)] = result"));
+        c.line("else:");
+        c.indent(() => c.line("self._pending[(use_case, key)] = result"));
+      });
+      c.line();
+      c.line("def _commit(self) -> None:");
+      c.indent(() => {
+        c.line("self._committed.update(self._pending)");
+        c.line("self._pending.clear()");
+      });
+      c.line();
+      c.line("def _rollback(self) -> None:");
+      c.indent(() => c.line("self._pending.clear()"));
+    });
+  }
+
   c.line().line();
   c.line("class FixedClock:");
   c.indent(() => {
@@ -181,10 +219,20 @@ export function testingFile(L: Layout): PyFile {
 function describeThen(t: ScenarioThenIR): string[] {
   const out: string[] = [];
   if (t.raises) out.push(`raises ${t.raises}`);
-  if (t.hasReturns) out.push(`returns ${JSON.stringify(t.returns)}`);
-  if (t.state) out.push(`state ${JSON.stringify(t.state, (k, v) => (k === "path" ? undefined : v))}`);
+  if (t.hasReturns) out.push(`returns ${spacedJson(t.returns)}`);
+  if (t.state) out.push(`state ${spacedJson(t.state)}`);
   if (t.emits) out.push(t.emits.length ? `emits ${t.emits.map((e) => e.event).join(", ")}` : "emits nothing");
   return out;
+}
+
+/** JSON with spaces after separators (so long docstring lines can wrap); `path` bookkeeping keys are dropped. */
+function spacedJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(spacedJson).join(", ")}]`;
+  if (v && typeof v === "object") {
+    const entries = Object.entries(v).filter(([k, x]) => k !== "path" && x !== undefined);
+    return `{${entries.map(([k, x]) => `${JSON.stringify(k)}: ${spacedJson(x)}`).join(", ")}}`;
+  }
+  return JSON.stringify(v ?? null);
 }
 
 function eventAsserts(L: Layout, c: Code, events: string, then: ScenarioThenIR, imp: Imports, vctx: ValueContext): void {
@@ -277,6 +325,44 @@ function aggregateScenario(L: Layout, c: Code, ag: AggregateIR, sc: AggregateSce
   });
 }
 
+/**
+ * One test per invariant for which a violating object could be derived from the scenarios' values (see
+ * core/rulecheck.ts). Each test asserts the error class and that exactly this rule raised it (`details["rule"]`),
+ * so a rule that is silently not enforced, or enforced under another name, fails here.
+ */
+export function invariantTestFile(L: Layout): PyFile | undefined {
+  const derived = deriveViolations(L.ca);
+  if (!derived.length) return undefined;
+  const imp = new Imports();
+  imp.from("__future__", "annotations");
+  imp.import("pytest");
+  const vctx: ValueContext = { imports: imp, typeModule: L.typeModule, fieldTypes: L.ca.fieldTypes };
+  const c = new Code();
+  for (const d of derived) {
+    const inv = [...L.ca.ir.valueObjects, ...L.ca.ir.aggregates.flatMap((a) => [a, ...a.entities])].find((o) => o.name === d.owner)!.invariants.find((i) => i.name === d.rule)!;
+    imp.from(L.typeModule(d.ownerKind, d.owner), d.owner);
+    importError(L, imp, d.error);
+    c.line().line();
+    c.line(`def ${derivedTestName(d.owner, d.rule)}() -> None:`);
+    c.indent(() => {
+      c.docstring(
+        [
+          `Invariant \`${d.rule}\` of ${d.owner}: ${inv.expression}`,
+          "",
+          `Derived from the values of scenario \`${d.from}\` with ${d.changed.join(" and ")} changed so that this rule is the first construct-time invariant that fails.`,
+        ].join("\n"),
+      );
+      c.line(`with pytest.raises(${d.error}) as raised:`);
+      c.indent(() => c.line(construct(d.owner, d.record, L.fieldTypes(d.owner), vctx)));
+      c.line(`assert raised.value.details["rule"] == ${pyString(d.rule)}`);
+    });
+  }
+  return {
+    path: L.testPath("invariants"),
+    content: assemble(L.model, `Invariants of the ${L.ca.ir.name} context, each violated on purpose (values derived from the scenarios).`, imp, c.toString()),
+  };
+}
+
 export function useCaseTestFile(L: Layout, uc: UseCaseIR): PyFile | undefined {
   if (!uc.scenarios.length) return undefined;
   const imp = new Imports();
@@ -337,6 +423,10 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       imp.from(L.testing, "CapturingEventPublisher");
       c.line("event_publisher = CapturingEventPublisher()");
     }
+    if (deps.idempotency) {
+      imp.from(L.testing, "InMemoryIdempotencyStore");
+      c.line(`idempotency_store = InMemoryIdempotencyStore(${deps.uow ? "unit_of_work" : ""})`);
+    }
     const params = depParams(deps);
     c.line(`use_case = ${cls}(${params.map((p) => `${p.name}=${p.name}`).join(", ")})`);
     const cmd = construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx);
@@ -370,6 +460,19 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
     if (then.emits) {
       if (deps.publisher) eventAsserts(L, c, "event_publisher.published", then, imp, vctx);
       else c.line(`# ${uc.name} publishes no events`);
+    }
+    if (uc.idempotencyKey) {
+      const recorded = `idempotency_store.get(${pyString(uc.name)}, str(command.${uc.idempotencyKey}))`;
+      if (then.raises) {
+        c.line("# A failed run is not recorded, so a retry with the same key runs again.");
+        c.line(`assert ${recorded} is None`);
+      } else {
+        c.line("# Idempotency: the same command again returns the recorded result and runs no step.");
+        c.line(`assert ${recorded} is not None`);
+        if (deps.publisher) c.line("published = len(event_publisher.published)");
+        c.line(info.returnType ? "assert use_case.execute(command) == result" : "use_case.execute(command)");
+        if (deps.publisher) c.line("assert len(event_publisher.published) == published");
+      }
     }
   });
 }

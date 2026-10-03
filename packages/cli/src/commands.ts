@@ -1,4 +1,4 @@
-import { formatDiagnostic, ruleUsage, SCHEMA_VERSION, validateModelText, type Diagnostic } from "@ddd/core";
+import { coverageDiagnostics, formatDiagnostic, parseModel, ruleUsage, SCHEMA_VERSION, sortDiagnostics, validateModelText, type Diagnostic } from "@ddd/core";
 import { computePlan, GENERATOR_VERSION, generatePython, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -51,12 +51,15 @@ export function cmdValidate(io: Io, opts: CommonOpts & { strict: boolean }): num
   const m = loadModel(io, opts);
   if (!m) return EXIT.usage;
   const { result } = m;
-  const failed = !result.ok || (opts.strict && result.diagnostics.some((d) => d.severity === "warning"));
+  // --strict also reviews coverage: rules no scenario tests, errors nothing raises, extension points nothing calls.
+  const diagnostics =
+    opts.strict && result.analysis ? sortDiagnostics([...result.diagnostics, ...coverageDiagnostics(result.analysis, parseModel(m.text).locate)]) : result.diagnostics;
+  const failed = !result.ok || (opts.strict && diagnostics.some((d) => d.severity === "warning"));
   if (opts.format === "json") {
-    io.out(JSON.stringify({ ok: !failed, diagnostics: result.diagnostics }, null, 2));
+    io.out(JSON.stringify({ ok: !failed, diagnostics }, null, 2));
   } else {
-    printDiagnostics(io, result.diagnostics, basename(m.path));
-    io.out(failed ? paint(io, "31", `✗ ${summary(result.diagnostics)}`) : paint(io, "32", `✓ Model is valid (${summary(result.diagnostics)})`));
+    printDiagnostics(io, diagnostics, basename(m.path));
+    io.out(failed ? paint(io, "31", `✗ ${summary(diagnostics)}`) : paint(io, "32", `✓ Model is valid (${summary(diagnostics)})`));
   }
   return failed ? EXIT.failed : EXIT.ok;
 }
@@ -163,10 +166,33 @@ export function cmdDiff(io: Io, opts: CommonOpts & { patch: boolean; check: bool
     if (!plan.changed) io.out(paint(io, "32", "✓ Generated code is up to date"));
   }
   if (opts.check && plan.changed) {
-    io.err(paint(io, "31", "✗ Generated code is out of date with the model. Run `ddd generate`."));
+    io.err(paint(io, "31", "✗ Generated code is out of date with the model."));
+    for (const line of checkAdvice(plan)) io.err(`  ${line}`);
     return EXIT.failed;
   }
   return EXIT.ok;
+}
+
+/** What actually brings the project up to date, per kind of difference (plain `ddd generate` does not always). */
+export function checkAdvice(plan: Plan): string[] {
+  const out: string[] = [];
+  if (plan.conflicts.length) {
+    out.push(
+      `${plan.conflicts.length} generated file(s) were edited by hand, so \`ddd generate\` will refuse: move the custom code into the extensions package, or run \`ddd generate --force\` to discard the edits.`,
+    );
+  }
+  if (plan.staleEditedTests.length) {
+    out.push(
+      `${plan.staleEditedTests.length} stale generated test(s) were edited by hand and import code the model no longer produces: keep what you need under tests/ outside generated/, then run \`ddd generate --prune --force\`.`,
+    );
+  }
+  const keptStale = plan.stale.filter((e) => !e.autoPrune && !e.generatedTest);
+  if (keptStale.some((e) => !e.modified)) out.push("Stale generated files remain: review them, then run `ddd generate --prune` to delete them.");
+  if (keptStale.some((e) => e.modified)) out.push("Stale generated files with hand edits remain: run `ddd generate --prune --force` to delete them.");
+  const plain = plan.entries.some((e) => e.action === "create" || e.action === "update" || (e.action === "stale" && e.autoPrune));
+  if (plain && !plan.conflicts.length && !plan.staleEditedTests.length) out.push("Run `ddd generate`.");
+  else if (plain) out.push("The remaining changes are applied by `ddd generate` once the above is resolved.");
+  return out;
 }
 
 export function cmdGenerate(io: Io, opts: CommonOpts & { force: boolean; prune: boolean; dryRun: boolean; updateLock: boolean }): number {
@@ -197,11 +223,21 @@ export function cmdGenerate(io: Io, opts: CommonOpts & { force: boolean; prune: 
     );
     return EXIT.failed;
   }
+  if (plan.staleEditedTests.length) {
+    io.err(paint(io, "31", `\n✗ ${plan.staleEditedTests.length} stale generated test(s) were edited by hand; nothing was written.`));
+    for (const e of plan.staleEditedTests) io.err(`  ${e.path}`);
+    io.err(
+      "\nThey test code the model no longer produces and would fail to import. Keep what you need in a test file outside\n" +
+        "the generated/ directory, then re-run with --prune --force to delete them.",
+    );
+    return EXIT.failed;
+  }
 
   const ops: WriteOp[] = [];
   for (const e of plan.entries) {
     if (e.action === "create" || e.action === "update" || (e.action === "conflict" && opts.force)) ops.push({ path: e.path, content: e.after });
-    if (e.action === "stale" && opts.prune) {
+    if (e.action === "stale" && e.autoPrune) ops.push({ path: e.path, remove: true });
+    else if (e.action === "stale" && opts.prune) {
       if (e.modified && !opts.force) io.err(paint(io, "33", `warning: not pruning ${e.path} because it was edited by hand (use --force)`));
       else ops.push({ path: e.path, remove: true });
     }
@@ -216,8 +252,11 @@ export function cmdGenerate(io: Io, opts: CommonOpts & { force: boolean; prune: 
   }
   atomicApply(m.root, ops);
   if (writeLock) atomicApply(dirname(lockFile), [{ path: "ddd.lock", content: lockText }]);
-  if (plan.stale.length && !opts.prune) {
-    io.out(paint(io, "33", `${plan.stale.length} stale file(s) kept. Review them and re-run with --prune to delete.`));
+  const autoPruned = plan.stale.filter((e) => e.autoPrune).length;
+  if (autoPruned) io.out(paint(io, "33", `Deleted ${autoPruned} generated test file(s) for code the model no longer produces.`));
+  const kept = plan.stale.filter((e) => !e.autoPrune).length;
+  if (kept && !opts.prune) {
+    io.out(paint(io, "33", `${kept} stale file(s) kept. Review them and re-run with --prune to delete.`));
   }
   extensionWarnings(io, m.root, p.analysis, p.analysis.model.generation.package, p.analysis.model.generation.srcDir);
   io.out(paint(io, "32", `✓ Wrote ${ops.length} file(s) to ${m.root}`));
@@ -281,7 +320,11 @@ export function cmdRules(io: Io, opts: CommonOpts): number {
     io.out(`  condition: ${u.expression}`);
     io.out(`  error:     ${u.error}`);
     io.out(`  applied:   ${u.appliedBy.map((a) => `${a.kind} ${a.name}`).join(", ") || "—"}`);
-    io.out(`  tested by: ${u.tests.join(", ") || paint(io, "33", "no scenario exercises this rule's error")}`);
+    io.out(`  tested by: ${u.scenarios.map((s) => `test_${s.name}`).join(", ") || (u.derived ? "—" : paint(io, "33", "nothing (no scenario that only this rule can fail)"))}`);
+    if (u.derived) io.out(`  derived:   ${u.derived.test} ${paint(io, "90", `(values of ${u.derived.from}, ${u.derived.changed.join(" and ")} changed)`)}`);
+    for (const a of u.ambiguous) {
+      io.out(paint(io, "90", `  not counted: ${a.name} expects ${u.error}, which ${a.alsoRaisedBy.join(", ")} can also raise`));
+    }
   }
   return EXIT.ok;
 }

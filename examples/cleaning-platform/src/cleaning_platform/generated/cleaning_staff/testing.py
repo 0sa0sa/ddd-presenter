@@ -44,7 +44,9 @@ class FakeUnitOfWork:
 
 
 class InMemoryCleaningStaffInvitationRepository:
-    """In-memory CleaningStaffInvitationRepository. Writes are staged until the unit of work commits."""
+    """In-memory CleaningStaffInvitationRepository. Writes are staged until the unit of work
+    commits.
+    """
 
     def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:
         self._committed: dict[UUID, CleaningStaffInvitation] = {}

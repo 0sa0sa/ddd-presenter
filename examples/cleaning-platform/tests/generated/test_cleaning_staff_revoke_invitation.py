@@ -25,7 +25,9 @@ def test_open_invitation_is_revoked() -> None:
 
     Given: now is 2026-01-02T10:00:00+00:00; a stored CleaningStaffInvitation
     When: revoke_invitation
-    Then: returns true; state [{"aggregate":"CleaningStaffInvitation","id":"00000000-0000-0000-0000-000000000001","fields":{"status":"revoked"}}]; emits InvitationRevoked
+    Then: returns true; state [{"aggregate": "CleaningStaffInvitation", "id":
+    "00000000-0000-0000-0000-000000000001", "fields": {"status": "revoked"}}]; emits
+    InvitationRevoked
     """
     unit_of_work = FakeUnitOfWork()
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
@@ -36,7 +38,7 @@ def test_open_invitation_is_revoked() -> None:
             status=InvitationStatus.PENDING,
             created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
             expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
-        ),
+        )
     )
     event_publisher = CapturingEventPublisher()
     use_case = RevokeInvitationUseCase(
@@ -48,7 +50,9 @@ def test_open_invitation_is_revoked() -> None:
     result = use_case.execute(command)
     assert result == True
     assert unit_of_work.committed
-    stored_0 = cleaning_staff_invitation_repository.get(UUID("00000000-0000-0000-0000-000000000001"))
+    stored_0 = cleaning_staff_invitation_repository.get(
+        UUID("00000000-0000-0000-0000-000000000001")
+    )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.REVOKED
     assert [type(event).__name__ for event in event_publisher.published] == ["InvitationRevoked"]
@@ -71,7 +75,7 @@ def test_closed_invitation_is_left_untouched() -> None:
             created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
             expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
             accepted_at=datetime.fromisoformat("2026-01-02T09:00:00+00:00"),
-        ),
+        )
     )
     event_publisher = CapturingEventPublisher()
     use_case = RevokeInvitationUseCase(

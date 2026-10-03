@@ -39,7 +39,7 @@ def test_email_is_normalized() -> None:
     """Scenario generated from the model.
 
     When: construct CleaningStaffInvitation
-    Then: state {"email":{"value":"staff@example.com"}}
+    Then: state {"email": {"value": "staff@example.com"}}
     """
     result = CleaningStaffInvitation(
         id=UUID("00000000-0000-0000-0000-000000000001"),

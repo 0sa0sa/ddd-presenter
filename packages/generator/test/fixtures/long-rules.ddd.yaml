@@ -1,0 +1,168 @@
+schema_version: 1
+project: long-rules
+description: Rules long enough that the generated Python must be wrapped (regression for tuple conditions)
+generation:
+  package: long_rules
+
+contexts:
+  - name: Billing
+    errors:
+      - { name: RefundExceedsCapture, code: refund_exceeds_capture, message: The refund exceeds the captured amount }
+      - { name: PlacedOrderWithoutLines, code: placed_order_without_lines, message: A placed order needs at least one line }
+      - { name: NotRefundable, code: not_refundable, message: This payment cannot be refunded now }
+      - { name: PurchaseOrderNotFound, code: purchase_order_not_found, message: Order not found }
+      - { name: OrderOnHold, code: order_on_hold, message: The order is on hold }
+    enums:
+      - name: PurchaseOrderStatus
+        values: [draft, placed, cancelled, on_hold]
+    value_objects:
+      - name: MonetaryAmountValue
+        fields:
+          - { name: amount, type: Decimal }
+          - { name: currency, type: String }
+      - name: PurchaseOrderLineItem
+        fields:
+          - { name: stock_keeping_unit, type: String }
+          - { name: quantity, type: Integer }
+    aggregates:
+      - name: PaymentAuthorizationRecord
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: authorized_amount, type: MonetaryAmountValue }
+          - { name: captured, type: MonetaryAmountValue, required: false }
+          - { name: refunded, type: MonetaryAmountValue, required: false }
+        invariants:
+          - name: refund_not_more_than_captured_amount
+            expression: refunded == null or (captured != null and refunded.amount <= captured.amount)
+            error: RefundExceedsCapture
+        state_guards:
+          - name: refundable_for_requested_amount
+            parameters:
+              - { name: requested_refund_amount, type: Decimal }
+            expression: (captured != null and refunded == null) and (requested_refund_amount > 0 and captured.amount >= requested_refund_amount)
+            error: NotRefundable
+        operations:
+          - name: refund
+            parameters:
+              - { name: refund_amount, type: MonetaryAmountValue }
+            require: [refundable_for_requested_amount(refund_amount.amount)]
+            changes:
+              refunded: refund_amount
+            emits:
+              - name: PaymentRefundedCompletely
+                when: (captured != null and refunded != null) and (refunded.amount == captured.amount and refunded.currency == captured.currency)
+                fields: [id]
+        scenarios:
+          - name: refund_larger_than_capture_is_rejected
+            when:
+              construct:
+                id: "00000000-0000-0000-0000-000000000001"
+                authorized_amount: { amount: "10.00", currency: EUR }
+                captured: { amount: "10.00", currency: EUR }
+                refunded: { amount: "12.00", currency: EUR }
+            then: { raises: RefundExceedsCapture }
+          - name: refund_without_capture_is_rejected
+            when:
+              construct:
+                id: "00000000-0000-0000-0000-000000000001"
+                authorized_amount: { amount: "10.00", currency: EUR }
+                refunded: { amount: "1.00", currency: EUR }
+            then: { raises: RefundExceedsCapture }
+          - name: refund_requires_a_capture
+            given:
+              aggregate:
+                id: "00000000-0000-0000-0000-000000000001"
+                authorized_amount: { amount: "10.00", currency: EUR }
+            when:
+              operation: refund
+              args: { refund_amount: { amount: "1.00", currency: EUR } }
+            then: { raises: NotRefundable }
+          - name: partial_refund_emits_nothing
+            given:
+              aggregate:
+                id: "00000000-0000-0000-0000-000000000001"
+                authorized_amount: { amount: "10.00", currency: EUR }
+                captured: { amount: "10.00", currency: EUR }
+            when:
+              operation: refund
+              args: { refund_amount: { amount: "4.00", currency: EUR } }
+            then:
+              state: { refunded: { amount: "4.00", currency: EUR } }
+              emits: []
+          - name: full_refund_emits_event
+            given:
+              aggregate:
+                id: "00000000-0000-0000-0000-000000000001"
+                authorized_amount: { amount: "10.00", currency: EUR }
+                captured: { amount: "10.00", currency: EUR }
+            when:
+              operation: refund
+              args: { refund_amount: { amount: "10.00", currency: EUR } }
+            then:
+              emits: [{ event: PaymentRefundedCompletely }]
+
+      - name: CustomerPurchaseOrder
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: status, type: PurchaseOrderStatus }
+          - { name: lines, type: "List[PurchaseOrderLineItem]" }
+        invariants:
+          - name: placed_orders_have_at_least_one_line
+            expression: status == draft or status == cancelled or status == on_hold or not is_empty(lines)
+            error: PlacedOrderWithoutLines
+        state_guards:
+          - { name: is_held, expression: status == on_hold, error: OrderOnHold }
+        operations:
+          - name: place
+            changes: { status: placed }
+        scenarios:
+          - name: placed_order_without_lines_is_rejected
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000002", status: placed, lines: [] }
+            then: { raises: PlacedOrderWithoutLines }
+          - name: placing_an_empty_draft_is_rejected
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000002", status: draft, lines: [] }
+            when: { operation: place }
+            then: { raises: PlacedOrderWithoutLines }
+
+    use_cases:
+      - name: place_purchase_order_unless_held
+        command: PlacePurchaseOrderUnlessHeld
+        transaction: required
+        input:
+          - { name: purchase_order_id, type: UUID }
+          - { name: allow_orders_that_are_currently_on_hold, type: Boolean }
+        steps:
+          - load: { aggregate: CustomerPurchaseOrder, by: purchase_order_id, as: purchase_order, not_found: PurchaseOrderNotFound }
+          - if:
+              condition: (purchase_order.is_held and not allow_orders_that_are_currently_on_hold) or is_empty(purchase_order.lines)
+              then:
+                - fail: OrderOnHold
+          - invoke: { target: purchase_order, operation: place }
+          - save: purchase_order
+          - return: allow_orders_that_are_currently_on_hold or (purchase_order.status == placed and not is_empty(purchase_order.lines))
+        scenarios:
+          - name: held_order_is_not_placed
+            given:
+              aggregates:
+                - type: CustomerPurchaseOrder
+                  fields: { id: "00000000-0000-0000-0000-000000000002", status: on_hold, lines: [{ stock_keeping_unit: A, quantity: 1 }] }
+            when:
+              input: { purchase_order_id: "00000000-0000-0000-0000-000000000002", allow_orders_that_are_currently_on_hold: false }
+            then: { raises: OrderOnHold }
+          - name: draft_order_is_placed
+            given:
+              aggregates:
+                - type: CustomerPurchaseOrder
+                  fields: { id: "00000000-0000-0000-0000-000000000002", status: draft, lines: [{ stock_keeping_unit: A, quantity: 1 }] }
+            when:
+              input: { purchase_order_id: "00000000-0000-0000-0000-000000000002", allow_orders_that_are_currently_on_hold: false }
+            then:
+              returns: true
+              state:
+                - aggregate: CustomerPurchaseOrder
+                  id: "00000000-0000-0000-0000-000000000002"
+                  fields: { status: placed }

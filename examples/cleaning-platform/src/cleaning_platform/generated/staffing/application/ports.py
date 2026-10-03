@@ -25,7 +25,8 @@ class StaffMemberRepository(Protocol):
 class Clock(Protocol):
     """Source of the current time. Rules never read a hidden global clock.
 
-    Must return a timezone-aware datetime (see adapters.SystemClock); model DateTime fields reject naive values.
+    Must return a timezone-aware datetime (see adapters.SystemClock); model DateTime fields reject
+    naive values.
     """
 
     def now(self) -> datetime: ...
@@ -38,7 +39,8 @@ class IdGenerator(Protocol):
 
 
 class EventPublisher(Protocol):
-    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's responsibility."""
+    """Delivers domain events. Reliable delivery (e.g. an outbox) is the adapter's responsibility.
+    """
 
     def publish(self, events: Sequence[DomainEvent]) -> None: ...
 
