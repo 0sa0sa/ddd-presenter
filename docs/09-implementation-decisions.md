@@ -30,12 +30,12 @@
   - `src/<package>/generated/adapters.py` — `SystemClock`（aware UTC）と `RandomIds` の参照実装。
   - `src/<package>/generated/<context>/domain/{errors,enums,value_objects,entities,aggregates,events,commands,rules}.py`。docs/05の `invariants.py` は置かない: Invariant / StateGuard は対象クラスのメソッドとして生成し、`rules.py` はルールのカタログ（追跡用）とする。
   - `src/<package>/generated/<context>/application/{ports,use_cases}.py`、`testing.py`（In-memoryのPort実装）、`README.md`（ルール・適用箇所・テストの対応表）。
-  - `tests/generated/test_<context>_<aggregate|use_case>.py` — シナリオから生成したpytest。
+  - `tests/generated/test_<context>_<aggregate|use_case>.py` — シナリオから生成したpytest。`test_<context>_invariants.py` — シナリオの値から導いた違反値でInvariantを確かめるpytest（§10）。
   - `src/<package>/extensions/<context>/extensions.py` — 初回のみ作る雛形（以後は顧客所有で上書きしない）。
   - `src/<package>/generated/model_manifest.json` — モデルhash・generator版・生成ファイルのsha256・prune待ちのstaleファイル。
 - 決定性: 生成物・マニフェストに時刻を含めない。マニフェストはモデルhash・generator版・各ファイルsha256。
 - 手編集検知: ディスク上のhashがマニフェストと異なる生成ファイルがあれば停止し差分を表示（`--force`で上書き）。
-- 削除: モデルから消えたファイルはstaleとして報告し、`--prune`指定時のみ削除。
+- 削除: モデルから消えたファイルはstaleとして報告し、`--prune`指定時のみ削除。例外は生成したままの `tests/generated/` のテストで、`generate` が削除する（§10）。
 - 原子性: 一時ディレクトリへ全出力→バックアップ付き入替。失敗時は復元。
 - `ddd.lock`: generator版とschema版を固定。不一致なら `--update-lock` なしでは生成しない。
 
@@ -88,3 +88,15 @@
 - サブドメインの分類はモデルにも持つ（コンテキストの任意キー `subdomain`）。ボードからの反映は分類のないコンテキストにだけ入れ、違いは「モデル」タブで示してどちらに合わせるかを選ばせる。ポリシーも付箋の名前で結び付け、モデル → ボードでは「イベント → ポリシー → コマンド」の並びで置く。
 - ボードはプロジェクトに複数持てる（`project_boards`、既存のボードは「メイン」に移す）。旧 API（`/board`）はメインのボードを指す。
 - 画像はブラウザで描画した画面ではなく、ボードのデータから SVG を作る（依存を増やさず、どの環境でも同じ結果になるように）。PNG はその SVG を canvas に描いて作る。
+
+## 10. QA 指摘の修正（生成と CLI, 2026-10-03）
+
+- **長いルールの折り返し（重大）:** 100文字を超える行の折り返しが、条件をくくる括弧にも末尾カンマを付けていたため、長いInvariantが `if not ( <式>, ):`（1要素のタプル、常に真）になり、ルールが一度も働かなかった。末尾カンマは「すでに2つ以上の要素を持つ括弧（引数・タプル・リスト）」と「もともと末尾カンマのある括弧」にだけ付ける。1要素の括弧（条件のくくり、1引数、ジェネレータ式）は `or` / `and` の前で改行し、括弧の外にある長い真偽値（`if` / `return` / `holds=` など）は括弧でくくってから同じように折り返す。docstring・コメント・長い文字列リテラルも折り返し、生成コードは1行100文字以内に収まる。回帰テストは3重にした: TypeScript 側で「条件がタプルでない」ことを確かめる検査、生成物を Python の `ast` で読んで同じことを確かめる検査、長いInvariant・ガード・`when`・Use case条件を破るシナリオを持つ fixture（`long-rules.ddd.yaml`）を pytest で実行する検査。
+- **違反値の導出テスト:** さらに、シナリオの値から「そのルールだけが最初に破れる」値を探し（参照するフィールドを1〜2個、null・別のEnum値・空リスト・同じ型の別フィールドの値・式中のリテラル±1などに変える。各フィールドの制約は守る）、見つかったInvariantにはオブジェクトを作って `details["rule"]` まで確かめるテストを生成する（`core/src/rulecheck.ts`）。導けないルールにテストを作ったふりはしない。探索は1ルールあたり400候補までで、エディタの打鍵ごとの再計算でも数ミリ秒で終わる。
+- **ルールの検証の数え方:** 以前は「同じエラー型を送出するシナリオ」をすべてそのルールのテストとして数えていた。シナリオの経路でそのエラー型を送出しうるものがそのルールだけのときに限って数え、ほかにもあれば「not counted」として競合するものと一緒に示す。経路の見積もりは多めに取る（取りこぼすと誤って数えるため）。サンプルの2つのInvariantは同じエラーを共有しているので、`invitation_window_must_be_positive` はどちらのテストにも数えず、両方とも導出テストで検証される。
+- **`ddd validate --strict`:** 警告を失敗にするのに加えて、`untested-rule`・`unused-error`・`unused-extension-point` を出す。エディタ（LSP・Web）には出さない（作りかけのモデルで常に出てしまうため）。
+- **YAML の例外:** `yaml` ライブラリがエイリアスの展開しすぎで投げる `ReferenceError` を捕まえず、CLI がスタックトレース付きで終了コード3を返していた。`parseModel` で yaml ライブラリの例外をすべて診断（`yaml-aliases` / `yaml-syntax`、位置とパス付き）に変える。CLI は内部エラーでもスタックトレースを `DDD_DEBUG=1` のときだけ出す。
+- **1トランザクションで複数の集約:** 型ではなく変数を数える（同じ型の2つのインスタンスの変更も一貫性の境界2つ）。if の両方の枝で別の変数を変える場合も合わせて数える既存の扱いは変えない。
+- **古い生成テスト:** Use caseを消すと、そのテスト（消えたクラスをimportする）が残り、`generate` は0で終わるのに pytest が ImportError で失敗していた。`tests/generated/` の生成テストは、生成したときのままなら `generate` が削除する。手で編集してあれば何も書かずに止まり（終了コード1）、`--prune --force` を案内する。生成したソース（`policies.py` など）は従来どおり `--prune` のときだけ削除する（顧客コードがimportしているかもしれないため）。`ddd diff --check` の案内も実際に直る方法に合わせた（手編集の衝突 → 移すか `--force`、古いソース → `--prune`、手編集した古いファイル → `--prune --force`）。
+- **`idempotency_key` / `retry`:** docstring に書くだけだった。`idempotency_key` は `IdempotencyStore` Port で実装する（成功した結果だけを、コミット前に同じトランザクションで記録し、同じキーでは手順を実行せずに記録を返す）。`retry: true` は呼び出し側が再送しうるという宣言とし、再試行ループは生成しない。安全にするのはキーなので、キーなしの `retry: true` はエラーにした（従来は警告）。キーは必須の String / UUID / Integer / Ref の入力に限る（`str()` で安定した文字列になるもの）。
+- **診断の改善:** Entity型の引数を持つ操作に警告 `entity-parameter`（Use caseからは読み込んだ集約が持つEntityしか渡せない）。Enum値と同じ名前のフィールドがあるときの型エラーは、名前がフィールドに解決されたことと `Enum.value` の書き方を示す（この書き方はもともと使え、生成もEnum値になる）。`{ ... }` の中の引用符のない `[` は、その位置のパスと「引用符で囲んだ書き方」を示し、パーサが位置を見失って出す後続のエラーは出さない。型が解決できなかったフィールドや引数を使う箇所では「Unknown name」「has no field」を重ねて出さない。
