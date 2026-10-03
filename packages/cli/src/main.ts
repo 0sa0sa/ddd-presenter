@@ -6,6 +6,8 @@ const HELP = `ddd — DDD Presenter CLI (model-driven Python domain code)
 
 Usage:
   ddd validate [model] [--strict] [--format json]   Check the model; non-zero exit on errors
+                                                   (--strict: warnings fail too, plus untested rules,
+                                                   unused errors and unused extension points)
   ddd diff     [model] [--patch] [--check]          Show what generate would change (--check: fail if out of date)
   ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock]
   ddd rules    [model] [--format json]              Where each named rule is applied and tested

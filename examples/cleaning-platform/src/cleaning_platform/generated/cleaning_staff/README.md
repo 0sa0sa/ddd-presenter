@@ -15,8 +15,8 @@
 
 | Rule | Kind | Owner | Condition | Error | Applied by | Tested by |
 |---|---|---|---|---|---|---|
-| `expiry_after_creation` | Invariant | CleaningStaffInvitation | `expires_at > created_at` | InvalidInvitationWindow | construct `CleaningStaffInvitation`, factory `issue`, operation `accept`, operation `revoke` | `test_invitation_window_must_be_positive`, `test_past_expiry_is_rejected` |
-| `accepted_invitation_has_accepted_at` | Invariant | CleaningStaffInvitation | `status != accepted or accepted_at != null` | InvalidInvitationWindow | construct `CleaningStaffInvitation`, factory `issue`, operation `accept`, operation `revoke` | `test_invitation_window_must_be_positive`, `test_past_expiry_is_rejected` |
+| `expiry_after_creation` | Invariant | CleaningStaffInvitation | `expires_at > created_at` | InvalidInvitationWindow | construct `CleaningStaffInvitation`, factory `issue`, operation `accept`, operation `revoke` | `test_invariant_cleaning_staff_invitation_expiry_after_creation` |
+| `accepted_invitation_has_accepted_at` | Invariant | CleaningStaffInvitation | `status != accepted or accepted_at != null` | InvalidInvitationWindow | construct `CleaningStaffInvitation`, factory `issue`, operation `accept`, operation `revoke` | `test_invariant_cleaning_staff_invitation_accepted_invitation_has_accepted_at` |
 | `pending_until_expiry` | StateGuard | CleaningStaffInvitation | `status == pending and at < expires_at` | InvitationNotDeliverable | operation `accept` | `test_expired_invitation_is_rejected` |
 | `is_open` | StateGuard | CleaningStaffInvitation | `status == pending` | InvitationAlreadyClosed | operation `revoke`, use_case `revoke_invitation` | `test_revoked_invitation_cannot_be_revoked_again` |
 

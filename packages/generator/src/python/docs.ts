@@ -29,7 +29,7 @@ export function contextReadme(L: Layout, analysis: Analysis): PyFile {
     }
     out.push("");
     const untested = usage.filter((u) => u.tests.length === 0);
-    if (untested.length) out.push(`> Rules without a scenario that exercises their error: ${untested.map((u) => `\`${u.rule}\``).join(", ")}`, "");
+    if (untested.length) out.push(`> Rules that no test exercises (see \`ddd rules\`): ${untested.map((u) => `\`${u.rule}\``).join(", ")}`, "");
   }
   for (const ag of ctx.aggregates) {
     out.push(`## Aggregate ${ag.name}`, "");

@@ -7,7 +7,7 @@ import { assemble, header, Layout, ModuleImports } from "./python/layout.ts";
 import { policiesFile, policyTestFile, translatorScaffolds } from "./python/policies.ts";
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, docstringLines, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
-import { aggregateTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
+import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
 
 export { GENERATOR_NAME, GENERATOR_VERSION };
 export * from "./plan.ts";
@@ -103,6 +103,8 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
       const t = useCaseTestFile(L, uc);
       if (t) gen(t.path, t.content);
     }
+    const invariants = invariantTestFile(L);
+    if (invariants) gen(invariants.path, invariants.content);
     const policies = policiesFile(L);
     if (policies) gen(policies.path, policies.content);
     const policyTests = policyTestFile(L, analysis);

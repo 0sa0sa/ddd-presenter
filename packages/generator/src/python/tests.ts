@@ -1,4 +1,4 @@
-import type { AggregateIR, AggregateScenarioIR, ScenarioThenIR, Type, UseCaseIR, UseCaseScenarioIR } from "@ddd/core";
+import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
 import { depParams, repoAttr, resolveReturn, useCaseDeps } from "./application.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
@@ -323,6 +323,44 @@ function aggregateScenario(L: Layout, c: Code, ag: AggregateIR, sc: AggregateSce
     if (then.state && !Array.isArray(then.state)) recordAsserts(c, "transition.aggregate", then.state, types, vctx);
     eventAsserts(L, c, "transition.events", then, imp, vctx);
   });
+}
+
+/**
+ * One test per invariant for which a violating object could be derived from the scenarios' values (see
+ * core/rulecheck.ts). Each test asserts the error class and that exactly this rule raised it (`details["rule"]`),
+ * so a rule that is silently not enforced, or enforced under another name, fails here.
+ */
+export function invariantTestFile(L: Layout): PyFile | undefined {
+  const derived = deriveViolations(L.ca);
+  if (!derived.length) return undefined;
+  const imp = new Imports();
+  imp.from("__future__", "annotations");
+  imp.import("pytest");
+  const vctx: ValueContext = { imports: imp, typeModule: L.typeModule, fieldTypes: L.ca.fieldTypes };
+  const c = new Code();
+  for (const d of derived) {
+    const inv = [...L.ca.ir.valueObjects, ...L.ca.ir.aggregates.flatMap((a) => [a, ...a.entities])].find((o) => o.name === d.owner)!.invariants.find((i) => i.name === d.rule)!;
+    imp.from(L.typeModule(d.ownerKind, d.owner), d.owner);
+    importError(L, imp, d.error);
+    c.line().line();
+    c.line(`def ${derivedTestName(d.owner, d.rule)}() -> None:`);
+    c.indent(() => {
+      c.docstring(
+        [
+          `Invariant \`${d.rule}\` of ${d.owner}: ${inv.expression}`,
+          "",
+          `Derived from the values of scenario \`${d.from}\` with ${d.changed.join(" and ")} changed so that this rule is the first construct-time invariant that fails.`,
+        ].join("\n"),
+      );
+      c.line(`with pytest.raises(${d.error}) as raised:`);
+      c.indent(() => c.line(construct(d.owner, d.record, L.fieldTypes(d.owner), vctx)));
+      c.line(`assert raised.value.details["rule"] == ${pyString(d.rule)}`);
+    });
+  }
+  return {
+    path: L.testPath("invariants"),
+    content: assemble(L.model, `Invariants of the ${L.ca.ir.name} context, each violated on purpose (values derived from the scenarios).`, imp, c.toString()),
+  };
 }
 
 export function useCaseTestFile(L: Layout, uc: UseCaseIR): PyFile | undefined {

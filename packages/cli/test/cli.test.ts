@@ -183,6 +183,34 @@ describe("ddd CLI", () => {
     expect(cli(["diff", model, "--check"]).code).toBe(0);
   });
 
+  test("validate --strict also reports untested rules, unused errors and unused extension points", () => {
+    const { model } = project();
+    expect(cli(["validate", model, "--strict"]).code).toBe(0);
+    const text = readFileSync(model, "utf8");
+    // A second guard with an error nothing else raises and no scenario: untested; an extra error nobody raises: unused.
+    writeFileSync(
+      model,
+      text
+        .replace("      - name: EmailBlocked\n", "      - name: NeverRaised\n        code: never_raised\n        message: never\n      - name: EmailBlocked\n")
+        .replace(
+          "          - name: is_open\n",
+          "          - name: is_pending\n            expression: status == pending\n            error: InvitationAlreadyClosed\n          - name: is_open\n",
+        ),
+    );
+    expect(cli(["validate", model]).code).toBe(0); // not part of the normal check
+    const r = cli(["validate", model, "--strict"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("[unused-error]");
+    expect(r.err).toContain("[untested-rule] (CleaningStaff › CleaningStaffInvitation › is_pending)");
+  });
+
+  test("rules: shared errors are 'not counted', derived violating tests are listed", () => {
+    const { model } = project();
+    const r = cli(["rules", model]);
+    expect(r.out).toContain("derived:   test_invariant_cleaning_staff_invitation_expiry_after_creation");
+    expect(r.out).toContain("not counted: invitation_window_must_be_positive expects InvalidInvitationWindow, which invariant accepted_invitation_has_accepted_at can also raise");
+  });
+
   test("migrate is a no-op on the current schema", () => {
     const { model } = project();
     expect(cli(["migrate", model]).out).toContain("nothing to migrate");

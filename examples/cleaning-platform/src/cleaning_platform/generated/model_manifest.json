@@ -71,7 +71,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/README.md",
-      "sha256": "2dddd63f5961122d83cafc5a32763ac2bea6c045b2ee46873c5dd8019189a14b"
+      "sha256": "afd273899dde6e65f69954c93a6276f6561dafffd171db03fba352ac49f13346"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
@@ -148,6 +148,10 @@
     {
       "path": "tests/generated/test_cleaning_staff_cleaning_staff_invitation.py",
       "sha256": "f472d336d977b2e06f050a229f86869653a7b9f649cc3948ee73aded46e4155c"
+    },
+    {
+      "path": "tests/generated/test_cleaning_staff_invariants.py",
+      "sha256": "731b88cb8d9700f91d060daa4f38a9264d65c6b591222a526ca269460d4de542"
     },
     {
       "path": "tests/generated/test_cleaning_staff_issue_invitation.py",

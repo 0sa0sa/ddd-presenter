@@ -1,4 +1,4 @@
-import { formatDiagnostic, ruleUsage, SCHEMA_VERSION, validateModelText, type Diagnostic } from "@ddd/core";
+import { coverageDiagnostics, formatDiagnostic, parseModel, ruleUsage, SCHEMA_VERSION, sortDiagnostics, validateModelText, type Diagnostic } from "@ddd/core";
 import { computePlan, GENERATOR_VERSION, generatePython, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -51,12 +51,15 @@ export function cmdValidate(io: Io, opts: CommonOpts & { strict: boolean }): num
   const m = loadModel(io, opts);
   if (!m) return EXIT.usage;
   const { result } = m;
-  const failed = !result.ok || (opts.strict && result.diagnostics.some((d) => d.severity === "warning"));
+  // --strict also reviews coverage: rules no scenario tests, errors nothing raises, extension points nothing calls.
+  const diagnostics =
+    opts.strict && result.analysis ? sortDiagnostics([...result.diagnostics, ...coverageDiagnostics(result.analysis, parseModel(m.text).locate)]) : result.diagnostics;
+  const failed = !result.ok || (opts.strict && diagnostics.some((d) => d.severity === "warning"));
   if (opts.format === "json") {
-    io.out(JSON.stringify({ ok: !failed, diagnostics: result.diagnostics }, null, 2));
+    io.out(JSON.stringify({ ok: !failed, diagnostics }, null, 2));
   } else {
-    printDiagnostics(io, result.diagnostics, basename(m.path));
-    io.out(failed ? paint(io, "31", `✗ ${summary(result.diagnostics)}`) : paint(io, "32", `✓ Model is valid (${summary(result.diagnostics)})`));
+    printDiagnostics(io, diagnostics, basename(m.path));
+    io.out(failed ? paint(io, "31", `✗ ${summary(diagnostics)}`) : paint(io, "32", `✓ Model is valid (${summary(diagnostics)})`));
   }
   return failed ? EXIT.failed : EXIT.ok;
 }
@@ -317,7 +320,11 @@ export function cmdRules(io: Io, opts: CommonOpts): number {
     io.out(`  condition: ${u.expression}`);
     io.out(`  error:     ${u.error}`);
     io.out(`  applied:   ${u.appliedBy.map((a) => `${a.kind} ${a.name}`).join(", ") || "—"}`);
-    io.out(`  tested by: ${u.tests.join(", ") || paint(io, "33", "no scenario exercises this rule's error")}`);
+    io.out(`  tested by: ${u.scenarios.map((s) => `test_${s.name}`).join(", ") || (u.derived ? "—" : paint(io, "33", "nothing (no scenario that only this rule can fail)"))}`);
+    if (u.derived) io.out(`  derived:   ${u.derived.test} ${paint(io, "90", `(values of ${u.derived.from}, ${u.derived.changed.join(" and ")} changed)`)}`);
+    for (const a of u.ambiguous) {
+      io.out(paint(io, "90", `  not counted: ${a.name} expects ${u.error}, which ${a.alsoRaisedBy.join(", ")} can also raise`));
+    }
   }
   return EXIT.ok;
 }
