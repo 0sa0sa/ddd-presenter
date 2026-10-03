@@ -31,6 +31,10 @@ export class ExprSyntaxError extends Error {
 
 const KEYWORDS = new Set(["and", "or", "not", "true", "false", "null"]);
 
+/** Limits that keep hostile input (e.g. 300k nested parentheses) a diagnostic instead of a stack overflow. */
+export const MAX_EXPR_TOKENS = 2000;
+export const MAX_EXPR_NESTING = 64;
+
 function lex(src: string): Tok[] {
   const toks: Tok[] = [];
   let i = 0;
@@ -94,7 +98,17 @@ function lex(src: string): Tok[] {
 
 export function parseExpr(src: string): Expr {
   const toks = lex(src);
+  if (toks.length > MAX_EXPR_TOKENS) throw new ExprSyntaxError(`Expression is too long (more than ${MAX_EXPR_TOKENS} tokens); split it into named rules`, 0);
   let p = 0;
+  let depth = 0;
+  const nested = <T>(parse: () => T): T => {
+    if (++depth > MAX_EXPR_NESTING) throw new ExprSyntaxError(`Expression is nested too deeply (more than ${MAX_EXPR_NESTING} levels)`, peek().s);
+    try {
+      return parse();
+    } finally {
+      depth--;
+    }
+  };
   const peek = () => toks[p]!;
   const next = () => toks[p++]!;
   const isOp = (v: string) => peek().k === "op" && (peek() as { v: string }).v === v;
@@ -125,7 +139,7 @@ export function parseExpr(src: string): Expr {
   function parseNot(): Expr {
     if (isKw("not")) {
       const t = next();
-      const operand = parseNot();
+      const operand = nested(parseNot);
       return { t: "not", operand, start: t.s, end: operand.end };
     }
     return parseCmp();
@@ -157,7 +171,7 @@ export function parseExpr(src: string): Expr {
         const args: Expr[] = [];
         if (!isOp(")")) {
           for (;;) {
-            args.push(parseOr());
+            args.push(nested(parseOr));
             if (isOp(",")) {
               next();
               continue;
@@ -192,7 +206,7 @@ export function parseExpr(src: string): Expr {
       return { t: "name", name: t.v, start: t.s, end: t.e };
     }
     if (t.k === "op" && t.v === "(") {
-      const e = parseOr();
+      const e = nested(parseOr);
       expectOp(")");
       return e;
     }

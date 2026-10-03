@@ -791,7 +791,7 @@ function relationshipCompletions(s: Snapshot, pos: Extract<Position, { kind: "va
 
 /** `when:` of a policy: this context's events, then other contexts' events as Context.Event (contract events first). */
 function policyEventCompletions(s: Snapshot, ctx: ContextIR, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
-  const before = s.text.slice(pos.valueStart, pos.from);
+  const before = valueBefore(s.text, pos.valueStart, pos.from);
   const qualified = /([A-Za-z_]\w*)\s*\.\s*$/.exec(before);
   if (qualified) {
     const other = contextByName(s, qualified[1]);
@@ -836,7 +836,7 @@ function eventPathType(s: Snapshot, ev: NonNullable<ReturnType<typeof policyEven
 function policyArgCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
   const ctx = scope.context;
   const ev = policyEvent(s, ctx, scope.policy);
-  const before = s.text.slice(pos.valueStart, pos.from);
+  const before = valueBefore(s.text, pos.valueStart, pos.from);
   if (/\bclock\s*\.\s*$/.test(before)) return [{ label: "now", kind: "port", detail: "DateTime — 現在時刻" }];
   if (/\bids\s*\.\s*$/.test(before)) return [{ label: "new", kind: "port", detail: "UUID — 新しいID" }];
   const path = /\bevent((?:\s*\.\s*[A-Za-z_]\w*)*)\s*\.\s*$/.exec(before);
@@ -876,11 +876,21 @@ function siblingValue(s: Snapshot, key: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The end of a value before the cursor, for the end-anchored patterns that find what is being completed
+ * (`name.`, `event.a.b.`, `x ==`). Unanchored at the start, those patterns retry from every position,
+ * which is quadratic in a long value; a bounded tail keeps each completion constant-time.
+ */
+const VALUE_TAIL = 256;
+function valueBefore(text: string, valueStart: number, cursor: number): string {
+  return text.slice(Math.max(valueStart, cursor - VALUE_TAIL), cursor);
+}
+
 function expressionCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "value" }>): CompletionItem[] {
   const ctx = scope.context;
   if (!ctx) return [];
   const env = exprEnv(s, scope, pos);
-  const before = s.text.slice(pos.valueStart, pos.from);
+  const before = valueBefore(s.text, pos.valueStart, pos.from);
 
   // Member access: `something.` → members of that value.
   const dot = /([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\.$/.exec(before);
@@ -1164,7 +1174,7 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
     return uc ? { ref: { kind: "useCase", ctx, useCase: uc }, ...w } : undefined;
   }
   if (pos.container === "exprMap:policyArgs") {
-    const before = text.slice(pos.valueStart, w.from);
+    const before = valueBefore(text, pos.valueStart, w.from);
     if (name === "clock" || name === "ids") return { ref: { kind: "port", name }, ...w };
     if (/\b(clock|ids)\s*\.\s*$/.test(before)) return { ref: { kind: "port", name: `${/\b(clock|ids)\s*\.\s*$/.exec(before)![1]}.${name}` }, ...w };
     const ev = policyEvent(s, ctx, scope.policy);
@@ -1196,7 +1206,7 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
 
   if (isExpr) {
     const env = exprEnv(s, scope, pos);
-    const before = text.slice(pos.valueStart, w.from);
+    const before = valueBefore(text, pos.valueStart, w.from);
     const dot = /([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\.$/.exec(before);
     if (dot) {
       const base = dot[1]!;

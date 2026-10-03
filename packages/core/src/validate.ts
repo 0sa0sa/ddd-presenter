@@ -142,6 +142,13 @@ const RESERVED_TYPES = new Set([
 ]);
 
 const PASCAL = /^[A-Z][A-Za-z0-9]*$/;
+
+/** A relative directory inside the project: plain segments only (no absolute, drive-letter, `~`, empty or `..` parts). */
+export function isSafeRelativeDir(dir: string): boolean {
+  if (dir === ".") return true;
+  const parts = dir.replace(/\/+$/, "").split("/");
+  return parts.every((p) => /^[A-Za-z0-9_.-]+$/.test(p) && p !== "." && p !== "..");
+}
 const SNAKE = /^[a-z][a-z0-9_]*$/;
 
 // ---------------------------------------------------------------------------
@@ -164,7 +171,7 @@ class Validator {
     }
     for (const dir of ["srcDir", "testsDir"] as const) {
       const v = m.generation[dir];
-      if (v.startsWith("/") || v.split(/[\\/]/).includes("..")) {
+      if (!isSafeRelativeDir(v)) {
         this.bag.error("invalid-path", `generation.${dir === "srcDir" ? "src_dir" : "tests_dir"} must be a relative path inside the project`, ["generation", dir === "srcDir" ? "src_dir" : "tests_dir"]);
       }
     }
