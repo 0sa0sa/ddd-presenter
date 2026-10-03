@@ -246,7 +246,9 @@ export function createApp(db: Database, options: AppOptions = {}) {
 
   const throttle = new FailureThrottle();
   const passwordAccounts = () => (db.query("SELECT COUNT(*) AS n FROM users WHERE password_hash IS NOT NULL").get() as { n: number }).n;
-  const devLoginActive = () => options.devLogin === true || (options.devLogin === "auto" && !!options.loopback && !options.trustedUserHeader && passwordAccounts() === 0);
+  /** A request relayed by a reverse proxy is not "local", even when the server listens on loopback. */
+  const viaProxy = (c: Context<Env>) => ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded"].some((h) => c.req.header(h) !== undefined);
+  const devLoginActive = (c: Context<Env>) => options.devLogin === true || (options.devLogin === "auto" && !!options.loopback && !viaProxy(c) && !options.trustedUserHeader && passwordAccounts() === 0);
   let dummyHash: Promise<string> | undefined;
   /** Verifying against a fixed hash when there is no account keeps the response time the same. */
   const verifyPassword = async (password: string, hash: string | null | undefined) => {
@@ -289,7 +291,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
 
   /** What the sign-in page offers. The user list exists only in dev-login mode (it is what that mode signs in with). */
   app.get("/api/auth/config", (c) => {
-    const dev = devLoginActive();
+    const dev = devLoginActive(c);
     const users = dev ? (db.query("SELECT username FROM users WHERE password_hash IS NULL ORDER BY username LIMIT 100").all() as { username: string }[]).map((u) => u.username) : undefined;
     return c.json({ dev_login: dev, registration: options.registration !== "closed", proxy_auth: !!options.trustedUserHeader, users });
   });
@@ -310,7 +312,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
       startSession(c, user);
       return c.json({ user });
     }
-    if (!devLoginActive()) fail(400, "password is required");
+    if (!devLoginActive(c)) fail(400, "password is required");
     if (row?.password_hash) fail(401, "This account has a password; sign in with it");
     const user = row ? { id: row.id, username: row.username } : createUser(name, null);
     startSession(c, user);
@@ -393,7 +395,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
 
   /** Usernames for adding members: everyone in dev-login mode, otherwise people who share a workspace with you. */
   app.get("/api/users", (c) => {
-    const users = devLoginActive()
+    const users = devLoginActive(c)
       ? db.query("SELECT username FROM users ORDER BY username LIMIT 500").all()
       : db
           .query("SELECT DISTINCT u.username FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.workspace_id IN (SELECT workspace_id FROM memberships WHERE user_id = ?) ORDER BY u.username LIMIT 500")
@@ -434,16 +436,17 @@ export function createApp(db: Database, options: AppOptions = {}) {
   // listed). Membership alone never grants it: owners can add anyone as a member without their consent.
   const aiGateConfigured = options.aiAdmins !== undefined || options.aiWorkspaces !== undefined;
   const firstUserId = () => (db.query("SELECT id FROM users ORDER BY created_at, rowid LIMIT 1").get() as { id: string } | null)?.id;
-  const isAiAdmin = (userId: string | null | undefined): boolean => {
+  /** `local` = the request did not come through a reverse proxy (the loopback default applies only then). */
+  const isAiAdmin = (userId: string | null | undefined, local = true): boolean => {
     if (!userId) return false;
     if (options.aiAdmins) {
       const row = db.query("SELECT username FROM users WHERE id = ?").get(userId) as { username: string } | null;
       return !!row && options.aiAdmins.includes(row.username);
     }
-    return !aiGateConfigured && !!options.loopback && firstUserId() === userId;
+    return !aiGateConfigured && !!options.loopback && local && firstUserId() === userId;
   };
   const aiWorkspaceListed = (wsId: string) => options.aiWorkspaces === "*" || (Array.isArray(options.aiWorkspaces) && options.aiWorkspaces.includes(wsId));
-  const mayEnableAi = (wsId: string, userId: string) => aiWorkspaceListed(wsId) || isAiAdmin(userId);
+  const mayEnableAi = (wsId: string, userId: string, c: Context<Env>) => aiWorkspaceListed(wsId) || isAiAdmin(userId, !viaProxy(c));
   const aiBucket = new TokenBucket(options.aiRate?.perMinute ?? 30, options.aiRate?.burst ?? 10);
   /** One AI call for the signed-in user; 429 when their budget is spent. */
   const spendAi = (c: Context<Env>) => {
@@ -469,7 +472,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
       ai_available: providerIds.length > 0,
       ai_model: provider ? assistants[provider]!.model : null,
       ai_providers: providers,
-      ai_can_enable: providerIds.length > 0 && mayEnableAi(wsId, c.get("user").id),
+      ai_can_enable: providerIds.length > 0 && mayEnableAi(wsId, c.get("user").id, c),
       ai_active: !!aiFor(wsId),
     });
   });
@@ -482,7 +485,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
     if (ai_enabled === undefined && ai_provider === undefined) fail(400, "ai_enabled or ai_provider is required");
     if (ai_enabled !== undefined && typeof ai_enabled !== "boolean") fail(400, "ai_enabled must be true or false");
     if (ai_provider !== undefined && !(ai_provider in assistants)) fail(400, `ai_provider must be one of: ${providerIds.join(", ") || "(none configured)"}`);
-    if (ai_enabled === true && !mayEnableAi(wsId, actor.id)) fail(403, "Only users the server operator allows (DDD_AI_ADMINS) can turn AI on");
+    if (ai_enabled === true && !mayEnableAi(wsId, actor.id, c)) fail(403, "Only users the server operator allows (DDD_AI_ADMINS) can turn AI on");
     if (ai_provider !== undefined) {
       db.query("UPDATE workspaces SET ai_provider = ? WHERE id = ?").run(ai_provider, wsId);
       audit(wsId, actor.id, "ai.provider", wsId, { provider: ai_provider });

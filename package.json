@@ -12,6 +12,7 @@
     "dev:web": "cd packages/web && bunx vite",
     "build:web": "cd packages/web && bunx vite build",
     "start": "bun packages/server/src/main.ts",
+    "admin": "bun packages/server/src/admin.ts",
     "verify:example": "cd examples/cleaning-platform && bun ../../packages/cli/src/main.ts diff --check && .venv/bin/python -m pytest -q && .venv/bin/mypy src tests",
     "build:vscode": "cd packages/vscode && bun run build && bunx @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license"
   },

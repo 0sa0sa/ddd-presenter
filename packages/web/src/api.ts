@@ -55,8 +55,18 @@ export function describeError(e: unknown): string {
 }
 
 export interface Me {
-  user: { id: string; username: string };
+  user: { id: string; username: string; has_password?: boolean };
   workspaces: { id: string; name: string; role: Role }[];
+  /** Signed in through the authenticating proxy (SSO); sign-out happens there. */
+  proxy_auth?: boolean;
+}
+
+/** What the sign-in page offers (public). `users` exists only in dev-login mode. */
+export interface AuthConfig {
+  dev_login: boolean;
+  registration: boolean;
+  proxy_auth: boolean;
+  users?: string[];
 }
 export interface ProjectSummary {
   id: string;
@@ -127,9 +137,14 @@ export const api = {
     if (r.service !== "ddd-presenter") throw new ApiError(0, "接続先がDDD Presenterのサーバーではありません。ポート設定（PORT / DDD_PORT）を確認してください。", {});
     return r;
   },
+  authConfig: () => request<AuthConfig>("GET", "/api/auth/config"),
   users: () => request<{ users: { username: string }[] }>("GET", "/api/users"),
-  login: (username: string) => request<{ user: Me["user"] }>("POST", "/api/login", { username }),
+  login: (username: string, password?: string) => request<{ user: Me["user"] }>("POST", "/api/login", password ? { username, password } : { username }),
+  register: (username: string, password: string) => request<{ user: Me["user"] }>("POST", "/api/register", { username, password }),
   logout: () => request("POST", "/api/logout"),
+  logoutEverywhere: () => request<{ ok: boolean; sessions: number }>("POST", "/api/logout-all"),
+  changePassword: (newPassword: string, currentPassword?: string) =>
+    request("POST", "/api/account/password", currentPassword === undefined ? { new_password: newPassword } : { current_password: currentPassword, new_password: newPassword }),
   me: () => request<Me>("GET", "/api/me"),
   createWorkspace: (name: string) => request<{ id: string }>("POST", "/api/workspaces", { name }),
   workspace: (ws: string) =>
@@ -139,6 +154,9 @@ export const api = {
       ai_available: boolean;
       ai_model: string | null;
       ai_providers: AiProvider[];
+      /** This user may turn AI on here (the server operator allows it: DDD_AI_ADMINS / DDD_AI_WORKSPACES). */
+      ai_can_enable?: boolean;
+      ai_active?: boolean;
     }>("GET", `/api/workspaces/${ws}`),
   setAi: (ws: string, settings: { ai_enabled?: boolean; ai_provider?: AiProviderId }) =>
     request<{ ai_enabled: boolean; ai_provider: AiProviderId | null; ai_model: string | null }>("PATCH", `/api/workspaces/${ws}/settings`, settings),

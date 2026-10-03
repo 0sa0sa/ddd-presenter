@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { AiBusyError, cliEnv, codexCompleter, limiter, type ModelAssistant, type Runner } from "../src/ai.ts";
 import { createApp, purgeExpiredSessions, zipEntryName, type AppOptions } from "../src/app.ts";
+import { runAdmin } from "../src/admin.ts";
 import { configFromEnv } from "../src/config.ts";
 import { openDatabase } from "../src/db.ts";
 import { hostnameOf, isLoopback, TokenBucket } from "../src/security.ts";
@@ -137,6 +138,18 @@ describe("dev login (local first run)", () => {
     expect(config.users).toBeUndefined();
     expect((await post(app, "/api/login", { username: "carol" })).status).toBe(400);
     expect((await post(app, "/api/login", { username: "bob", password: "bob's secret" })).status).toBe(200);
+  });
+
+  test("auto is off for requests relayed by a reverse proxy, and the loopback AI default does not apply to them", async () => {
+    const app = createApp(openDatabase(":memory:"), { devLogin: "auto", loopback: true, assistant: { model: "m", inline: async () => "", propose: async () => undefined, board: async () => [] } });
+    const proxied = { "x-forwarded-for": "203.0.113.9" };
+    expect((await post(app, "/api/login", { username: "eve" }, proxied)).status).toBe(400);
+    expect(((await (await app.request("/api/auth/config", { headers: proxied })).json()) as any).dev_login).toBe(false);
+    const first = await devLogin(app, "first");
+    const ws = (await first.json("GET", "/api/me")).body.workspaces[0].id;
+    const viaProxy = await app.request(`/api/workspaces/${ws}/settings`, { method: "PATCH", headers: { cookie: first.cookie, origin: ORIGIN, "content-type": "application/json", ...proxied }, body: JSON.stringify({ ai_enabled: true }) });
+    expect(viaProxy.status).toBe(403);
+    expect((await first.json("PATCH", `/api/workspaces/${ws}/settings`, { ai_enabled: true })).status).toBe(200);
   });
 
   test("auto is off on a network address; explicit on still protects accounts with a password", async () => {
@@ -440,6 +453,29 @@ describe("AI gate, rate limits and queue", () => {
   });
 });
 
+describe("admin command", () => {
+  test("set-password creates or resets an account; logout-all ends its sessions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-admin-"));
+    try {
+      const file = join(dir, "db.sqlite");
+      expect((await runAdmin(["set-password", "root"], async () => "short", file)).code).toBe(1);
+      expect(await runAdmin(["set-password", "root"], async () => "root password\n", file)).toEqual({ code: 0, message: "created root with a password" });
+      const db = openDatabase(file);
+      const app = createApp(db, { registration: "closed" });
+      const s = client(app, cookieOf(await post(app, "/api/login", { username: "root", password: "root password" })));
+      expect((await s.json("GET", "/api/me")).body.workspaces).toHaveLength(1);
+      expect((await runAdmin(["logout-all", "root"], async () => "", file)).code).toBe(0);
+      expect((await s.call("GET", "/api/me")).status).toBe(401);
+      expect((await runAdmin(["set-password", "root"], async () => "new password", file)).code).toBe(0);
+      expect((await post(app, "/api/login", { username: "root", password: "new password" })).status).toBe(200);
+      expect((await runAdmin(["frobnicate", "root"], async () => "", file)).code).toBe(2);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("server configuration", () => {
   test("binds to loopback by default with dev login on auto", () => {
     const c = configFromEnv({});
@@ -454,6 +490,10 @@ describe("server configuration", () => {
     expect(c.warnings.join("\n")).toContain("192.168.1.5");
     expect(c.warnings.join("\n")).toContain("DDD_DEV_LOGIN=1");
     expect(configFromEnv({ HOST: "0.0.0.0" }).app.allowedHosts).toEqual([]);
+    // Loopback behind a reverse proxy on the same machine is not "local only".
+    expect(configFromEnv({ DDD_ALLOWED_HOSTS: "ddd.example.com" }).app.loopback).toBe(false);
+    expect(configFromEnv({ DDD_TRUSTED_USER_HEADER: "X-Forwarded-User" }).app.loopback).toBe(false);
+    expect(configFromEnv({ DDD_ALLOWED_HOSTS: "localhost" }).app.loopback).toBe(true);
   });
 
   test("host helpers", () => {
