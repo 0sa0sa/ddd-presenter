@@ -6,7 +6,7 @@ import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, even
 import { assemble, header, Layout, ModuleImports } from "./python/layout.ts";
 import { policiesFile, policyTestFile, translatorScaffolds } from "./python/policies.ts";
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
-import { Code, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
+import { Code, docstringLines, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
 
 export { GENERATOR_NAME, GENERATOR_VERSION };
@@ -64,9 +64,9 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   const scaffold = (path: string, content: string) => {
     if (!files.some((f) => f.path === path)) files.push({ path, content, ownership: "scaffold" });
   };
-  const initPy = (doc: string) => `${header(model)}\n\n"""${doc}"""\n`;
+  const initPy = (doc: string) => `${header(model)}\n\n${docstringLines(doc, "").join("\n")}\n`;
 
-  scaffold(`${src}/${pkg}/__init__.py`, `"""${model.project}${model.description ? ` — ${model.description}` : ""}"""\n`);
+  scaffold(`${src}/${pkg}/__init__.py`, `${docstringLines(`${model.project}${model.description ? ` — ${model.description}` : ""}`, "").join("\n")}\n`);
   gen(`${src}/${pkg}/generated/__init__.py`, initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
   gen(`${src}/${pkg}/generated/_runtime.py`, `${header(model)}\n\n"""Base classes shared by the generated domain code (Pydantic v2 + stdlib only)."""\n\n${RUNTIME_PY}`);
   gen(`${src}/${pkg}/generated/adapters.py`, `${header(model)}\n\n"""Reference adapters for the clock and id ports (structurally typed; usable in every context)."""\n\n${ADAPTERS_PY}`);

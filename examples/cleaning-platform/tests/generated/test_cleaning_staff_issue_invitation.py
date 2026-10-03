@@ -34,7 +34,9 @@ def test_invitation_is_issued() -> None:
 
     Given: now is 2026-01-01T10:00:00+00:00
     When: issue_invitation
-    Then: returns "00000000-0000-0000-0000-0000000000aa"; state [{"aggregate":"CleaningStaffInvitation","id":"00000000-0000-0000-0000-0000000000aa","fields":{"status":"pending","expires_at":"2026-01-08T10:00:00+00:00"}}]; emits InvitationIssued
+    Then: returns "00000000-0000-0000-0000-0000000000aa"; state [{"aggregate":
+    "CleaningStaffInvitation", "id": "00000000-0000-0000-0000-0000000000aa", "fields": {"status":
+    "pending", "expires_at": "2026-01-08T10:00:00+00:00"}}]; emits InvitationIssued
     """
     unit_of_work = FakeUnitOfWork()
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
@@ -57,7 +59,9 @@ def test_invitation_is_issued() -> None:
     result = use_case.execute(command)
     assert result == UUID("00000000-0000-0000-0000-0000000000aa")
     assert unit_of_work.committed
-    stored_0 = cleaning_staff_invitation_repository.get(UUID("00000000-0000-0000-0000-0000000000aa"))
+    stored_0 = cleaning_staff_invitation_repository.get(
+        UUID("00000000-0000-0000-0000-0000000000aa")
+    )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.PENDING
     assert stored_0.expires_at == datetime.fromisoformat("2026-01-08T10:00:00+00:00")

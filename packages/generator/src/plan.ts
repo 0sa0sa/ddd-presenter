@@ -135,10 +135,40 @@ function detectBreaking(entries: PlanEntry[]): BreakingChange[] {
   return out;
 }
 
+/** Source lines with bracketed continuations joined, so wrapped signatures read as one line. */
+function logicalLines(src: string): string[] {
+  const out: string[] = [];
+  let buf: string | undefined;
+  let depth = 0;
+  let inDoc = false;
+  for (const line of src.split("\n")) {
+    const quotes = (line.match(/"""/g) ?? []).length;
+    if (buf === undefined && (inDoc || quotes > 0)) {
+      // Docstring text never takes part in bracket matching.
+      if (quotes % 2 === 1) inDoc = !inDoc;
+      out.push(line);
+      continue;
+    }
+    buf = buf === undefined ? line : `${buf} ${line.trim()}`;
+    for (const ch of line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, "")) {
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) depth--;
+    }
+    if (depth <= 0) {
+      // Normalize the wrapping itself away: "( a, b, )" and "(a, b)" are the same signature.
+      out.push(buf.replace(/([([{]) /g, "$1").replace(/,? ([)\]}])/g, "$1"));
+      buf = undefined;
+      depth = 0;
+    }
+  }
+  if (buf !== undefined) out.push(buf);
+  return out;
+}
+
 function symbols(src: string): Map<string, string> {
   const out = new Map<string, string>();
   let cls: string | undefined;
-  for (const line of src.split("\n")) {
+  for (const line of logicalLines(src)) {
     const c = /^class (\w+)/.exec(line);
     if (c) {
       cls = c[1];

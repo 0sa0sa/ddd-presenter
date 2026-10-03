@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { computePlan, generatePython, renderManifest, sha256, unifiedDiff } from "../src/index.ts";
+import { wrapLongLines } from "../src/python/layout.ts";
 import { emitExpr, Imports } from "../src/python/support.ts";
 
 const EXAMPLE = join(import.meta.dir, "../../../examples/cleaning-platform");
@@ -149,8 +150,30 @@ describe("expression emission", () => {
 
 const VENV = join(EXAMPLE, ".venv/bin/python");
 
+/** Python script: report every condition (if/while/assert/return/StateGuard holds=) that parses as a tuple. */
+const NO_TUPLE_CONDITIONS = `
+import ast, pathlib, sys
+for path in sorted(pathlib.Path(sys.argv[1]).rglob("*.py")):
+    for node in ast.walk(ast.parse(path.read_text(), str(path))):
+        conditions = []
+        if isinstance(node, (ast.If, ast.While, ast.Assert, ast.IfExp)):
+            conditions.append(node.test)
+        if isinstance(node, ast.Return) and node.value is not None:
+            conditions.append(node.value)
+        if isinstance(node, ast.keyword) and node.arg == "holds":
+            conditions.append(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            conditions.append(node.operand)
+        for c in conditions:
+            if isinstance(c, ast.Tuple):
+                print(f"{path}:{c.lineno}: condition is a tuple (always true)")
+        if isinstance(node, ast.Tuple) and len(node.elts) == 1 and isinstance(node.elts[0], (ast.BoolOp, ast.Compare, ast.UnaryOp)):
+            print(f"{path}:{node.lineno}: one-element tuple around a condition")
+`;
+
 const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.ddd.yaml"), "utf8");
 const CONTEXT_MAP = readFileSync(join(import.meta.dir, "fixtures/context-map.ddd.yaml"), "utf8");
+const LONG_RULES = readFileSync(join(import.meta.dir, "fixtures/long-rules.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -162,6 +185,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the sample model", MODEL],
     ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
     ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
+    ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -186,6 +210,9 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
       }
       const mypy = Bun.spawnSync([VENV, "-m", "mypy", "src", ...(existsSync(join(dir, "tests")) ? ["tests"] : [])], { cwd: dir });
       expect(mypy.stdout.toString()).toContain("Success");
+      // Independent of the TypeScript wrapper: Python's own parser must not see a tuple where a condition belongs.
+      const ast = Bun.spawnSync([VENV, "-c", NO_TUPLE_CONDITIONS, dir]);
+      expect(ast.stdout.toString() + ast.stderr.toString()).toBe("");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -278,5 +305,106 @@ describe("policies and the context map", () => {
     expect(plan.stale.map((s) => s.path)).toEqual(["src/context_map/generated/payroll/application/policies.py", "tests/generated/test_payroll_policies.py"]);
     // The customer-owned translator is not a generated file, so it is never reported or removed.
     expect(plan.entries.find((e) => e.path.endsWith("payroll/translators.py"))).toBeUndefined();
+  });
+});
+
+/** Conditions (`if`/`elif`/`while`/`return`/`holds=`) in Python source that are parenthesized tuples. */
+function tupleConditions(src: string): string[] {
+  const logical: string[] = [];
+  let buf = "";
+  let depth = 0;
+  for (const line of src.split("\n")) {
+    buf = buf ? `${buf} ${line.trim()}` : line.trim();
+    for (const ch of line.replace(/"(?:[^"\\]|\\.)*"/g, '""')) {
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) depth--;
+    }
+    if (depth <= 0) {
+      logical.push(buf);
+      buf = "";
+      depth = 0;
+    }
+  }
+  const bad: string[] = [];
+  for (const l of logical) {
+    const m = /^(?:if|elif|while|return|holds=)\s*(?:not\s+)?(\(.*\))\s*[:,]?$/.exec(l);
+    if (!m) continue;
+    const group = m[1]!;
+    // The condition is one parenthesized group only if its first "(" closes at the very end.
+    let d = 0;
+    let closesAtEnd = true;
+    let topComma = false;
+    for (let i = 0; i < group.length; i++) {
+      const ch = group[i]!;
+      if ("([{".includes(ch)) d++;
+      else if (")]}".includes(ch)) {
+        d--;
+        if (d === 0 && i < group.length - 1) closesAtEnd = false;
+      } else if (ch === "," && d === 1) topComma = true;
+    }
+    if (closesAtEnd && topComma) bad.push(l);
+  }
+  return bad;
+}
+
+describe("line wrapping (regression: a grouping parenthesis must never become a tuple)", () => {
+  test("the checker itself recognizes the old bug", () => {
+    expect(tupleConditions("        if not (\n            self.a is None or self.b,\n        ):")).toHaveLength(1);
+  });
+
+  test("a long negated condition is split before its operators, without a trailing comma", () => {
+    const src = "        if not (self.refunded is None or (self.captured is not None and self.refunded.amount <= self.captured.amount)):";
+    expect(wrapLongLines(src)).toBe(
+      [
+        "        if not (",
+        "            self.refunded is None",
+        "            or (self.captured is not None and self.refunded.amount <= self.captured.amount)",
+        "        ):",
+      ].join("\n"),
+    );
+  });
+
+  test("a bare boolean value of if/return/keyword lines is parenthesized, not tupled", () => {
+    const out = wrapLongLines("            holds=self.captured is not None and self.refunded is None and requested_refund_amount > 0 and self.ok,");
+    expect(out.split("\n")[0]).toBe("            holds=(");
+    expect(out.split("\n").at(-1)).toBe("            ),");
+    expect(tupleConditions(out)).toEqual([]);
+    const ret = wrapLongLines("        return command.allow_orders_that_are_currently_on_hold or (purchase_order.status == PurchaseOrderStatus.PLACED)");
+    expect(ret.startsWith("        return (\n")).toBe(true);
+    expect(tupleConditions(ret)).toEqual([]);
+  });
+
+  test("a single generator-expression argument gets no trailing comma (that would be a SyntaxError)", () => {
+    const out = wrapLongLines("        self._event_publisher.publish(tuple(event for event in emitted if isinstance(event, SomeRatherLongEventName)))");
+    expect(out.split("\n").length).toBeGreaterThan(1);
+    expect(out).not.toMatch(/,\s*\n\s*\)/);
+  });
+
+  test("argument lists get one argument per line with trailing commas; one-element tuples keep their comma", () => {
+    const call = wrapLongLines("        aggregate = cls(id=id, email=email, status=InvitationStatus.PENDING, created_at=at, expires_at=expires_at)");
+    expect(call).toContain("            expires_at=expires_at,\n        )");
+    const tuple = wrapLongLines("    ALL_ERRORS: tuple[type[DomainError], ...] = (SomeVeryLongDomainErrorNameThatIsReallyQuiteLongIndeed_____________,)");
+    expect(tuple).toContain("SomeVeryLongDomainErrorNameThatIsReallyQuiteLongIndeed_____________,");
+  });
+
+  test.each([
+    ["the sample model", MODEL],
+    ["the kitchen-sink model", KITCHEN_SINK],
+    ["the context-map model", CONTEXT_MAP],
+    ["the long-rules model", LONG_RULES],
+  ])("%s: no generated condition is a tuple and no line exceeds 100 characters", (_label, text) => {
+    for (const f of generate(text).files) {
+      if (!f.path.endsWith(".py")) continue;
+      expect({ path: f.path, tuples: tupleConditions(f.content) }).toEqual({ path: f.path, tuples: [] });
+      const long = f.content.split("\n").filter((l) => l.length > 100);
+      expect({ path: f.path, long }).toEqual({ path: f.path, long: [] });
+    }
+  });
+
+  test("the long invariant is emitted as a real condition", () => {
+    const py = generate(LONG_RULES).files.find((f) => f.path.endsWith("billing/domain/aggregates.py"))!.content;
+    expect(py).toContain(
+      "        if not (\n            self.refunded is None\n            or (self.captured is not None and self.refunded.amount <= self.captured.amount)\n        ):",
+    );
   });
 });

@@ -33,7 +33,9 @@ def test_pending_invitation_is_accepted() -> None:
 
     Given: now is 2026-01-02T10:00:00+00:00; a stored CleaningStaffInvitation
     When: accept_invitation
-    Then: state [{"aggregate":"CleaningStaffInvitation","id":"00000000-0000-0000-0000-000000000001","fields":{"status":"accepted","accepted_at":"2026-01-02T10:00:00+00:00"}}]; emits InvitationAccepted
+    Then: state [{"aggregate": "CleaningStaffInvitation", "id":
+    "00000000-0000-0000-0000-000000000001", "fields": {"status": "accepted", "accepted_at":
+    "2026-01-02T10:00:00+00:00"}}]; emits InvitationAccepted
     """
     unit_of_work = FakeUnitOfWork()
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
@@ -44,7 +46,7 @@ def test_pending_invitation_is_accepted() -> None:
             status=InvitationStatus.PENDING,
             created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
             expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
-        ),
+        )
     )
     clock = FixedClock(datetime.fromisoformat("2026-01-02T10:00:00+00:00"))
     event_publisher = CapturingEventPublisher()
@@ -57,7 +59,9 @@ def test_pending_invitation_is_accepted() -> None:
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
     use_case.execute(command)
     assert unit_of_work.committed
-    stored_0 = cleaning_staff_invitation_repository.get(UUID("00000000-0000-0000-0000-000000000001"))
+    stored_0 = cleaning_staff_invitation_repository.get(
+        UUID("00000000-0000-0000-0000-000000000001")
+    )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.ACCEPTED
     assert stored_0.accepted_at == datetime.fromisoformat("2026-01-02T10:00:00+00:00")
@@ -73,7 +77,8 @@ def test_expired_invitation_is_rejected() -> None:
 
     Given: now is 2026-01-08T10:00:00+00:00; a stored CleaningStaffInvitation
     When: accept_invitation
-    Then: raises InvitationNotDeliverable; state [{"aggregate":"CleaningStaffInvitation","id":"00000000-0000-0000-0000-000000000001","fields":{"status":"pending"}}]; emits nothing
+    Then: raises InvitationNotDeliverable; state [{"aggregate": "CleaningStaffInvitation", "id":
+    "00000000-0000-0000-0000-000000000001", "fields": {"status": "pending"}}]; emits nothing
     """
     unit_of_work = FakeUnitOfWork()
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
@@ -84,7 +89,7 @@ def test_expired_invitation_is_rejected() -> None:
             status=InvitationStatus.PENDING,
             created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
             expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
-        ),
+        )
     )
     clock = FixedClock(datetime.fromisoformat("2026-01-08T10:00:00+00:00"))
     event_publisher = CapturingEventPublisher()
@@ -99,7 +104,9 @@ def test_expired_invitation_is_rejected() -> None:
         use_case.execute(command)
     assert not unit_of_work.committed
     assert unit_of_work.rolled_back
-    stored_0 = cleaning_staff_invitation_repository.get(UUID("00000000-0000-0000-0000-000000000001"))
+    stored_0 = cleaning_staff_invitation_repository.get(
+        UUID("00000000-0000-0000-0000-000000000001")
+    )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.PENDING
     assert [type(event).__name__ for event in event_publisher.published] == []

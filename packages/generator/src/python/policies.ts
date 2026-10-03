@@ -157,7 +157,7 @@ export function policiesFile(L: Layout): PyFile | undefined {
       c.indent(() => {
         c.docstring("Event bus entry point (EventHandler).");
         c.line(`if not isinstance(event, ${ev}):`);
-        c.indent(() => c.line(`raise TypeError(f"${policyClass(p)} handles ${r.info.event.name}, got {type(event).__name__}")`));
+        c.indent(() => c.line(`raise TypeError(f"{type(self).__name__} handles ${r.info.event.name}, not {type(event).__name__}")`));
         c.line("self.handle(event)");
       });
     });

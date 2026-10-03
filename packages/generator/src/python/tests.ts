@@ -181,10 +181,20 @@ export function testingFile(L: Layout): PyFile {
 function describeThen(t: ScenarioThenIR): string[] {
   const out: string[] = [];
   if (t.raises) out.push(`raises ${t.raises}`);
-  if (t.hasReturns) out.push(`returns ${JSON.stringify(t.returns)}`);
-  if (t.state) out.push(`state ${JSON.stringify(t.state, (k, v) => (k === "path" ? undefined : v))}`);
+  if (t.hasReturns) out.push(`returns ${spacedJson(t.returns)}`);
+  if (t.state) out.push(`state ${spacedJson(t.state)}`);
   if (t.emits) out.push(t.emits.length ? `emits ${t.emits.map((e) => e.event).join(", ")}` : "emits nothing");
   return out;
+}
+
+/** JSON with spaces after separators (so long docstring lines can wrap); `path` bookkeeping keys are dropped. */
+function spacedJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(spacedJson).join(", ")}]`;
+  if (v && typeof v === "object") {
+    const entries = Object.entries(v).filter(([k, x]) => k !== "path" && x !== undefined);
+    return `{${entries.map(([k, x]) => `${JSON.stringify(k)}: ${spacedJson(x)}`).join(", ")}}`;
+  }
+  return JSON.stringify(v ?? null);
 }
 
 function eventAsserts(L: Layout, c: Code, events: string, then: ScenarioThenIR, imp: Imports, vctx: ValueContext): void {

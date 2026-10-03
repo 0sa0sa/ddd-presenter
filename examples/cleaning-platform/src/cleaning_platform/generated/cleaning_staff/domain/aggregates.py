@@ -43,7 +43,7 @@ class CleaningStaffInvitation(AggregateRoot):
 
     @model_validator(mode="after")
     def _check_invariants(self) -> Self:
-        """Construct-time invariants. Runs for every new instance, including transition candidates."""
+        """Construct-time invariants. Run for every new instance (transition candidates too)."""
         self._invariant_expiry_after_creation()
         self._invariant_accepted_invitation_has_accepted_at()
         return self
@@ -62,7 +62,8 @@ class CleaningStaffInvitation(AggregateRoot):
             raise InvalidInvitationWindow(rule="expiry_after_creation", id=self.id)
 
     def _invariant_accepted_invitation_has_accepted_at(self) -> None:
-        """Invariant `accepted_invitation_has_accepted_at`: status != accepted or accepted_at != null
+        """Invariant `accepted_invitation_has_accepted_at`: status != accepted or accepted_at !=
+        null
 
         受諾済みなら受諾日時を持つ
         Checked on: construct, transition. Violation raises InvalidInvitationWindow.

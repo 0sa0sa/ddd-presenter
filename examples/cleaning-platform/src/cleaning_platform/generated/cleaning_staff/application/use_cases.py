@@ -42,7 +42,8 @@ class IssueInvitationUseCase:
     Steps:
         1. if is_blocked_email(email):
             2. fail with EmailBlocked
-        3. create CleaningStaffInvitation via issue(id=ids.new, email=email, at=clock.now, expires_at=valid_until) as invitation
+        3. create CleaningStaffInvitation via issue(id=ids.new, email=email, at=clock.now,
+           expires_at=valid_until) as invitation
         4. save invitation
         5. publish InvitationIssued after commit
         6. return invitation.id
@@ -66,7 +67,9 @@ class IssueInvitationUseCase:
         self._unit_of_work = unit_of_work
 
     def execute(self, command: IssueInvitation) -> UUID:
-        """Runs the steps in one transaction. Events marked publish_after_commit are published only after a successful commit."""
+        """Runs the steps in one transaction. Events marked publish_after_commit are published only
+        after a successful commit.
+        """
         after_commit: list[DomainEvent] = []
         try:
             result = self._run(command, after_commit)
@@ -108,7 +111,8 @@ class AcceptInvitationUseCase:
     Transaction: required
 
     Steps:
-        1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
+        1. load CleaningStaffInvitation by invitation_id as invitation (not found:
+           InvitationNotFound)
         2. invitation.accept(at=clock.now)
         3. save invitation
         4. publish InvitationAccepted after commit
@@ -128,7 +132,9 @@ class AcceptInvitationUseCase:
         self._unit_of_work = unit_of_work
 
     def execute(self, command: AcceptInvitation) -> None:
-        """Runs the steps in one transaction. Events marked publish_after_commit are published only after a successful commit."""
+        """Runs the steps in one transaction. Events marked publish_after_commit are published only
+        after a successful commit.
+        """
         after_commit: list[DomainEvent] = []
         try:
             self._run(command, after_commit)
@@ -163,7 +169,8 @@ class RevokeInvitationUseCase:
     Transaction: required
 
     Steps:
-        1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
+        1. load CleaningStaffInvitation by invitation_id as invitation (not found:
+           InvitationNotFound)
         2. if invitation.is_open:
             3. invitation.revoke()
             4. save invitation
@@ -185,7 +192,9 @@ class RevokeInvitationUseCase:
         self._unit_of_work = unit_of_work
 
     def execute(self, command: RevokeInvitation) -> bool:
-        """Runs the steps in one transaction. Events marked publish_after_commit are published only after a successful commit."""
+        """Runs the steps in one transaction. Events marked publish_after_commit are published only
+        after a successful commit.
+        """
         after_commit: list[DomainEvent] = []
         try:
             result = self._run(command, after_commit)

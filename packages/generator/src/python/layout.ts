@@ -1,5 +1,5 @@
 import type { ContextAnalysis, ModelIR, Type } from "@ddd/core";
-import { Imports, toSnake, type ExprContext } from "./support.ts";
+import { docstringLines, Imports, MAX_LINE, toSnake, wrapWords, type ExprContext } from "./support.ts";
 
 /** Module / path layout for one bounded context. */
 export class Layout {
@@ -95,16 +95,23 @@ export function header(model: ModelIR, extra?: string): string {
 
 export function assemble(model: ModelIR, doc: string | undefined, imports: Imports, body: string): string {
   const head = [header(model)];
-  if (doc) head.push(`"""${doc}"""`);
+  if (doc) head.push(docstringLines(doc, "").join("\n"));
   const imp = imports.render();
   if (imp) head.push(imp);
   const text = head.join("\n\n") + "\n\n\n" + body.trim() + "\n";
   return wrapLongLines(text);
 }
 
-const MAX_LINE = 100;
+// ---------------------------------------------------------------------------
+// Line wrapping
+//
+// Generated code stays within MAX_LINE characters. Over-long lines are split only inside brackets, where Python
+// allows line breaks without changing meaning. The one thing that must never happen is turning a grouping
+// parenthesis into a tuple: `if not (a or b,):` is always true. So a trailing comma is added only to groups that
+// already hold several comma-separated elements (argument lists, tuple/list literals) or that already end with one.
+// ---------------------------------------------------------------------------
 
-/** Splits over-long single-line calls/signatures into one argument per line (outside docstrings/comments). */
+/** Splits over-long lines (outside docstrings) at bracket boundaries; long comments become several comment lines. */
 export function wrapLongLines(src: string, max = MAX_LINE): string {
   const out: string[] = [];
   let inDoc = false;
@@ -112,8 +119,12 @@ export function wrapLongLines(src: string, max = MAX_LINE): string {
     const quotes = (line.match(/"""/g) ?? []).length;
     const wasInDoc = inDoc;
     if (quotes % 2 === 1) inDoc = !inDoc;
-    if (wasInDoc || quotes > 0 || line.length <= max || line.trimStart().startsWith("#")) {
+    if (wasInDoc || quotes > 0 || line.length <= max) {
       out.push(line);
+      continue;
+    }
+    if (line.trimStart().startsWith("#")) {
+      out.push(...wrapComment(line, max));
       continue;
     }
     out.push(...wrapLine(line, max));
@@ -121,12 +132,22 @@ export function wrapLongLines(src: string, max = MAX_LINE): string {
   return out.join("\n");
 }
 
-function wrapLine(line: string, max: number): string[] {
+function wrapComment(line: string, max: number): string[] {
   const indent = /^ */.exec(line)![0];
-  // Find the outermost parenthesized group that ends last on the line.
+  const text = line.trimStart().replace(/^#\s?/, "");
+  return wrapWords(text, max - indent.length - 2).map((l) => `${indent}# ${l}`);
+}
+
+interface Group {
+  open: number;
+  close: number;
+}
+
+/** Bracket groups at nesting depth 0 (string literals are skipped). */
+function topGroups(line: string): Group[] {
+  const groups: Group[] = [];
   let depth = 0;
   let open = -1;
-  let close = -1;
   let quote: string | undefined;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
@@ -136,30 +157,22 @@ function wrapLine(line: string, max: number): string[] {
       continue;
     }
     if (ch === '"' || ch === "'") quote = ch;
-    else if (ch === "(" || ch === "[" || ch === "{") {
-      if (depth === 0 && ch === "(" && open === -1) open = i;
+    else if ("([{".includes(ch)) {
+      if (depth === 0) open = i;
       depth++;
-    } else if (ch === ")" || ch === "]" || ch === "}") {
+    } else if (")]}".includes(ch)) {
       depth--;
-      if (depth === 0 && ch === ")" && open !== -1 && close === -1) close = i;
+      if (depth === 0 && open !== -1) groups.push({ open, close: i });
     }
   }
-  if (open === -1 || close === -1) return [line];
-  const inner = line.slice(open + 1, close);
-  const args = splitTopLevel(inner);
-  if (args.length < 2 && inner.length < max) return [line];
-  const head = line.slice(0, open + 1);
-  const tail = line.slice(close);
-  const body = args.map((a) => `${indent}    ${a.trim()},`);
-  const lines = [head, ...body, `${indent}${tail}`];
-  return lines.flatMap((l, i) => (i > 0 && i < lines.length - 1 && l.length > max ? wrapLine(l.replace(/,$/, ""), max).map((x, j, arr) => (j === arr.length - 1 ? `${x},` : x)) : [l]));
+  return groups;
 }
 
-function splitTopLevel(s: string): string[] {
-  const out: string[] = [];
+/** Offsets of `needle` (e.g. "," or " or ") at nesting depth 0, outside string literals. */
+function topLevel(s: string, needle: string): number[] {
+  const out: number[] = [];
   let depth = 0;
   let quote: string | undefined;
-  let start = 0;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
     if (quote) {
@@ -170,10 +183,101 @@ function splitTopLevel(s: string): string[] {
     if (ch === '"' || ch === "'") quote = ch;
     else if ("([{".includes(ch)) depth++;
     else if (")]}".includes(ch)) depth--;
-    else if (ch === "," && depth === 0) {
-      out.push(s.slice(start, i));
+    else if (depth === 0 && s.startsWith(needle, i)) out.push(i);
+  }
+  return out;
+}
+
+/** Splits a boolean expression before its top-level `or` (else `and`) operators; the operator leads the next line. */
+function splitBoolean(expr: string): string[] {
+  for (const op of [" or ", " and "]) {
+    const at = topLevel(expr, op);
+    if (!at.length) continue;
+    const parts: string[] = [];
+    let start = 0;
+    for (const i of at) {
+      parts.push(expr.slice(start, i));
       start = i + 1;
     }
+    parts.push(expr.slice(start));
+    return parts.map((p) => p.trim());
+  }
+  return [expr.trim()];
+}
+
+/** `if …:`, `return …`, `x = …` and `name=…,` lines (the value may be a bare boolean expression). */
+const STATEMENT = /^(if |elif |while |return |assert |[A-Za-z_][\w.]* = |[A-Za-z_]\w*=(?!=))(.*?)(:|,)?$/;
+
+function wrapLine(line: string, max: number): string[] {
+  if (line.length <= max) return [line];
+  const indent = /^ */.exec(line)![0];
+  const inner = indent + "    ";
+  const rewrap = (lines: string[]) => lines.flatMap((l) => wrapLine(l, max));
+
+  // A boolean value outside any bracket: put it in grouping parentheses, one operand per line.
+  const m = STATEMENT.exec(line.slice(indent.length));
+  if (m) {
+    const lead = m[1]!;
+    const value = m[2]!;
+    const end = m[3] ?? "";
+    const plain = !topLevel(value, ",").length && !topLevel(value, "lambda").length;
+    if (plain && (topLevel(value, " or ").length || topLevel(value, " and ").length)) {
+      return [`${indent}${lead}(`, ...rewrap(splitBoolean(value).map((p) => inner + p)), `${indent})${end}`];
+    }
+  }
+
+  // Otherwise break up the longest top-level bracket group.
+  const groups = topGroups(line);
+  if (!groups.length) return splitString(line, max);
+  const g = groups.reduce((a, b) => (b.close - b.open > a.close - a.open ? b : a));
+  const content = line.slice(g.open + 1, g.close);
+  if (!content.trim()) return [line];
+  const head = line.slice(0, g.open + 1);
+  const tail = `${indent}${line.slice(g.close)}`;
+  const elements = splitTopLevel(content);
+  if (elements.length < 2 && !content.trimEnd().endsWith(",")) {
+    // One element: a grouping parenthesis, a single argument or a bare generator expression. Never add a comma.
+    return [head, ...rewrap(splitBoolean(content).map((p) => inner + p)), tail];
+  }
+  const body = elements.flatMap((el) => {
+    const parts = wrapLine(`${inner}${el.trim()}`, max - 1);
+    parts[parts.length - 1] += ",";
+    return parts;
+  });
+  return [head, ...body, tail];
+}
+
+/**
+ * A line that is just a (keyword=) plain string literal, e.g. an argument on its own line: split it at spaces into
+ * adjacent literals, which Python concatenates. Anything else is returned unchanged.
+ */
+function splitString(line: string, max: number): string[] {
+  const m = /^( *)((?:[A-Za-z_]\w*=)?)"((?:[^"\\]|\\.)*)"$/.exec(line);
+  if (!m) return [line];
+  const [, indent, kw, body] = m as unknown as [string, string, string, string];
+  const width = max - indent.length - kw.length - 2;
+  const words = body.split(" ");
+  const chunks: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if (cur && cur.length + 1 + w.length > width) {
+      chunks.push(`${cur} `);
+      cur = w;
+    } else {
+      cur = cur ? `${cur} ${w}` : w;
+    }
+  }
+  chunks.push(cur);
+  if (chunks.length < 2) return [line];
+  return chunks.map((c, i) => `${indent}${i === 0 ? kw : " ".repeat(kw.length)}"${c}"`);
+}
+
+function splitTopLevel(s: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (const i of topLevel(s, ",")) {
+    out.push(s.slice(start, i));
+    start = i + 1;
   }
   const last = s.slice(start);
   if (last.trim()) out.push(last);
