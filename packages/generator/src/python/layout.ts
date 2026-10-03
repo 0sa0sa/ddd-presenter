@@ -150,9 +150,11 @@ function wrapLine(line: string, max: number): string[] {
   if (args.length < 2 && inner.length < max) return [line];
   const head = line.slice(0, open + 1);
   const tail = line.slice(close);
-  const body = args.map((a) => `${indent}    ${a.trim()},`);
+  // A grouping parenthesis (not a call) around one item gets no trailing comma: `(x,)` would be a tuple.
+  const grouping = !/[A-Za-z0-9_\])]$/.test(head.slice(0, -1)) && !inner.trimEnd().endsWith(",");
+  const body = args.map((a) => `${indent}    ${a.trim()}${grouping && args.length === 1 ? "" : ","}`);
   const lines = [head, ...body, `${indent}${tail}`];
-  return lines.flatMap((l, i) => (i > 0 && i < lines.length - 1 && l.length > max ? wrapLine(l.replace(/,$/, ""), max).map((x, j, arr) => (j === arr.length - 1 ? `${x},` : x)) : [l]));
+  return lines.flatMap((l, i) => (i > 0 && i < lines.length - 1 && l.length > max ? wrapLine(l.replace(/,$/, ""), max).map((x, j, arr) => (j === arr.length - 1 && l.endsWith(",") ? `${x},` : x)) : [l]));
 }
 
 function splitTopLevel(s: string): string[] {

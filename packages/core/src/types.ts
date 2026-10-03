@@ -14,7 +14,9 @@ export type Type =
   | { k: "list"; item: Type }
   | { k: "optional"; inner: Type }
   | { k: "null" }
-  | { k: "event"; name: string };
+  | { k: "event"; name: string }
+  /** Length of time (`hours(24)`, `at - placed_at`). Expression-only: not declarable as a field type. Python `timedelta`. */
+  | { k: "duration" };
 
 export const T = {
   String: { k: "primitive", name: "String" } as Type,
@@ -25,6 +27,7 @@ export const T = {
   DateTime: { k: "primitive", name: "DateTime" } as Type,
   Date: { k: "primitive", name: "Date" } as Type,
   Null: { k: "null" } as Type,
+  Duration: { k: "duration" } as Type,
 };
 
 export type TypeExpr = { name: string; args: TypeExpr[] };
@@ -115,6 +118,13 @@ function resolveExpr(e: TypeExpr, scope: TypeScope): ResolveResult {
   if (ctx.aggregates.some((a) => a.name === e.name)) {
     return { ok: true, type: { k: "aggregate", name: e.name } };
   }
+  if (e.name === "Duration") {
+    return {
+      ok: false,
+      message: "Duration is only available inside expressions (e.g. placed_at + hours(24)) and cannot be declared",
+      hint: "Store the deadline as a DateTime or the length as an Integer (e.g. minutes) and convert with minutes(n) in rules",
+    };
+  }
   const suggestion = closest(e.name, [
     ...PRIMITIVES,
     ...ctx.enums.map((x) => x.name),
@@ -146,6 +156,8 @@ export function typeToString(t: Type): string {
       return `Optional[${typeToString(t.inner)}]`;
     case "null":
       return "null";
+    case "duration":
+      return "Duration";
   }
 }
 
@@ -173,6 +185,7 @@ export function sameType(a: Type, b: Type): boolean {
     case "optional":
       return sameType(x.inner, (y as typeof x).inner);
     case "null":
+    case "duration":
       return true;
     case "ref":
       return true;
@@ -184,7 +197,7 @@ export function isNumeric(t: Type): boolean {
 }
 
 export function isOrderable(t: Type): boolean {
-  return t.k === "primitive" && ["Integer", "Decimal", "DateTime", "Date", "String"].includes(t.name);
+  return t.k === "duration" || (t.k === "primitive" && ["Integer", "Decimal", "DateTime", "Date", "String"].includes(t.name));
 }
 
 /** Whether a value of type `from` may be used where `to` is expected. */

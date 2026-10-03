@@ -3,14 +3,31 @@
  * Parsed into an AST; never evaluated with `eval`.
  */
 
-export type BinaryOp = "==" | "!=" | "<" | "<=" | ">" | ">=" | "and" | "or";
+export type ArithOp = "+" | "-" | "*" | "/";
+export type BinaryOp = "==" | "!=" | "<" | "<=" | ">" | ">=" | "and" | "or" | ArithOp;
+
+export function isArithOp(op: BinaryOp): op is ArithOp {
+  return op === "+" || op === "-" || op === "*" || op === "/";
+}
+
+/** `name=value` argument of a constructor (`Money(amount=1, currency="JPY")`) or `with(x, field=value)`. */
+export interface NamedArg {
+  name: string;
+  value: Expr;
+  start: number;
+  end: number;
+}
 
 export type Expr =
   | { t: "lit"; value: string | number | boolean | null; kind: "string" | "integer" | "decimal" | "boolean" | "null"; start: number; end: number }
   | { t: "name"; name: string; start: number; end: number }
   | { t: "member"; object: Expr; name: string; start: number; end: number }
-  | { t: "call"; callee: Expr; args: Expr[]; start: number; end: number }
+  | { t: "call"; callee: Expr; args: Expr[]; named?: NamedArg[]; start: number; end: number }
   | { t: "not"; operand: Expr; start: number; end: number }
+  /** Unary minus on a non-literal operand (`-discount`). Negative literals stay literals. */
+  | { t: "neg"; operand: Expr; start: number; end: number }
+  /** List literal: `[]`, `[a, b]`. The empty list takes its item type from the context. */
+  | { t: "list"; items: Expr[]; start: number; end: number }
   | { t: "binary"; op: BinaryOp; left: Expr; right: Expr; start: number; end: number };
 
 type Tok =
@@ -83,17 +100,22 @@ function lex(src: string): Tok[] {
       i += 2;
       continue;
     }
-    if ("<>().,-".includes(c)) {
+    if ("<>().,-+*/[]=".includes(c)) {
       toks.push({ k: "op", v: c, s: i, e: i + 1 });
       i++;
       continue;
     }
-    if (c === "=") throw new ExprSyntaxError('Use "==" for comparison; assignment is not allowed in rules', i);
     if ("&|!".includes(c)) throw new ExprSyntaxError(`Use "and", "or", "not" instead of "${c}"`, i);
     throw new ExprSyntaxError(`Unexpected character "${c}"`, i);
   }
   toks.push({ k: "eof", s: src.length, e: src.length });
   return toks;
+}
+
+function unexpected(t: Tok): ExprSyntaxError {
+  if (t.k === "eof") return new ExprSyntaxError("Unexpected end of expression", t.s);
+  if (t.k === "op" && t.v === "=") return new ExprSyntaxError('Use "==" for comparison; assignment is not allowed in rules', t.s);
+  return new ExprSyntaxError(`Unexpected "${t.v}"`, t.s);
 }
 
 export function parseExpr(src: string): Expr {
@@ -114,7 +136,10 @@ export function parseExpr(src: string): Expr {
   const isOp = (v: string) => peek().k === "op" && (peek() as { v: string }).v === v;
   const isKw = (v: string) => peek().k === "id" && (peek() as { v: string }).v === v;
   const expectOp = (v: string) => {
-    if (!isOp(v)) throw new ExprSyntaxError(`Expected "${v}"`, peek().s);
+    if (!isOp(v)) {
+      if (isOp("=")) throw unexpected(peek());
+      throw new ExprSyntaxError(`Expected "${v}"`, peek().s);
+    }
     return next();
   };
 
@@ -145,11 +170,11 @@ export function parseExpr(src: string): Expr {
     return parseCmp();
   }
   function parseCmp(): Expr {
-    const left = parsePostfix();
+    const left = parseAdd();
     const t = peek();
     if (t.k === "op" && ["==", "!=", "<", "<=", ">", ">="].includes(t.v)) {
       next();
-      const right = parsePostfix();
+      const right = parseAdd();
       const after = peek();
       if (after.k === "op" && ["==", "!=", "<", "<=", ">", ">="].includes(after.v)) {
         throw new ExprSyntaxError("Chained comparisons are not allowed; combine them with \"and\"", after.s);
@@ -157,6 +182,38 @@ export function parseExpr(src: string): Expr {
       return { t: "binary", op: t.v as BinaryOp, left, right, start: left.start, end: right.end };
     }
     return left;
+  }
+  function parseAdd(): Expr {
+    let left = parseMul();
+    while (isOp("+") || isOp("-")) {
+      const op = (next() as { v: string }).v as BinaryOp;
+      const right = parseMul();
+      left = { t: "binary", op, left, right, start: left.start, end: right.end };
+    }
+    return left;
+  }
+  function parseMul(): Expr {
+    let left = parseUnary();
+    while (isOp("*") || isOp("/")) {
+      const op = (next() as { v: string }).v as BinaryOp;
+      const right = parseUnary();
+      left = { t: "binary", op, left, right, start: left.start, end: right.end };
+    }
+    return left;
+  }
+  function parseUnary(): Expr {
+    if (isOp("-")) {
+      const t = next();
+      const operand = parseUnary();
+      // Fold `-1` / `-1.5` into a literal.
+      if (operand.t === "lit" && (operand.kind === "integer" || operand.kind === "decimal") && operand.start === t.e) {
+        const value = operand.kind === "decimal" ? `-${String(operand.value)}` : -(operand.value as number);
+        return { t: "lit", value, kind: operand.kind, start: t.s, end: operand.end };
+      }
+      return { t: "neg", operand, start: t.s, end: operand.end };
+    }
+    if (isOp("+")) throw new ExprSyntaxError('Unary "+" is not supported', peek().s);
+    return parsePostfix();
   }
   function parsePostfix(): Expr {
     let e = parsePrimary();
@@ -169,9 +226,20 @@ export function parseExpr(src: string): Expr {
       } else if (isOp("(")) {
         next();
         const args: Expr[] = [];
+        const named: NamedArg[] = [];
         if (!isOp(")")) {
           for (;;) {
-            args.push(nested(parseOr));
+            const t = peek();
+            const after = toks[p + 1];
+            if (t.k === "id" && after?.k === "op" && after.v === "=") {
+              p += 2;
+              if (named.some((n) => n.name === t.v)) throw new ExprSyntaxError(`Duplicate argument "${t.v}"`, t.s);
+              const value = nested(parseOr);
+              named.push({ name: t.v, value, start: t.s, end: value.end });
+            } else {
+              if (named.length) throw new ExprSyntaxError("Positional arguments must come before named arguments", t.s);
+              args.push(nested(parseOr));
+            }
             if (isOp(",")) {
               next();
               continue;
@@ -180,7 +248,7 @@ export function parseExpr(src: string): Expr {
           }
         }
         const close = expectOp(")");
-        e = { t: "call", callee: e, args, start: e.start, end: close.e };
+        e = named.length ? { t: "call", callee: e, args, named, start: e.start, end: close.e } : { t: "call", callee: e, args, start: e.start, end: close.e };
       } else {
         return e;
       }
@@ -191,12 +259,6 @@ export function parseExpr(src: string): Expr {
     if (t.k === "num") {
       const isDec = t.v.includes(".");
       return { t: "lit", value: isDec ? t.v : Number(t.v), kind: isDec ? "decimal" : "integer", start: t.s, end: t.e };
-    }
-    if (t.k === "op" && t.v === "-") {
-      const n = next();
-      if (n.k !== "num") throw new ExprSyntaxError("Only numeric literals can be negated", t.s);
-      const isDec = n.v.includes(".");
-      return { t: "lit", value: isDec ? `-${n.v}` : -Number(n.v), kind: isDec ? "decimal" : "integer", start: t.s, end: n.e };
     }
     if (t.k === "str") return { t: "lit", value: t.v, kind: "string", start: t.s, end: t.e };
     if (t.k === "id") {
@@ -210,12 +272,26 @@ export function parseExpr(src: string): Expr {
       expectOp(")");
       return e;
     }
-    if (t.k === "eof") throw new ExprSyntaxError("Unexpected end of expression", t.s);
-    throw new ExprSyntaxError(`Unexpected "${(t as { v: string }).v}"`, t.s);
+    if (t.k === "op" && t.v === "[") {
+      const items: Expr[] = [];
+      if (!isOp("]")) {
+        for (;;) {
+          items.push(parseOr());
+          if (isOp(",")) {
+            next();
+            continue;
+          }
+          break;
+        }
+      }
+      const close = expectOp("]");
+      return { t: "list", items, start: t.s, end: close.e };
+    }
+    throw unexpected(t);
   }
 
   const e = parseOr();
-  if (peek().k !== "eof") throw new ExprSyntaxError(`Unexpected "${(peek() as { v: string }).v}"`, peek().s);
+  if (peek().k !== "eof") throw unexpected(peek());
   return e;
 }
 
@@ -227,9 +303,14 @@ export function countNodes(e: Expr): number {
     case "member":
       return 1 + countNodes(e.object);
     case "call":
+      // A constructor counts its field values only: naming the fields does not make a rule harder to read.
+      if (e.named) return 1 + e.args.reduce((n, a) => n + countNodes(a), 0) + e.named.reduce((n, a) => n + countNodes(a.value), 0);
       return 1 + countNodes(e.callee) + e.args.reduce((n, a) => n + countNodes(a), 0);
     case "not":
+    case "neg":
       return 1 + countNodes(e.operand);
+    case "list":
+      return 1 + e.items.reduce((n, a) => n + countNodes(a), 0);
     case "binary":
       return 1 + countNodes(e.left) + countNodes(e.right);
   }

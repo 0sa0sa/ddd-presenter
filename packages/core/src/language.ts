@@ -7,7 +7,7 @@ import { RELATIONSHIP_PATTERNS, type AggregateIR, type ContextIR, type EntityIR,
 import { parseModel, type ParseResult } from "./parse.ts";
 import { PRIMITIVES, resolveType, typeToString, type Type } from "./types.ts";
 import { analyzeModel, parseEventRef, type Analysis } from "./validate.ts";
-import type { Path } from "./diagnostics.ts";
+import { formatPath, type Path } from "./diagnostics.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -101,6 +101,7 @@ type Container =
   | "step:create"
   | "step:invoke"
   | "step:if"
+  | "step:let"
   | "scenario:aggregate"
   | "given:aggregate"
   | "when:aggregate"
@@ -155,7 +156,7 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   extension: { parameters: "parameter" },
   useCase: { input: "field", steps: "step", scenarios: "scenario:useCase" },
   policy: { args: "exprMap:policyArgs" },
-  step: { load: "step:load", create: "step:create", invoke: "step:invoke", if: "step:if" },
+  step: { load: "step:load", create: "step:create", invoke: "step:invoke", if: "step:if", let: "step:let" },
   "step:create": { args: "exprMap:args" },
   "step:invoke": { args: "exprMap:args" },
   "step:if": { then: "step", else: "step" },
@@ -268,7 +269,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("transaction", "required（既定）/ none"),
     K("idempotency_key", "冪等性キーにする入力フィールド"),
     K("retry", "再試行されうる処理か"),
-    K("steps", "手順（load / create / invoke / save / publish / if / fail / return）"),
+    K("steps", "手順（load / create / invoke / save / publish / if / let / fail / return）"),
     K("scenarios", "Given-When-Then（テストになる）"),
   ],
   policy: [
@@ -293,6 +294,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("publish", "イベントをすぐに公開する"),
     K("publish_after_commit", "コミット成功後にイベントを公開する"),
     K("if", "条件分岐: { condition, then, else }"),
+    K("let", "計算した値に名前を付ける: { name, value }（後の手順で使える。if の中で付けた名前はその枝の中だけ）"),
     K("fail", "Domain Errorで失敗する"),
     K("return", "戻り値（式）"),
   ],
@@ -300,6 +302,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
   "step:create": [K("aggregate", "作るAggregate"), K("factory", "使うファクトリ"), K("as", "変数名"), K("args", "ファクトリの引数（式）")],
   "step:invoke": [K("target", "操作するAggregateの変数"), K("operation", "呼ぶ操作"), K("args", "操作の引数（式）")],
   "step:if": [K("condition", "条件式（ガード・拡張点を使える）"), K("then", "成り立つときの手順"), K("else", "成り立たないときの手順")],
+  "step:let": [K("name", "名前（snake_case。Use case の中で一意）"), K("value", "値の式（例: sum(order.lines, item.quantity)）")],
   "scenario:aggregate": [K("name", "シナリオ名（テスト関数名になる）"), K("description", "説明"), K("given", "前提の状態"), K("when", "construct / operation / factory"), K("then", "期待する結果")],
   "given:aggregate": [K("aggregate", "前提となるAggregateのフィールド値")],
   "when:aggregate": [K("construct", "このフィールド値で直接作る"), K("operation", "実行する操作"), K("factory", "使うファクトリ"), K("args", "引数")],
@@ -595,6 +598,8 @@ interface ExprEnvInfo {
   inputs: Set<string>;
   useCase: boolean;
   guardsBare: boolean;
+  /** Element type of the innermost collection function around the cursor (`item`). */
+  item?: Type;
 }
 
 function fieldTypesOf(s: Snapshot, owner: string | undefined): Map<string, Type> {
@@ -628,6 +633,41 @@ function bindingsBefore(steps: StepIR[], s: Snapshot, out = new Map<string, stri
   return out;
 }
 
+/** `let` values named before the cursor, with their types from the last analysis. */
+function letsBefore(steps: StepIR[], s: Snapshot, ctx: ContextIR, out = new Map<string, Type>()): Map<string, Type> {
+  for (const st of steps) {
+    const r = s.parsed.rangeOf(st.path);
+    if (r && r[0] > s.offset) break;
+    if (st.kind === "let" && !(r && r[1] >= s.offset)) {
+      const t = s.analysis?.contexts.get(ctx.name)?.exprs.get(formatPath([...st.path, "value"]))?.type;
+      if (t) out.set(st.name, t);
+    }
+    if (st.kind === "if") {
+      letsBefore(st.then, s, ctx, out);
+      letsBefore(st.else, s, ctx, out);
+    }
+  }
+  return out;
+}
+
+/** Functions whose later arguments see the element as `item`. */
+const ITEM_CALL = /\b(?:count|sum|any|all|remove_where|replace_where)\(\s*([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\s*,/g;
+
+/** Element type of the innermost still-open collection function call in `before`. */
+function itemTypeIn(s: Snapshot, ctx: ContextIR, env: ExprEnvInfo, before: string): Type | undefined {
+  let found: Type | undefined;
+  for (const m of before.matchAll(ITEM_CALL)) {
+    const rest = before.slice(m.index! + m[0].length);
+    let depth = 1;
+    for (const ch of rest) depth += ch === "(" ? 1 : ch === ")" ? -1 : 0;
+    if (depth <= 0) continue;
+    const t = typeOfPath(s, ctx, env, m[1]!);
+    const b = t && unwrap(t);
+    if (b?.k === "list") found = b.item;
+  }
+  return found;
+}
+
 function exprEnv(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "value" }>): ExprEnvInfo {
   const ctx = scope.context;
   const env: ExprEnvInfo = { fields: new Map(), params: new Map(), locals: new Map(), inputs: new Set(), useCase: false, guardsBare: false };
@@ -641,6 +681,7 @@ function exprEnv(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "valu
       env.inputs.add(k);
     }
     for (const [v, ag] of bindingsBefore(uc.steps, s)) env.locals.set(v, { k: "aggregate", name: ag });
+    for (const [v, t] of letsBefore(uc.steps, s, ctx)) env.locals.set(v, t);
     return env;
   }
   const owner = scope.entity ?? scope.aggregate ?? scope.valueObject;
@@ -659,11 +700,28 @@ function unwrap(t: Type): Type {
 // Completion
 // ---------------------------------------------------------------------------
 
+const fn = (label: string, detail: string, documentation: string): CompletionItem => ({ label, kind: "function", insertText: `${label}(`, detail, documentation });
 const FUNCTIONS: CompletionItem[] = [
-  { label: "is_empty", kind: "function", insertText: "is_empty(", detail: "is_empty(x: String | List) → Boolean", documentation: "空の文字列・リストなら true" },
-  { label: "length", kind: "function", insertText: "length(", detail: "length(x: String | List) → Integer", documentation: "文字数・要素数" },
-  { label: "contains", kind: "function", insertText: "contains(", detail: "contains(collection, item) → Boolean", documentation: "リストが要素を含む／文字列が部分文字列を含む" },
+  fn("is_empty", "is_empty(x: String | List) → Boolean", "空の文字列・リストなら true"),
+  fn("length", "length(x: String | List) → Integer", "文字数・要素数"),
+  fn("contains", "contains(collection, item) → Boolean", "リストが要素を含む／文字列が部分文字列を含む"),
+  fn("days", "days(n: Integer) → Duration", "n日間。DateTime・Date に足し引きできる（Date には days だけ）"),
+  fn("hours", "hours(n: Integer) → Duration", "n時間。例: `at < placed_at + hours(24)`"),
+  fn("minutes", "minutes(n: Integer) → Duration", "n分間"),
+  fn("round", "round(x: Integer | Decimal, 桁数) → Decimal", "小数点以下を指定の桁に四捨五入（ROUND_HALF_UP）。桁数は整数のリテラル"),
+  fn("min", "min(a, b) → 小さい方", "数値どうし、または DateTime・Date・Duration どうし"),
+  fn("max", "max(a, b) → 大きい方", "数値どうし、または DateTime・Date・Duration どうし"),
+  fn("count", "count(list[, 条件]) → Integer", "要素数。条件を付けると成り立つ要素の数（条件の中では `item` が要素）"),
+  fn("sum", "sum(list[, 要素の数値]) → Integer | Decimal", "合計。例: `sum(lines, item.unit_price.amount * item.quantity)`"),
+  fn("any", "any(list, 条件) → Boolean", "条件が成り立つ要素が1つでもあれば true。例: `any(lines, item.line_id == line_id)`"),
+  fn("all", "all(list, 条件) → Boolean", "すべての要素で条件が成り立てば true（空なら true）"),
+  fn("append", "append(list, 要素) → List", "末尾に要素を足した新しいリスト"),
+  fn("remove", "remove(list, 要素) → List", "等しい要素（Entity は識別子が同じ要素）を除いた新しいリスト"),
+  fn("remove_where", "remove_where(list, 条件) → List", "条件が成り立つ要素を除いた新しいリスト。例: `remove_where(lines, item.line_id == line_id)`"),
+  fn("replace_where", "replace_where(list, 条件, 新しい要素) → List", "条件が成り立つ要素を置き換えた新しいリスト。例: `replace_where(lines, item.line_id == id, with(item, quantity=q))`"),
+  fn("with", "with(entity, field=値, ...) → Entity", "一部のフィールドを変えた Entity のコピー（不変条件を検査する。識別子は変えられない）"),
 ];
+const FUNCTION_NAMES = new Set(FUNCTIONS.map((f) => f.label));
 const KEYWORDS: CompletionItem[] = ["and", "or", "not", "null", "true", "false"].map((k) => ({ label: k, kind: "keyword" as const, sortRank: 9 }));
 
 function typeCompletions(ctx: ContextIR | undefined, scope: Scope): CompletionItem[] {
@@ -735,7 +793,13 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
   }
   if (key === "idempotency_key") return (scope.useCase?.input ?? []).map((f) => ({ label: f.name, kind: "field" as const, detail: f.type }));
   const isExpr =
-    EXPRESSION_KEYS.has(key) || c === "exprMap:changes" || c === "exprMap:factoryFields" || c === "exprMap:args" || key === "require" || c === "require" || (c === "eventField" && key === "value");
+    EXPRESSION_KEYS.has(key) ||
+    c === "exprMap:changes" ||
+    c === "exprMap:factoryFields" ||
+    c === "exprMap:args" ||
+    key === "require" ||
+    c === "require" ||
+    ((c === "eventField" || c === "step:let") && key === "value");
   if (isExpr) return expressionCompletions(s, scope, pos);
   if (c === "emission" && key === "fields") {
     const member = scope.operation ?? scope.factory;
@@ -891,6 +955,7 @@ function expressionCompletions(s: Snapshot, scope: Scope, pos: Extract<Position,
   if (!ctx) return [];
   const env = exprEnv(s, scope, pos);
   const before = valueBefore(s.text, pos.valueStart, pos.from);
+  env.item = itemTypeIn(s, ctx, env, s.text.slice(pos.valueStart, pos.from));
 
   // Member access: `something.` → members of that value.
   const dot = /([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\.$/.exec(before);
@@ -918,6 +983,11 @@ function expressionCompletions(s: Snapshot, scope: Scope, pos: Extract<Position,
   for (const [n, t] of env.params) items.push({ label: n, kind: "parameter", detail: typeToString(t), sortRank: 1 });
   for (const [n, t] of env.fields) items.push({ label: n, kind: "field", detail: typeToString(t), sortRank: 1 });
   for (const [n, t] of env.locals) items.push({ label: n, kind: env.inputs.has(n) ? "field" : "variable", detail: env.inputs.has(n) ? `入力: ${typeToString(t)}` : typeToString(t), sortRank: 1 });
+  if (env.item) items.push({ label: "item", kind: "variable", detail: `${typeToString(env.item)} — 今の要素`, sortRank: 0 });
+  for (const v of ctx.valueObjects) items.push({ label: v.name, kind: "type", insertText: `${v.name}(`, detail: `Value object: ${v.name}(${v.fields.map((f) => `${f.name}=`).join(", ")})`, sortRank: 5 });
+  if (scope.aggregate) {
+    for (const en of scope.aggregate.entities) items.push({ label: en.name, kind: "type", insertText: `${en.name}(`, detail: `Entity: ${en.name}(${en.fields.map((f) => `${f.name}=`).join(", ")})`, sortRank: 5 });
+  }
   if (env.useCase) {
     items.push({ label: "clock", kind: "port", detail: "clock.now → DateTime", insertText: "clock.now", sortRank: 3 }, { label: "ids", kind: "port", detail: "ids.new → UUID", insertText: "ids.new", sortRank: 3 });
     for (const x of ctx.extensionPoints) {
@@ -931,7 +1001,7 @@ function expressionCompletions(s: Snapshot, scope: Scope, pos: Extract<Position,
 
 function typeOfPath(s: Snapshot, ctx: ContextIR, env: ExprEnvInfo, path: string): Type | undefined {
   const [head, ...rest] = path.split(".");
-  let t: Type | undefined = env.params.get(head!) ?? env.locals.get(head!) ?? env.fields.get(head!);
+  let t: Type | undefined = head === "item" && env.item ? env.item : (env.params.get(head!) ?? env.locals.get(head!) ?? env.fields.get(head!));
   for (const seg of rest) {
     if (!t) return undefined;
     const b = unwrap(t);
@@ -1202,11 +1272,14 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
     pos.container === "exprMap:factoryFields" ||
     pos.container === "exprMap:args" ||
     pos.key === "require" ||
-    pos.container === "require";
+    pos.container === "require" ||
+    ((pos.container === "eventField" || pos.container === "step:let") && pos.key === "value");
 
   if (isExpr) {
     const env = exprEnv(s, scope, pos);
     const before = valueBefore(text, pos.valueStart, w.from);
+    env.item = itemTypeIn(s, ctx, env, text.slice(pos.valueStart, w.from));
+    if (name === "item" && env.item && !before.endsWith(".")) return { ref: { kind: "variable", name, aggregate: `${typeToString(env.item)}（コレクション関数の今の要素）`, path: [] }, ...w };
     const dot = /([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\.$/.exec(before);
     if (dot) {
       const base = dot[1]!;
@@ -1234,7 +1307,7 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
       if (env.inputs.has(name)) return { ref: { kind: "field", ctx, owner: scope.useCase!.command, name, type: env.locals.get(name) }, ...w };
       const t = env.locals.get(name)!;
       const step = findBinding(scope.useCase!.steps, name);
-      return { ref: { kind: "variable", name, aggregate: t.k === "aggregate" ? t.name : typeToString(t), path: step ? [...step.path, "as"] : [] }, ...w };
+      return { ref: { kind: "variable", name, aggregate: t.k === "aggregate" ? t.name : typeToString(t), path: step ? [...step.path, step.kind === "let" ? "name" : "as"] : [] }, ...w };
     }
     if (env.fields.has(name)) {
       const owner = scope.entity ?? scope.aggregate ?? scope.valueObject;
@@ -1245,7 +1318,7 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
       if (g) return { ref: { kind: "guard", ctx, aggregate: scope.aggregate, guard: g }, ...w };
     }
     if (ctx.extensionPoints.some((x) => x.name === name)) return { ref: { kind: "extension", ctx, name }, ...w };
-    if (["is_empty", "contains", "length"].includes(name)) return { ref: { kind: "function", name }, ...w };
+    if (FUNCTION_NAMES.has(name)) return { ref: { kind: "function", name }, ...w };
     if (name === "clock" || name === "ids") return { ref: { kind: "port", name }, ...w };
     for (const en of ctx.enums) if (en.values.includes(name)) return { ref: { kind: "enumValue", ctx, enumName: en.name, value: name }, ...w };
     if (isType(name)) return { ref: { kind: "type", ctx, name }, ...w };
@@ -1284,6 +1357,7 @@ function symbolAt(text: string, offset: number): { ref: SymbolRef; from: number;
 function findBinding(steps: StepIR[], name: string): StepIR | undefined {
   for (const st of steps) {
     if ((st.kind === "load" || st.kind === "create") && st.as === name) return st;
+    if (st.kind === "let" && st.name === name) return st;
     if (st.kind === "if") {
       const r = findBinding(st.then, name) ?? findBinding(st.else, name);
       if (r) return r;
@@ -1353,7 +1427,7 @@ function describe(ref: SymbolRef, s: { analysis?: Analysis; model?: ModelIR }): 
     case "parameter":
       return { markdown: `\`${ref.name}\`: ${ref.type ? typeToString(ref.type) : "?"} — 引数`, path: ref.path.length ? [...ref.path, "name"] : undefined };
     case "variable":
-      return { markdown: `\`${ref.name}\`: ${ref.aggregate} — 手順で読み込んだ／作った変数`, path: ref.path.length ? ref.path : undefined };
+      return { markdown: `\`${ref.name}\`: ${ref.aggregate}${ref.path.length === 0 ? "" : ref.path[ref.path.length - 1] === "name" ? " — let で名付けた値" : " — 手順で読み込んだ／作った変数"}`, path: ref.path.length ? ref.path : undefined };
     case "enumValue": {
       const en = ref.ctx.enums.find((e) => e.name === ref.enumName)!;
       return { markdown: `\`${ref.value}\` — ${ref.enumName} の値（Python: \`${ref.enumName}.${ref.value.toUpperCase()}\`）`, path: [...en.path, "values", en.values.indexOf(ref.value)] };
