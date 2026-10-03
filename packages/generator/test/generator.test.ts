@@ -83,17 +83,28 @@ describe("plan", () => {
     expect(plan.conflicts).toEqual([]);
   });
 
-  test("model changes: stale files and removed symbols are reported, never deleted silently", () => {
+  test("model changes: removed symbols are reported; an untouched stale generated test is deleted, an edited one blocks", () => {
     const text = MODEL.slice(0, MODEL.indexOf("      - name: revoke_invitation")) + MODEL.slice(MODEL.indexOf("\n  - name: Staffing") + 1);
     const next = generate(text);
     const d = disk();
     const plan = computePlan(next, out.manifest, (p) => d.get(p));
-    expect(plan.stale.map((s) => s.path)).toEqual(["tests/generated/test_cleaning_staff_revoke_invitation.py"]);
+    const test = "tests/generated/test_cleaning_staff_revoke_invitation.py";
+    expect(plan.stale.map((s) => s.path)).toEqual([test]);
     expect(plan.breaking.map((b) => b.symbol)).toEqual(["RevokeInvitationUseCase", "RevokeInvitationUseCase.execute", "RevokeInvitation"]);
+    // It imports RevokeInvitationUseCase, which no longer exists: keeping it would only produce an ImportError.
+    expect(plan.stale[0]).toMatchObject({ generatedTest: true, autoPrune: true, modified: false });
+    expect(plan.staleEditedTests).toEqual([]);
     const manifestEntry = plan.entries.find((e) => e.path === next.manifestPath)!;
-    expect(JSON.parse(manifestEntry.after!).stale.map((s: { path: string }) => s.path)).toEqual(["tests/generated/test_cleaning_staff_revoke_invitation.py"]);
-    const pruned = computePlan(next, out.manifest, (p) => d.get(p), { prune: true });
-    expect(JSON.parse(pruned.entries.find((e) => e.path === next.manifestPath)!.after!).stale).toBeUndefined();
+    expect(JSON.parse(manifestEntry.after!).stale).toBeUndefined();
+
+    d.set(test, d.get(test) + "\n# my extra assertion\n");
+    const edited = computePlan(next, out.manifest, (p) => d.get(p));
+    expect(edited.stale[0]).toMatchObject({ generatedTest: true, autoPrune: false, modified: true });
+    expect(edited.staleEditedTests.map((e) => e.path)).toEqual([test]);
+    expect(JSON.parse(edited.entries.find((e) => e.path === next.manifestPath)!.after!).stale.map((s: { path: string }) => s.path)).toEqual([test]);
+    const forced = computePlan(next, out.manifest, (p) => d.get(p), { prune: true, force: true });
+    expect(forced.staleEditedTests).toEqual([]);
+    expect(JSON.parse(forced.entries.find((e) => e.path === next.manifestPath)!.after!).stale).toBeUndefined();
   });
 });
 
@@ -297,12 +308,13 @@ describe("policies and the context map", () => {
     expect(md).toContain('  Staffing -->|"anticorruption_layer: StaffRegistered"| Payroll');
   });
 
-  test("removing every policy leaves the old files as stale instead of deleting them", () => {
+  test("removing every policy leaves the old module as stale instead of deleting it (its generated test goes)", () => {
     const withoutPayrollPolicy = CONTEXT_MAP.replace(/    policies:\n      - name: open_account_for_new_staff[\s\S]*?opened_at: clock.now \}\n/, "").replace(/  - upstream: Staffing[\s\S]*$/, "");
     const next = generate(withoutPayrollPolicy);
     const disk = new Map(out.files.map((f) => [f.path, f.content]));
     const plan = computePlan(next, out.manifest, (p) => disk.get(p));
     expect(plan.stale.map((s) => s.path)).toEqual(["src/context_map/generated/payroll/application/policies.py", "tests/generated/test_payroll_policies.py"]);
+    expect(plan.stale.map((s) => !!s.autoPrune)).toEqual([false, true]);
     // The customer-owned translator is not a generated file, so it is never reported or removed.
     expect(plan.entries.find((e) => e.path.endsWith("payroll/translators.py"))).toBeUndefined();
   });

@@ -121,6 +121,68 @@ describe("ddd CLI", () => {
     expect(p.stderr.toString()).not.toMatch(/at .*\.(ts|js):\d+/);
   });
 
+  test("removing a use case: its untouched generated test is deleted; diff --check advice matches what fixes it", () => {
+    const { dir, model } = project();
+    expect(cli(["generate", model]).code).toBe(0);
+    const text = readFileSync(model, "utf8");
+    const test = join(dir, "tests/generated/test_cleaning_staff_revoke_invitation.py");
+    expect(existsSync(test)).toBe(true);
+    // Drop the revoke_invitation use case (up to the next context).
+    writeFileSync(model, text.slice(0, text.indexOf("      - name: revoke_invitation")) + text.slice(text.indexOf("\n  - name: Staffing") + 1));
+    const check = cli(["diff", model, "--check"]);
+    expect(check.code).toBe(1);
+    expect(check.err).toContain("Run `ddd generate`.");
+    const g = cli(["generate", model]);
+    expect(g.code).toBe(0);
+    expect(g.out).toContain("Deleted 1 generated test file(s)");
+    expect(existsSync(test)).toBe(false); // it imported RevokeInvitationUseCase and would fail with ImportError
+    expect(cli(["diff", model, "--check"]).code).toBe(0);
+  });
+
+  test("a hand-edited stale generated test blocks generate; the advice is --prune --force", () => {
+    const { dir, model } = project();
+    cli(["generate", model]);
+    const text = readFileSync(model, "utf8");
+    const test = join(dir, "tests/generated/test_cleaning_staff_revoke_invitation.py");
+    appendFileSync(test, "\n# my extra assertion\n");
+    writeFileSync(model, text.slice(0, text.indexOf("      - name: revoke_invitation")) + text.slice(text.indexOf("\n  - name: Staffing") + 1));
+    const check = cli(["diff", model, "--check"]);
+    expect(check.code).toBe(1);
+    expect(check.err).toContain("`ddd generate --prune --force`");
+    expect(check.err).not.toContain("Run `ddd generate`.");
+    const refused = cli(["generate", model]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("stale generated test(s) were edited by hand; nothing was written");
+    expect(existsSync(test)).toBe(true);
+    expect(cli(["generate", model, "--prune", "--force"]).code).toBe(0);
+    expect(existsSync(test)).toBe(false);
+    expect(cli(["diff", model, "--check"]).code).toBe(0);
+  });
+
+  test("diff --check advice: conflicts need --force, stale modules need --prune", () => {
+    const { dir, model } = project();
+    cli(["generate", model]);
+    const agg = join(dir, "src/cleaning_platform/generated/cleaning_staff/domain/aggregates.py");
+    appendFileSync(agg, "\n# hand edit\n");
+    const conflict = cli(["diff", model, "--check"]);
+    expect(conflict.err).toContain("`ddd generate --force`");
+    expect(conflict.err).not.toContain("Run `ddd generate`.");
+    expect(cli(["generate", model, "--force"]).code).toBe(0);
+
+    // Removing the only policy leaves policies.py stale; plain generate keeps it, so the advice must be --prune.
+    const text = readFileSync(model, "utf8");
+    writeFileSync(model, text.replace(/    policies:\n      - name: register_staff_on_acceptance[\s\S]*?args: \{[^}]*\}\n/, ""));
+    expect(cli(["generate", model]).code).toBe(0);
+    expect(existsSync(join(dir, "src/cleaning_platform/generated/staffing/application/policies.py"))).toBe(true);
+    expect(existsSync(join(dir, "tests/generated/test_staffing_policies.py"))).toBe(false);
+    const stale = cli(["diff", model, "--check"]);
+    expect(stale.code).toBe(1);
+    expect(stale.err).toContain("`ddd generate --prune`");
+    expect(stale.err).not.toContain("Run `ddd generate`.");
+    expect(cli(["generate", model, "--prune"]).code).toBe(0);
+    expect(cli(["diff", model, "--check"]).code).toBe(0);
+  });
+
   test("migrate is a no-op on the current schema", () => {
     const { model } = project();
     expect(cli(["migrate", model]).out).toContain("nothing to migrate");

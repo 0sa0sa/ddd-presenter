@@ -40,6 +40,8 @@ export interface GenerationOutput {
   files: GeneratedFile[];
   manifest: Manifest;
   manifestPath: string;
+  /** Tests directory of the model (`generation.tests_dir`); generated tests live under `<testsDir>/generated/`. */
+  testsDir: string;
 }
 
 export function sha256(text: string): string {
@@ -129,7 +131,7 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     files: files.filter((f) => f.ownership === "generated").map((f) => ({ path: f.path, sha256: sha256(f.content) })),
     scaffold: files.filter((f) => f.ownership === "scaffold").map((f) => f.path),
   };
-  return { files, manifest, manifestPath };
+  return { files, manifest, manifestPath, testsDir: model.generation.testsDir };
 }
 
 export function renderManifest(m: Manifest): string {
