@@ -107,6 +107,8 @@ export function isBranded(t: Type): boolean {
  * when the generator cannot compute it the same way (then the test parses it at run time).
  */
 export function canonicalInstant(v: unknown): string | undefined {
+  // Without an explicit offset `Date` would use the generating machine's time zone (validation requires one anyway).
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(String(v))) return undefined;
   const date = new Date(String(v));
   if (Number.isNaN(date.getTime())) return undefined;
   const text = date.toISOString();
