@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkExpression, complete, deriveViolations, hover, makeEnv, T, validateModelText, type ContextAnalysis, type ContextIR, type ModelIR, type Type } from "@ddd/core";
+import { boardToModel, checkExpression, complete, deriveViolations, hover, makeEnv, proposeLocally, sampleBoard, T, validateModelText, type ContextAnalysis, type ContextIR, type ModelIR, type Type } from "@ddd/core";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +19,11 @@ const KITCHEN_SINK = fixture("kitchen-sink.ddd.yaml");
 const CONTEXT_MAP = fixture("context-map.ddd.yaml");
 const ORDERING = fixture("ordering.ddd.yaml");
 const LONG_RULES = fixture("long-rules.ddd.yaml");
+/** The model a team gets by reflecting the sample discovery board into an empty project. */
+const FROM_BOARD = boardToModel(
+  sampleBoard(),
+  "schema_version: 1\nproject: staff\ngeneration:\n  package: staff_from_board\n\ncontexts:\n  - name: Core\n    errors: []\n    aggregates: []\n    use_cases: []\n",
+).yaml!;
 
 /** The model with `generation.target: typescript` (and optionally the bun test runner). */
 function asTypeScript(text: string, runner?: "bun"): string {
@@ -142,6 +147,20 @@ describe("TypeScript target: plan", () => {
     const next = gen(text);
     const plan = computePlan(next, out.manifest, (p) => disk().get(p));
     expect(plan.stale.map((s) => [s.path, s.autoPrune])).toEqual([["tests/generated/cleaning-staff-revoke-invitation.test.ts", true]]);
+    // Removed exports are reported as breaking changes to the generated API (tests are not API).
+    expect(plan.breaking.map((b) => b.symbol).sort()).toEqual(["RevokeInvitation", "RevokeInvitationInput", "RevokeInvitationUseCase", "RevokeInvitationUseCase.constructor", "RevokeInvitationUseCase.execute"]);
+  });
+
+  test("a changed operation signature is a breaking change", () => {
+    const next = gen(MODEL.replace("            parameters:\n              - { name: at, type: DateTime }\n            require: [pending_until_expiry(at)]", "            parameters:\n              - { name: at, type: DateTime }\n              - { name: note, type: String, required: false }\n            require: [pending_until_expiry(at)]"));
+    const plan = computePlan(next, out.manifest, (p) => disk().get(p));
+    expect(plan.breaking).toEqual([
+      {
+        path: "src/cleaning_platform/generated/cleaning-staff/domain/aggregates.ts",
+        symbol: "CleaningStaffInvitation.accept",
+        reason: "signature changed: (args: {readonly at: Date}) → (args: {readonly at: Date; readonly note?: string | null})",
+      },
+    ]);
   });
 });
 
@@ -418,6 +437,8 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
     ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
     ["the ordering model (arithmetic, durations, collection functions, constructors, with, let)", ORDERING],
     ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES],
+    ["a model reflected from the discovery board", FROM_BOARD],
+    ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source) => {
     const text = asTypeScript(source, "bun");
     const dir = writeProject(text);

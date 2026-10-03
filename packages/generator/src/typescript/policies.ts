@@ -403,8 +403,12 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
         c.line(`await policy.handle(${a.event});`);
         c.line("expect(useCase.commands).toHaveLength(1);");
         imp.value(L.contextTesting, "expectPresent");
-        c.line("const command = expectPresent(useCase.commands[0]);");
-        c.lines_(a.asserts);
+        if (a.asserts.length) {
+          c.line("const command = expectPresent(useCase.commands[0]);");
+          c.lines_(a.asserts);
+        } else {
+          c.line("expectPresent(useCase.commands[0]);");
+        }
       }, ");");
       c.line();
     }

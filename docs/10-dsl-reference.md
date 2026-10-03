@@ -8,9 +8,12 @@
 schema_version: 1
 project: cleaning-platform          # モデルID（マニフェストに記録）
 generation:
-  package: cleaning_platform        # 生成するPythonパッケージ名
+  package: cleaning_platform        # 生成するパッケージ名（TypeScript では src の下のディレクトリ名）
   src_dir: src                      # 既定 src
   tests_dir: tests                  # 既定 tests
+  target: python                    # python（既定）| typescript（§1.1）
+  typescript:                       # target: typescript のときの設定
+    test_runner: vitest             # vitest（既定）| bun
 contexts:
   - name: CleaningStaff             # Bounded context（PascalCase）
     description: ...
@@ -25,6 +28,34 @@ contexts:
     policies: [...]                 # イベント → Use case の反応（§8）
 relationships: [...]                # コンテキストマップ（§9）
 ```
+
+### 1.1 生成の対象（`generation.target`）
+
+| target | 生成物 | テスト |
+|---|---|---|
+| `python`（既定） | Python 3.11+ / Pydantic v2（`mypy --strict` を通る） | pytest |
+| `typescript` | TypeScript（strict・ESM）/ Zod v4 / decimal.js（`tsc --noEmit` を strict・`exactOptionalPropertyTypes` で通る） | `typescript.test_runner`: `vitest`（既定）か `bun`（`bun:test`） |
+
+`ddd generate --target typescript`（`diff` も同じ）はモデルの `target` を一時的に上書きする。`ddd init --target typescript` は TypeScript 用のサンプルを作る。target を切り替えると生成するファイルがすべて変わるので、元の target の生成物は stale になる（生成したままのテストは削除され、ソースは `--prune` で消す）。
+
+TypeScript のとき、生成物は `src/<package>/generated/` に、初回だけ `package.json`・`tsconfig.json`・`src/<package>/index.ts` を作る（以後は顧客所有）。型の対応:
+
+| モデル | TypeScript | 備考 |
+|---|---|---|
+| `String` / `Integer` / `Boolean` | `string` / `number`（`z.number().int()`）/ `boolean` | |
+| `Decimal` | `Decimal`（decimal.js。28桁・偶数丸め） | 入力は文字列・数値・Decimal。JSON では文字列 |
+| `UUID` | `UUID`（ブランド付き文字列、小文字に正規化） | Aggregate / Entity の UUID の識別子は `Id<"Order">` |
+| `Ref[Order]` | `Id<"Order">` | 別の Aggregate の ID と混ぜると型エラー |
+| `DateTime` | `Date` | 入力は `Date` か、オフセット付きの ISO 8601 文字列 |
+| `Date` | `LocalDate`（`"2026-01-31"` のブランド付き文字列） | |
+| Enum | 文字列リテラルの union と `as const` のオブジェクト（`InvitationStatus.pending`） | |
+| Value Object / コマンド / イベント | Zod スキーマと推論型（凍結したオブジェクト。`EmailAddress.create(...)`） | |
+| Entity / Aggregate | 不変のクラス（`X.from(...)` で検証して作る） | |
+| `List[T]` | `ReadonlyArray<T>` | |
+| `required: false` | `T \| null`（既定 null） | |
+| Duration（式の中だけ） | ミリ秒の `number`（`days/hours/minutes`） | |
+
+フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。
 
 命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。
 
@@ -92,7 +123,7 @@ aggregates:
   error: InvitationNotDeliverable
 ```
 
-生成コード: `invitation.pending_until_expiry(at).checks() -> bool` と `.assert_holds()`（違反時に `error` を送出）。
+生成コード: `invitation.pending_until_expiry(at).checks() -> bool` と `.assert_holds()`（違反時に `error` を送出）。TypeScript では `invitation.pendingUntilExpiry(at).checks()` と `.assertHolds()`。
 
 ### Factory / Operation
 
@@ -113,7 +144,7 @@ operations:
         # fields: [{ name: x, value: <式> }] で計算値、 when: <式> で条件付き発生
 ```
 
-操作は `Transition[Aggregate]`（新しいAggregateと発生イベント）を返す。元のインスタンスは変わらない。
+操作は `Transition[Aggregate]`（新しいAggregateと発生イベント）を返す。元のインスタンスは変わらない。TypeScript では引数をオブジェクトで渡す（`invitation.accept({ at })`、ファクトリは `CleaningStaffInvitation.issue({ ... })`）。
 
 内部Entity型（`OrderLine`、`List[OrderLine]` など）の引数を持つFactory / Operationは警告 `entity-parameter` になる。Commandの入力は値だけを運び、式でEntityを作ることもできないため、Use caseが渡せるのは読み込んだAggregateがすでに持つEntity（`order.lines` など）だけである。呼び出し側が新しい項目を渡すなら、その値（単純なフィールドかValue Object）を引数にする。そうでなければその操作は手書きコードからだけ呼ぶ。
 

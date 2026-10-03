@@ -138,14 +138,17 @@ export function computePlan(
   };
 }
 
-/** Public Python symbols (classes, methods, functions) removed by this generation. */
+/** Public symbols (Python classes, methods, functions; TypeScript exports and class members) removed by this generation. */
 function detectBreaking(entries: PlanEntry[]): BreakingChange[] {
   const out: BreakingChange[] = [];
   for (const e of entries) {
-    if (!e.path.endsWith(".py") || e.ownership !== "generated" || !e.before) continue;
-    if (e.path.includes("/tests/") || /(^|\/)test_[^/]*\.py$/.test(e.path)) continue;
-    const before = symbols(e.before);
-    const after = e.action === "stale" ? new Map<string, string>() : symbols(e.after ?? "");
+    if (e.ownership !== "generated" || !e.before) continue;
+    const ts = e.path.endsWith(".ts");
+    if (!e.path.endsWith(".py") && !ts) continue;
+    if (e.path.includes("/tests/") || /(^|\/)test_[^/]*\.py$/.test(e.path) || /\.test\.ts$/.test(e.path)) continue;
+    const scan = ts ? tsSymbols : symbols;
+    const before = scan(e.before);
+    const after = e.action === "stale" ? new Map<string, string>() : scan(e.after ?? "");
     for (const [sym, sig] of before) {
       if (!after.has(sym)) out.push({ path: e.path, symbol: sym, reason: e.action === "stale" ? "module removed" : "removed or renamed" });
       else if (after.get(sym) !== sig) out.push({ path: e.path, symbol: sym, reason: `signature changed: ${sig} → ${after.get(sym)}` });
@@ -202,6 +205,56 @@ function symbols(src: string): Map<string, string> {
     }
     const m = /^ {4}def (\w+)\((.*)\)/.exec(line);
     if (m && cls && !m[1]!.startsWith("_")) out.set(`${cls}.${m[1]}`, `(${m[2]})`);
+  }
+  return out;
+}
+
+/**
+ * Exported TypeScript symbols: classes, functions, constants, types and interfaces, plus the public members of
+ * exported classes with their parameter lists (wrapped signatures are joined first).
+ */
+function tsSymbols(src: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const lines: string[] = [];
+  let buf: string | undefined;
+  let depth = 0;
+  for (const line of src.split("\n")) {
+    const t = line.trim();
+    if (buf === undefined && (t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"))) continue;
+    buf = buf === undefined ? line : `${buf} ${t}`;
+    for (const ch of line.replace(/"(?:[^"\\]|\\.)*"/g, '""')) {
+      if (ch === "(" || ch === "[") depth++;
+      else if (ch === ")" || ch === "]") depth--;
+    }
+    if (depth <= 0) {
+      // Normalize the wrapping itself away (keeping the indentation): "( a, b, )" and "(a, b)" are the same signature.
+      const indent = /^ */.exec(buf)![0];
+      lines.push(indent + buf.slice(indent.length).replace(/ {2,}/g, " ").replace(/([([{]) +/g, "$1").replace(/,? +([)\]}])/g, "$1"));
+      buf = undefined;
+      depth = 0;
+    }
+  }
+  let cls: string | undefined;
+  for (const line of lines) {
+    const c = /^export (?:abstract )?class (\w+)/.exec(line);
+    if (c) {
+      cls = c[1]!;
+      out.set(cls, "class");
+      continue;
+    }
+    if (/^\}/.test(line)) cls = undefined;
+    const f = /^export (?:async )?function (\w+)(?:<[^(]*>)?\((.*?)\)(?::|\s*\{)/.exec(line);
+    if (f) {
+      out.set(f[1]!, `(${f[2]})`);
+      continue;
+    }
+    const d = /^export (?:const|type|interface) (\w+)/.exec(line);
+    if (d) {
+      out.set(d[1]!, "declared");
+      continue;
+    }
+    const m = /^ {2}(?:static |async |override |get )*([A-Za-z]\w*)\((.*?)\)(?::| \{)/.exec(line);
+    if (m && cls && m[1] !== "if") out.set(`${cls}.${m[1]}`, `(${m[2]})`);
   }
   return out;
 }

@@ -5,7 +5,7 @@ DDDの知識を実装の散在した条件分岐にせず、ドメインモデ�
 Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）と状態ガード（StateGuard）、ユースケースの手順、イベントに反応するポリシーとコンテキストマップ、Given-When-Thenシナリオをひとつの YAML モデルに書くと、次のことができる。
 
 - **検証**: 参照、型、Rule式、Aggregate境界、循環、シナリオの完全性、コンテキストをまたぐ連携のイベント契約（ポリシーとコンテキストマップ）を、位置と修正案つきで診断する。
-- **生成**: Python（Pydantic v2）のドメイン層・アプリケーション層と pytest を決定的に生成する。生成物は `mypy --strict` を通る。
+- **生成**: Python（Pydantic v2）または TypeScript（Zod v4）のドメイン層・アプリケーション層とテスト（pytest / vitest・bun test）を決定的に生成する。生成物は `mypy --strict` / `tsc --strict` を通る。
 - **安全な再生成**: 手編集を検知して停止する。削除されたファイルは stale として報告し（生成したままの古い生成テストだけは削除する）、顧客所有の拡張コードは上書きしない。
 - **ディスカバリー**: Miro のように自由に付箋を置ける EventStorming のボードで、イベント・コマンド・集約・コンテキストの境界を探る。抜けの指摘、集約とコンテキスト連携の候補を示し、決めた内容を差分を確認してからモデルに反映する（候補は提案のみで、決めるのはチーム）。
 - **書きやすさ**: YAML でも、キー・型・エラー・イベント・操作・変数・Rule 式のフィールドや Enum 値を補完し、説明の表示・定義へ移動・名前の一括変更ができる（Web のエディタと VS Code 拡張で同じ言語サービス）。
@@ -17,17 +17,19 @@ Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）�
 
 ## クイックスタート
 
-必要なもの: [Bun](https://bun.sh) 1.1 以上。生成した Python を動かすには Python 3.11 以上と [uv](https://docs.astral.sh/uv/)（または pip）。
+必要なもの: [Bun](https://bun.sh) 1.1 以上。生成した Python を動かすには Python 3.11 以上と [uv](https://docs.astral.sh/uv/)（または pip）。生成した TypeScript を動かすには Node.js 20 以上（vitest）または Bun。
 
 ```sh
 bun install
 bun test                 # 全テスト（生成したPythonの pytest / mypy 実行を含む。venvがなければその1件はskip）
+                         # 生成した TypeScript の tsc / テスト実行も含む（依存は初回だけ一時ディレクトリに入れる。
+                         # ネットワークがなければ理由を表示して skip。DDD_SKIP_TS_RUN=1 で明示的に skip）
 ```
 
 ### CLI
 
 ```sh
-bun run ddd init my-project                    # サンプルモデル my-project/model.ddd.yaml を作る
+bun run ddd init my-project                    # サンプルモデル my-project/model.ddd.yaml を作る（--target typescript で TS 用）
 bun run ddd validate my-project/model.ddd.yaml # 検証（エラーがあれば終了コード 1）
 bun run ddd diff my-project/model.ddd.yaml --patch   # 生成したら何が変わるか
 bun run ddd generate my-project/model.ddd.yaml       # 生成（ddd.lock を作る）
@@ -38,10 +40,10 @@ bun run ddd rules my-project/model.ddd.yaml          # ルールの適用箇所�
 |---|---|
 | `validate [model]` | `--strict`（警告も失敗扱い。未検証のルール・使われないエラー・呼ばれない Extension point も警告）、`--format json` |
 | `diff [model]` | `--patch`（unified diff）、`--check`（生成物が古ければ終了コード 1。CI用） |
-| `generate [model]` | `--dry-run`、`--force`（手編集を破棄）、`--prune`（staleファイルを削除）、`--update-lock` |
+| `generate [model]` | `--dry-run`、`--force`（手編集を破棄）、`--prune`（staleファイルを削除）、`--update-lock`、`--target python\|typescript`（モデルの `generation.target` を上書き。`diff` も同じ） |
 | `rules [model]` | `--format json` |
 | `migrate [model]` | schema_version の移行（現行は 1 のみ） |
-| `init [dir]` / `version` | |
+| `init [dir]` / `version` | `init --target typescript`（TypeScript 用のサンプル） |
 
 終了コード: 0 = 成功、1 = 検証エラー・衝突・`--check` の差分あり、2 = 使い方の誤り・lock の不一致。CLI はネットワークに接続しない。
 
@@ -53,7 +55,32 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydanti
 cd ../.. && bun run verify:example   # diff --check → pytest → mypy --strict
 ```
 
-`examples/cleaning-platform` には、生成済みのコード（招待を扱う `CleaningStaff` と、招待の受諾をポリシーで受けてスタッフを登録する下流の `Staffing`）と、顧客が書く拡張（`src/cleaning_platform/extensions/`）と手書きテスト（`tests/custom/`）が入っている。golden test は、このディレクトリの生成物がバイト単位で再現されることを確認する。
+TypeScript 版（同じドメインを `generation.target: typescript` で生成したもの）:
+
+```sh
+bun run verify:example:ts            # diff --check → bun install → tsc --noEmit → vitest
+```
+
+`examples/cleaning-platform` には、生成済みのコード（招待を扱う `CleaningStaff` と、招待の受諾をポリシーで受けてスタッフを登録する下流の `Staffing`）と、顧客が書く拡張（`src/cleaning_platform/extensions/`）と手書きテスト（`tests/custom/`）が入っている。golden test は、このディレクトリの生成物がバイト単位で再現されることを確認する。`examples/cleaning-platform-ts` は同じ構成の TypeScript 版（拡張は `src/cleaning_platform/extensions/cleaning-staff/extensions.ts`、手書きテストは `tests/custom/`）。
+
+### TypeScript で生成する
+
+モデルの `generation` に `target: typescript` を書く（`ddd generate --target typescript` でも一時的に切り替えられる）。
+
+```yaml
+generation:
+  target: typescript          # python（既定）| typescript
+  package: cleaning_platform  # src/<package>/ の下に生成する
+  typescript:
+    test_runner: vitest       # vitest（既定）| bun
+```
+
+```sh
+bun run ddd generate model.ddd.yaml   # 初回は package.json と tsconfig.json も作る（以後は顧客所有）
+npm install && npm run typecheck && npm test   # または bun install && bun run typecheck && bun run test
+```
+
+Value Object・コマンド・イベントは Zod スキーマと推論型、Entity・Aggregate は不変のクラス（`X.from(...)` で検証して作る）、操作は `Transition<T>`（新しい状態と発生イベント）を返す。Decimal は decimal.js、UUID は `Id<"Order">` のようなブランド型。詳しい対応は [docs/05 §8](docs/05-generation-and-architecture.md) と [docs/09 §14](docs/09-implementation-decisions.md)。
 
 ### VS Code 拡張
 
@@ -136,6 +163,25 @@ tests/generated/test_<context>_<name>.py
 tests/generated/test_<context>_policies.py
 ```
 
+`target: typescript` のとき:
+
+```text
+package.json, tsconfig.json        # 初回のみ作成（zod / decimal.js、strict + exactOptionalPropertyTypes + NodeNext）
+src/<package>/
+  index.ts                         # 初回のみ作成（generated/index.js を再エクスポート）
+  generated/
+    runtime.ts                     # DomainError / Entity / AggregateRoot / Transition / StateGuard / Decimal / Id / ポート / dispatch
+    adapters.ts, testing.ts        # SystemClock / RandomIds、In-memory のテストダブルとアサーション
+    index.ts                       # runtime と、コンテキストごとの名前空間
+    <context>/domain/{errors,enums,value-objects,entities,aggregates,events,commands,rules}.ts
+    <context>/application/{ports,use-cases,policies}.ts
+    <context>/testing.ts, index.ts, README.md
+    model_manifest.json
+  extensions/<context>/extensions.ts   # 初回のみ作成。以後はあなたのコード
+  extensions/<context>/translators.ts  # anticorruption_layer の翻訳層。初回のみ作成
+tests/generated/<context>-<name>.test.ts
+```
+
 生成コードの例（サンプルの `accept`）:
 
 ```python
@@ -148,12 +194,25 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
     return Transition(aggregate=aggregate, events=tuple(events))
 ```
 
+同じ操作の TypeScript:
+
+```ts
+accept(args: { readonly at: Date }): Transition<CleaningStaffInvitation> {
+  const { at } = args;
+  this.pendingUntilExpiry(at).assertHolds();                                   // require: 自動で確認
+  const aggregate = this.#with({ status: InvitationStatus.accepted, acceptedAt: at });  // 候補状態でInvariantを評価
+  const events: DomainEvent[] = [];
+  events.push(InvitationAccepted.create({ id: aggregate.id, at }));
+  return transition(aggregate, events);
+}
+```
+
 ## リポジトリ構成
 
 | パッケージ | 役割 |
 |---|---|
 | `packages/core` | YAML → IR、Rule式の parser / 型検査、意味検証、ルール追跡、構造編集、言語サービス（補完など）、ディスカバリーボードの整理とモデル化、diff、[JSON Schema](packages/core/schema/model.schema.json)。ブラウザでも動く |
-| `packages/generator` | Python / pytest の生成、マニフェスト、差分プラン、破壊的変更の検出 |
+| `packages/generator` | Python / pytest と TypeScript（Zod）/ vitest・bun test の生成、マニフェスト、差分プラン、破壊的変更の検出 |
 | `packages/cli` | `ddd` コマンド。原子的な書き込み、lock、手編集の検知 |
 | `packages/server` | Hono + bun:sqlite。Workspace / 権限 / テナント分離 / モデル版（楽観排他）/ プレビュー / 監査ログ |
 | `packages/web` | React + Vite。ディスカバリーボード、YAML エディタ（補完つき）、アウトライン、インスペクタ、図（React Flow）、ルール、シナリオ、プレビュー、履歴 |
@@ -170,7 +229,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 | [02-personas-and-journeys.md](docs/02-personas-and-journeys.md) | 利用者、Jobs-to-be-Done、主要な利用シナリオ |
 | [03-functional-requirements.md](docs/03-functional-requirements.md) | 機能要件、優先度、受け入れ条件 |
 | [04-domain-model-and-dsl.md](docs/04-domain-model-and-dsl.md) | プロダクト自身のドメイン、モデル形式、DSL意味論 |
-| [05-generation-and-architecture.md](docs/05-generation-and-architecture.md) | 生成契約、Python出力、生成コードと手書きコードの境界 |
+| [05-generation-and-architecture.md](docs/05-generation-and-architecture.md) | 生成契約、Python・TypeScript出力、生成コードと手書きコードの境界 |
 | [06-nonfunctional-requirements.md](docs/06-nonfunctional-requirements.md) | セキュリティ、プライバシー、信頼性、アクセシビリティ |
 | [07-business-and-validation.md](docs/07-business-and-validation.md) | 顧客仮説、競合、価格仮説、検証計画 |
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
@@ -182,7 +241,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 ## 用語
 
 - **Invariant:** オブジェクトが常に満たす条件。生成された構築・状態変更の境界で検証する。
-- **StateGuard:** 特定の操作時点で確認する条件。`checks()` と `assert_holds()` を提供する（Python の `assert` は予約語なので API 名に使わない）。
+- **StateGuard:** 特定の操作時点で確認する条件。`checks()` と `assert_holds()`（TypeScript では `assertHolds()`）を提供する（Python の `assert` は予約語なので API 名に使わない）。
 - **Model:** ドメイン、ルール、ユースケース、シナリオを表すバージョン管理可能な定義。
 - **Generated code:** モデルから再現可能に作られ、手で直接編集しないコード。
 - **Extension code:** 顧客が所有する実装。再生成で上書きしない。
@@ -191,6 +250,6 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 
 - 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
-- 生成対象は Python / Pydantic v2 のみ。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
+- 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（Date の精度、文字列の長さの数え方など）は docs/09 §14。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。

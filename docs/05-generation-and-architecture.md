@@ -10,11 +10,14 @@ flowchart LR
     V --> G[Deterministic generator]
     G --> PY[Python domain package]
     G --> T[pytest tests]
+    G --> TS[TypeScript domain package\nZod v4]
+    G --> TT[vitest / bun tests]
     G --> M[Generation manifest]
     CLI[Local CLI / CI] --> Y
     CLI --> V
     CLI --> G
     PY --> X[Customer-owned extension code]
+    TS --> X
 ```
 
 ## 2. 生成契約
@@ -27,7 +30,7 @@ flowchart LR
 - **読みやすさ:** 出力に意味のあるクラス名、メソッド名、docstring、型注釈を付ける。
 - **一般的な実行:** 標準Pythonツールと通常のCIで動く。
 - **削除の安全性:** モデルから削除したファイルは自動削除せず、stale候補として警告するか明示的承認を求める。例外は `tests/generated/` の生成テストで、生成したときのまま（hashが一致）なら `generate` が削除する（消えたコードをimportして必ず失敗するため）。手で編集してあれば何も書かずに止まり、`--prune --force` を求める。
-- **読める整形:** 生成コードは1行100文字以内に収める。折り返しは括弧の中だけで行い、条件をくくる括弧をタプルに変えない（`if not (a or b,):` は常に真になり、ルールが働かなくなる）。
+- **読める整形:** 生成コードは1行100文字以内に収める。折り返しは括弧の中だけで行い、条件をくくる括弧をタプルに変えない（`if not (a or b,):` は常に真になり、ルールが働かなくなる）。TypeScript では `return` / `throw` の直後や `=>` の前で改行しない（自動セミコロン挿入で意味が変わるため）。1つの名前だけの import 行は100文字を超えても折り返さない（一般的な整形ツールと同じ）。
 - **失敗時の原子性:** 生成エラーやユーザー取消しで一部ファイルだけ更新された状態を作らない。
 
 ### 生成ディレクトリ案
@@ -124,3 +127,44 @@ tests/
 - AI生成コードにはシナリオ由来テスト、未カバー条件、推測箇所を添付する。
 - 生成コードの所有権、学習利用、外部送信、保持期間をプランと設定で明示する。
 - AIなしでもモデル検証と決定的生成が成立する。
+
+## 8. TypeScript出力（Zod）
+
+`generation.target: typescript` のとき、同じモデル・同じ意味論から TypeScript を生成する。決定・理由・Python との違いは [docs/09 §14](09-implementation-decisions.md)。
+
+### 実行環境と依存
+
+- TypeScript（strict、ESM / `module: NodeNext`、`verbatimModuleSyntax`、`exactOptionalPropertyTypes`、`noUncheckedIndexedAccess`、`noUnusedLocals`）。生成物は `tsc --noEmit` をこの設定で通る。
+- 実行時の依存は `zod`（v4）と `decimal.js` だけ。DDD Presenter のランタイムライブラリには依存しない（共通部分は `generated/runtime.ts` として生成する）。
+- テストは vitest（既定）か `bun test`（`generation.typescript.test_runner`）。初回だけ `package.json`・`tsconfig.json` を作り、以後は顧客所有。
+
+### 生成物と所有
+
+```text
+src/<package>/generated/runtime.ts        # 値のスキーマ、DomainError、Entity / AggregateRoot、Transition、StateGuard、ポート、dispatch
+src/<package>/generated/{adapters,testing,index}.ts
+src/<package>/generated/<context>/domain/{errors,enums,value-objects,entities,aggregates,events,commands,rules}.ts
+src/<package>/generated/<context>/application/{ports,use-cases,policies}.ts
+src/<package>/generated/<context>/{testing,index}.ts, README.md
+src/<package>/generated/model_manifest.json
+src/<package>/extensions/<context>/{extensions,translators}.ts   # 顧客所有（初回のみ）
+tests/generated/<context>-<name>.test.ts
+```
+
+手編集の検知、stale の扱い（生成したままの `tests/generated/` は削除、ソースは `--prune`）、`ddd.lock`、マニフェストは Python と同じ。破壊的変更の検出は、生成した `.ts` の export（クラス・関数・定数・型）とクラスの公開メンバーの引数を比べる。
+
+### ドメインの意味論の対応
+
+| 意味論 | TypeScript |
+|---|---|
+| Value Object | `z.strictObject(...).readonly()` のスキーマと推論型。正規化（`trim` / `toLowerCase` / `toUpperCase`）→ 制約 → Invariant の順。`X.create(input)` / `X.parse(unknown)`。結果は凍結したオブジェクト |
+| Entity / Aggregate | 不変のクラス（`readonly` フィールド、`Object.freeze`）。`X.from(input)` がスキーマで検証し、construct の Invariant を評価する。コンストラクタは private |
+| Invariant | クラスの private メソッド。違反は宣言した Domain Error で、`details.rule` にルール名と識別子が入る。制約違反は `ConstraintViolation`（`details.issues` に Zod の指摘） |
+| 状態遷移 | 操作は `Transition<T>`（新しい Aggregate と発生イベント）を返す。`changes` は遷移前の状態で評価し、候補状態は `from` を通るので construct の Invariant が評価され、続いて transition だけの Invariant を評価する |
+| StateGuard | `guard(...)` が `StateGuard` を返す（`checks()` / `assertHolds()`）。`require:` は操作の最初に `assertHolds()` |
+| イベント | `type: "<Context>.<Event>"` を持つ凍結したオブジェクト。`X.create(payload)`、型ガード `X.is(event)`。`when` があれば変更後の状態で評価 |
+| Use case | 必要なポートだけをコンストラクタ（`deps` オブジェクト）で受け取るクラス。`execute(command): Promise<R>`。ポートは同期・非同期のどちらでも実装できる（`Awaitable<T>`） |
+| トランザクション | `transaction: required` は UnitOfWork でくくり、失敗時は rollback して例外を投げ直す。`publish` はその場で、`publish_after_commit` はコミット成功後に公開 |
+| 冪等性 | `IdempotencyStore` で `String(command.<key>)` ごとに成功した結果を記録（コミット前・同じトランザクション）し、同じキーでは手順を実行せず記録を返す |
+| ポリシー | ハンドラクラス（`handle(event)` と、イベントバス用の `onEvent`）と `subscriptions({...})`（イベントの `type` → ハンドラ）。下流は上流の生成したイベントを名前空間 import で使う。anticorruption_layer は `<Upstream>Translator` を通す |
+| 生成テスト | シナリオ、導出した違反値（`details.rule` まで確認）、冪等性、ポリシーの対応付けをテストにする。期待値の比較は `plain(...)`（Decimal は値、日時は ISO 文字列、Entity は識別子で比べる） |

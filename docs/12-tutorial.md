@@ -73,7 +73,7 @@ operations:
 ### 7. Use case とシナリオ
 
 - **Use case**: アクターの操作に対応する手順。「招待を読み込む → 受諾する → 保存する → コミット後にイベントを公開する」のように、順序とトランザクションの境界を表す。
-- **シナリオ**: Given（前提）/ When（操作）/ Then（期待する結果）で書く具体例。このツールではシナリオがそのまま pytest のテストになる。Then に「うまく動く」のようなあいまいな期待を書くとエラーになる。
+- **シナリオ**: Given（前提）/ When（操作）/ Then（期待する結果）で書く具体例。このツールではシナリオがそのまま生成テスト（pytest。TypeScript なら vitest か bun test）になる。Then に「うまく動く」のようなあいまいな期待を書くとエラーになる。
 
 ---
 
@@ -182,6 +182,16 @@ operations:
    - `src/<package>/generated/<context>/domain/aggregates.py` — ルールが `_invariant_…` や State guard のメソッドとして確かめられている
    - `src/<package>/generated/<context>/README.md` — ルールがどの操作で使われ、どのテストで確かめられているかの表
    - `tests/generated/` — シナリオから生成されたテスト
+   **TypeScript で生成する場合**は、モデルの `generation` に `target: typescript` を書いてから（または `ddd generate --target typescript` で）生成する。初回に `package.json` と `tsconfig.json` も作られるので、そのまま依存を入れてテストと型検査を実行する。
+
+   ```sh
+   cd ~/work/staff
+   npm install            # または bun install
+   npm run typecheck      # tsc --noEmit（strict）
+   npm test               # vitest（test_runner: bun なら bun test）
+   ```
+
+   読むところは `src/<package>/generated/<context>/domain/aggregates.ts`（Invariant は `#invariant…` メソッド、State guard は `checks()` / `assertHolds()` を持つ `StateGuard` を返すメソッド）。完成した例は `examples/cleaning-platform-ts/`。
 5. モデルを変えて `ddd diff` → `ddd generate` を繰り返す。生成ファイルを手で直すと次の生成が止まり差分が表示される。独自の処理は `extensions/` に書く（上書きされない）。CI では `ddd diff --check` で生成物が最新かを確かめられる。
 
 ## 次に読むもの
