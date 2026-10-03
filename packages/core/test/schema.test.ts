@@ -23,6 +23,15 @@ describe("published JSON Schema", () => {
     expect(validate(parse(ORDERING.replace("              value: count(order.lines)\n", "")))).toBe(false);
   });
 
+  test("accepts the TypeScript example (generation.target, typescript.test_runner) and rejects unknown values", () => {
+    const ts = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform-ts/model.ddd.yaml"), "utf8");
+    const ok = validate(parse(ts));
+    expect(validate.errors ?? []).toEqual([]);
+    expect(ok).toBe(true);
+    expect(validate(parse(ts.replace("target: typescript", "target: rust")))).toBe(false);
+    expect(validate(parse(ts.replace("test_runner: vitest", "test_runner: jest")))).toBe(false);
+  });
+
   test("rejects unknown keys and bad names like the built-in parser", () => {
     expect(validate(parse(SAMPLE.replace("    enums:", "    enumz:")))).toBe(false);
     expect(validate(parse(SAMPLE.replace("name: CleaningStaffInvitation", "name: cleaning_staff_invitation")))).toBe(false);
