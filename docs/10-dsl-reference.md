@@ -46,7 +46,7 @@ TypeScript のとき、生成物は `src/<package>/generated/` に、初回だ�
 | `Decimal` | `Decimal`（decimal.js。28桁・偶数丸め） | 入力は文字列・数値・Decimal。JSON では文字列 |
 | `UUID` | `UUID`（ブランド付き文字列、小文字に正規化） | Aggregate / Entity の UUID の識別子は `Id<"Order">` |
 | `Ref[Order]` | `Id<"Order">` | 別の Aggregate の ID と混ぜると型エラー |
-| `DateTime` | `Date` | 入力は `Date` か、オフセット付きの ISO 8601 文字列 |
+| `DateTime` | `Instant`（UTC に正規化した `"2026-01-08T10:00:00.000Z"` のブランド付き文字列） | 入力はオフセット付きの ISO 8601 文字列か `Date`。`===` / `<` でそのまま比べられ、JSON でもそのまま。年は 0001〜9999。`Date` が要るところは `toDate(i)` |
 | `Date` | `LocalDate`（`"2026-01-31"` のブランド付き文字列） | |
 | Enum | 文字列リテラルの union と `as const` のオブジェクト（`InvitationStatus.pending`） | |
 | Value Object / コマンド / イベント | Zod スキーマと推論型（凍結したオブジェクト。`EmailAddress.create(...)`） | |
@@ -55,7 +55,7 @@ TypeScript のとき、生成物は `src/<package>/generated/` に、初回だ�
 | `required: false` | `T \| null`（既定 null） | |
 | Duration（式の中だけ） | ミリ秒の `number`（`days/hours/minutes`） | |
 
-フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。`Omit` `ErrorOptions` と、イベントのスキーマ（`<Event>Schema`、`<Context>EventSchema`）と同じ名前の型、`type` という名前のイベントフィールド（イベントの種類 `"<Context>.<Event>"` を入れるため）も同じエラーになる。
+フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `Instant` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。`Omit` `ErrorOptions` と、イベントのスキーマ（`<Event>Schema`、`<Context>EventSchema`）と同じ名前の型、`type` という名前のイベントフィールド（イベントの種類 `"<Context>.<Event>"` を入れるため）も同じエラーになる。
 
 命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。イベントのフィールド名 `event_type`（生成するイベントが必ず持つタグ）と型名 `AnyEvent`（コンテキストのイベントの共用体）も予約されている。
 

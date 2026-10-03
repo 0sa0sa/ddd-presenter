@@ -198,7 +198,7 @@ def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
 同じ操作の TypeScript:
 
 ```ts
-accept(args: { readonly at: Date }): Transition<CleaningStaffInvitation> {
+accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
   const { at } = args;
   this.pendingUntilExpiry(at).assertHolds();                                   // require: 自動で確認
   const aggregate = this.#with({ status: InvitationStatus.accepted, acceptedAt: at });  // 候補状態でInvariantを評価
@@ -251,6 +251,6 @@ accept(args: { readonly at: Date }): Transition<CleaningStaffInvitation> {
 
 - 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
-- 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（Date の精度、文字列の長さの数え方など）は docs/09 §14。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
+- 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（日時はミリ秒精度の ISO 文字列 `Instant`、文字列の長さの数え方など）は docs/09 §14・§17。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。
