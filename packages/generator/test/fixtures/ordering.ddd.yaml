@@ -1,0 +1,394 @@
+schema_version: 1
+project: ordering
+description: >
+  E-commerce ordering: order lines, money, discounts, time windows and refunds,
+  written with arithmetic, durations, collection functions, constructors and let.
+generation:
+  package: ordering
+
+contexts:
+  - name: Sales
+    errors:
+      - { name: InvalidMoney, code: invalid_money, message: invalid amount of money }
+      - { name: InvalidLine, code: invalid_line, message: invalid order line }
+      - { name: TooManyLines, code: too_many_lines, message: an order has at most 50 lines }
+      - { name: DuplicateLine, code: duplicate_line, message: the line already exists }
+      - { name: LineNotFound, code: line_not_found, message: no such line }
+      - { name: OrderNotOpen, code: order_not_open, message: the order is not open }
+      - { name: OrderNotFound, code: order_not_found, message: no such order }
+      - { name: DiscountTooLarge, code: discount_too_large, message: the discount exceeds the subtotal }
+      - { name: BelowMinimumOrder, code: below_minimum_order, message: the order total is below the minimum }
+      - { name: CancelWindowClosed, code: cancel_window_closed, message: orders can be cancelled within 24 hours }
+      - { name: RefundWindowClosed, code: refund_window_closed, message: refunds are accepted within 7 days of delivery }
+      - { name: RefundTooLarge, code: refund_too_large, message: the refund exceeds the amount paid }
+      - { name: DeliveryTooLate, code: delivery_too_late, message: delivery must be within two weeks }
+    enums:
+      - { name: OrderStatus, values: [open, placed, delivered, cancelled] }
+    value_objects:
+      - name: Money
+        fields:
+          - { name: amount, type: Decimal, constraints: { decimal_places: 2 } }
+          - { name: currency, type: String, constraints: { min_length: 3, max_length: 3 } }
+        invariants:
+          - { name: non_negative_amount, expression: amount >= 0, error: InvalidMoney }
+    aggregates:
+      - name: Order
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: status, type: OrderStatus }
+          - { name: currency, type: String }
+          - { name: lines, type: "List[OrderLine]" }
+          - { name: discount, type: Decimal }
+          - { name: refunded, type: Decimal }
+          - { name: placed_at, type: DateTime, required: false }
+          - { name: delivered_at, type: DateTime, required: false }
+          - { name: promised_on, type: Date, required: false }
+        entities:
+          - name: OrderLine
+            identity: line_id
+            fields:
+              - { name: line_id, type: Integer }
+              - { name: sku, type: String }
+              - { name: quantity, type: Integer }
+              - { name: unit_price, type: Money }
+            invariants:
+              - { name: quantity_in_range, expression: quantity >= 1 and quantity <= 99, error: InvalidLine }
+        invariants:
+          - { name: at_most_50_lines, expression: count(lines) <= 50, error: TooManyLines }
+          - name: lines_share_currency
+            expression: all(lines, item.unit_price.currency == currency)
+            error: InvalidMoney
+          - name: discount_within_subtotal
+            expression: discount >= 0 and discount <= sum(lines, item.unit_price.amount * item.quantity)
+            error: DiscountTooLarge
+          - name: refund_within_paid
+            expression: refunded <= sum(lines, item.unit_price.amount * item.quantity) - discount
+            error: RefundTooLarge
+            check_on: [transition]
+        state_guards:
+          - { name: is_open, expression: status == open, error: OrderNotOpen }
+          - name: has_line
+            parameters: [{ name: line_id, type: Integer }]
+            expression: any(lines, item.line_id == line_id)
+            error: LineNotFound
+          - name: lacks_line
+            parameters: [{ name: line_id, type: Integer }]
+            expression: count(lines, item.line_id == line_id) == 0
+            error: DuplicateLine
+          - name: cancellable_at
+            parameters: [{ name: at, type: DateTime }]
+            expression: status == placed and placed_at != null and at - placed_at < hours(24)
+            error: CancelWindowClosed
+          - name: refundable_at
+            parameters: [{ name: at, type: DateTime }]
+            expression: status == delivered and delivered_at != null and at <= delivered_at + days(7)
+            error: RefundWindowClosed
+          - name: within_two_weeks
+            parameters: [{ name: on, type: Date }, { name: today, type: Date }]
+            expression: on >= today and on <= today + days(14)
+            error: DeliveryTooLate
+        factories:
+          - name: open
+            parameters: [{ name: id, type: UUID }, { name: currency, type: String }]
+            fields: { id: id, status: open, currency: currency, lines: [], discount: 0, refunded: 0 }
+            emits: [{ name: OrderOpened, fields: [id, currency] }]
+        operations:
+          - name: add_line
+            parameters:
+              - { name: line_id, type: Integer }
+              - { name: sku, type: String }
+              - { name: quantity, type: Integer }
+              - { name: unit_price, type: Money }
+            require: [is_open, lacks_line(line_id)]
+            changes:
+              lines: append(lines, OrderLine(line_id=line_id, sku=sku, quantity=quantity, unit_price=unit_price))
+            emits:
+              - name: LineAdded
+                fields:
+                  - id
+                  - line_id
+                  - name: subtotal
+                    value: sum(lines, item.unit_price.amount * item.quantity)
+          - name: change_quantity
+            parameters: [{ name: line_id, type: Integer }, { name: quantity, type: Integer }]
+            require: [is_open, has_line(line_id)]
+            changes:
+              lines: replace_where(lines, item.line_id == line_id, with(item, quantity=quantity))
+            emits:
+              - name: QuantityChanged
+                fields:
+                  - id
+                  - line_id
+                  - name: subtotal
+                    value: sum(lines, item.unit_price.amount * item.quantity)
+          - name: remove_line
+            parameters: [{ name: line_id, type: Integer }]
+            require: [is_open, has_line(line_id)]
+            changes:
+              lines: remove_where(lines, item.line_id == line_id)
+            emits: [{ name: LineRemoved, fields: [id, line_id, { name: line_count, value: count(lines) }] }]
+          - name: apply_discount
+            description: Percentage discount, rounded half-up to cents.
+            parameters: [{ name: percent, type: Integer }]
+            require: [is_open]
+            changes:
+              discount: round(sum(lines, item.unit_price.amount * item.quantity) * (percent / 100), 2)
+          - name: place
+            parameters: [{ name: at, type: DateTime }]
+            require: [is_open]
+            changes: { status: placed, placed_at: at }
+            emits:
+              - name: OrderPlaced
+                fields:
+                  - id
+                  - name: total
+                    value: Money(amount=sum(lines, item.unit_price.amount * item.quantity) - discount, currency=currency)
+                  - { name: cancel_deadline, value: at + hours(24) }
+                  - name: item_count
+                    value: sum(lines, item.quantity)
+          - name: cancel
+            parameters: [{ name: at, type: DateTime }]
+            require: [cancellable_at(at)]
+            changes: { status: cancelled }
+            emits: [{ name: OrderCancelled, fields: [id, at] }]
+          - name: deliver
+            parameters: [{ name: at, type: DateTime }]
+            changes: { status: delivered, delivered_at: at }
+          - name: promise_delivery
+            parameters: [{ name: on, type: Date }, { name: today, type: Date }]
+            require:
+              - within_two_weeks(on, today)
+            changes: { promised_on: on }
+          - name: refund
+            parameters: [{ name: amount, type: Decimal }, { name: at, type: DateTime }]
+            require: [refundable_at(at)]
+            changes: { refunded: refunded + amount }
+            emits:
+              - name: Refunded
+                fields:
+                  - id
+                  - { name: change, value: -amount }
+                  - name: remaining
+                    value: max(sum(lines, item.unit_price.amount * item.quantity) - discount - refunded, 0)
+        scenarios:
+          - name: open_starts_empty
+            when:
+              factory: open
+              args: { id: "00000000-0000-0000-0000-000000000001", currency: USD }
+            then:
+              state: { status: open, lines: [], discount: 0, refunded: 0 }
+              emits: [{ event: OrderOpened, fields: { currency: USD } }]
+          - name: add_line_appends_and_reports_subtotal
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }] }
+            when:
+              operation: add_line
+              args: { line_id: 2, sku: B, quantity: 3, unit_price: { amount: "2.50", currency: USD } }
+            then:
+              state: { lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }, { line_id: 2, sku: B, quantity: 3, unit_price: { amount: "2.50", currency: USD } }] }
+              emits: [{ event: LineAdded, fields: { line_id: 2, subtotal: "17.50" } }]
+          - name: duplicate_line_is_rejected
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }] }
+            when:
+              operation: add_line
+              args: { line_id: 1, sku: B, quantity: 1, unit_price: { amount: "1.00", currency: USD } }
+            then: { raises: DuplicateLine }
+          - name: new_line_quantity_is_checked
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [] }
+            when:
+              operation: add_line
+              args: { line_id: 1, sku: A, quantity: 100, unit_price: { amount: "1.00", currency: USD } }
+            then: { raises: InvalidLine }
+          - name: line_in_another_currency_is_rejected
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [] }
+            when:
+              operation: add_line
+              args: { line_id: 1, sku: A, quantity: 1, unit_price: { amount: "1.00", currency: EUR } }
+            then: { raises: InvalidMoney }
+          - name: change_quantity_replaces_the_line
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }, { line_id: 2, sku: B, quantity: 1, unit_price: { amount: "1.25", currency: USD } }] }
+            when: { operation: change_quantity, args: { line_id: 1, quantity: 4 } }
+            then:
+              emits: [{ event: QuantityChanged, fields: { line_id: 1, subtotal: "21.25" } }]
+          - name: change_quantity_checks_the_range
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }] }
+            when: { operation: change_quantity, args: { line_id: 1, quantity: 0 } }
+            then: { raises: InvalidLine }
+          - name: remove_line_keeps_the_others
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }, { line_id: 2, sku: B, quantity: 1, unit_price: { amount: "1.25", currency: USD } }] }
+            when: { operation: remove_line, args: { line_id: 1 } }
+            then:
+              state: { lines: [{ line_id: 2, sku: B, quantity: 1, unit_price: { amount: "1.25", currency: USD } }] }
+              emits: [{ event: LineRemoved, fields: { line_id: 1, line_count: 1 } }]
+          - name: removing_a_missing_line_fails
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [] }
+            when: { operation: remove_line, args: { line_id: 9 } }
+            then: { raises: LineNotFound }
+          - name: discount_is_rounded_half_up
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 3, unit_price: { amount: "3.33", currency: USD } }] }
+            when: { operation: apply_discount, args: { percent: 15 } }
+            then: { state: { discount: "1.50" } }
+          - name: discount_cannot_exceed_the_subtotal
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 1, unit_price: { amount: "10.00", currency: USD } }] }
+            when: { operation: apply_discount, args: { percent: 150 } }
+            then: { raises: DiscountTooLarge }
+          - name: place_reports_total_and_cancel_deadline
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: "1.50", refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 3, unit_price: { amount: "3.33", currency: USD } }, { line_id: 2, sku: B, quantity: 2, unit_price: { amount: "1.00", currency: USD } }] }
+            when: { operation: place, args: { at: "2026-01-01T10:00:00+00:00" } }
+            then:
+              state: { status: placed, placed_at: "2026-01-01T10:00:00+00:00" }
+              emits: [{ event: OrderPlaced, fields: { total: { amount: "10.49", currency: USD }, cancel_deadline: "2026-01-02T10:00:00+00:00", item_count: 5 } }]
+          - name: cancel_within_24_hours
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: placed, currency: USD, discount: 0, refunded: 0, lines: [], placed_at: "2026-01-01T10:00:00+00:00" }
+            when: { operation: cancel, args: { at: "2026-01-02T09:59:00+00:00" } }
+            then: { state: { status: cancelled } }
+          - name: cancel_after_24_hours_fails
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: placed, currency: USD, discount: 0, refunded: 0, lines: [], placed_at: "2026-01-01T10:00:00+00:00" }
+            when: { operation: cancel, args: { at: "2026-01-02T10:00:00+00:00" } }
+            then: { raises: CancelWindowClosed }
+          - name: delivery_can_be_promised_within_two_weeks
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: placed, currency: USD, discount: 0, refunded: 0, lines: [] }
+            when: { operation: promise_delivery, args: { on: "2026-01-15", today: "2026-01-01" } }
+            then: { state: { promised_on: "2026-01-15" } }
+          - name: delivery_later_than_two_weeks_fails
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: placed, currency: USD, discount: 0, refunded: 0, lines: [] }
+            when: { operation: promise_delivery, args: { on: "2026-01-16", today: "2026-01-01" } }
+            then: { raises: DeliveryTooLate }
+          - name: refund_within_7_days
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: delivered, currency: USD, discount: "1.00", refunded: "2.00", lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }], delivered_at: "2026-01-01T10:00:00+00:00" }
+            when: { operation: refund, args: { amount: "3.00", at: "2026-01-08T10:00:00+00:00" } }
+            then:
+              state: { refunded: "5.00" }
+              emits: [{ event: Refunded, fields: { change: "-3.00", remaining: "4.00" } }]
+          - name: refund_after_7_days_fails
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: delivered, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }], delivered_at: "2026-01-01T10:00:00+00:00" }
+            when: { operation: refund, args: { amount: "1.00", at: "2026-01-08T10:00:01+00:00" } }
+            then: { raises: RefundWindowClosed }
+          - name: refund_cannot_exceed_the_amount_paid
+            given:
+              aggregate: { id: "00000000-0000-0000-0000-000000000001", status: delivered, currency: USD, discount: 0, refunded: "9.00", lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }], delivered_at: "2026-01-01T10:00:00+00:00" }
+            when: { operation: refund, args: { amount: "1.01", at: "2026-01-02T10:00:00+00:00" } }
+            then: { raises: RefundTooLarge }
+    use_cases:
+      - name: open_order
+        command: OpenOrder
+        input: [{ name: currency, type: String }]
+        steps:
+          - create: { aggregate: Order, factory: open, as: order, args: { id: ids.new, currency: currency } }
+          - save: order
+          - publish_after_commit: OrderOpened
+          - return: order.id
+        scenarios:
+          - name: open_order_returns_the_new_id
+            given: { ids: ["00000000-0000-0000-0000-0000000000aa"] }
+            when: { input: { currency: USD } }
+            then:
+              returns: "00000000-0000-0000-0000-0000000000aa"
+              emits: [{ event: OrderOpened, fields: { currency: USD } }]
+      - name: add_line_to_order
+        command: AddLineToOrder
+        input:
+          - { name: order_id, type: UUID }
+          - { name: line_id, type: Integer }
+          - { name: sku, type: String }
+          - { name: quantity, type: Integer }
+          - { name: unit_price, type: Decimal }
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order, not_found: OrderNotFound }
+          - invoke:
+              target: order
+              operation: add_line
+              args:
+                line_id: line_id
+                sku: sku
+                quantity: quantity
+                unit_price: Money(amount=unit_price, currency=order.currency)
+          - save: order
+          - publish_after_commit: LineAdded
+          - let:
+              name: line_count
+              value: count(order.lines)
+          - return: line_count
+        scenarios:
+          - name: add_line_returns_the_line_count
+            given:
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }] } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001", line_id: 2, sku: B, quantity: 1, unit_price: "0.99" } }
+            then:
+              returns: 2
+              emits: [{ event: LineAdded, fields: { subtotal: "10.99" } }]
+      - name: place_order
+        command: PlaceOrder
+        input: [{ name: order_id, type: UUID }]
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order, not_found: OrderNotFound }
+          - let:
+              name: total
+              value: sum(order.lines, item.unit_price.amount * item.quantity) - order.discount
+          - if:
+              condition: total < 10
+              then: [{ fail: BelowMinimumOrder }]
+          - invoke: { target: order, operation: place, args: { at: clock.now } }
+          - save: order
+          - publish_after_commit: OrderPlaced
+          - return: total
+        scenarios:
+          - name: place_order_returns_the_total
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: "0.50", refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 3, unit_price: { amount: "3.50", currency: USD } }] } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001" } }
+            then:
+              returns: "10.00"
+              state: [{ aggregate: Order, id: "00000000-0000-0000-0000-000000000001", fields: { status: placed } }]
+              emits: [{ event: OrderPlaced, fields: { cancel_deadline: "2026-01-02T10:00:00+00:00" } }]
+          - name: small_orders_are_rejected
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", status: open, currency: USD, discount: "0.51", refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 3, unit_price: { amount: "3.50", currency: USD } }] } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001" } }
+            then:
+              raises: BelowMinimumOrder
+              emits: []
+      - name: refund_order
+        command: RefundOrder
+        input: [{ name: order_id, type: UUID }, { name: amount, type: Decimal }]
+        steps:
+          - load: { aggregate: Order, by: order_id, as: order, not_found: OrderNotFound }
+          - invoke: { target: order, operation: refund, args: { amount: amount, at: clock.now } }
+          - save: order
+          - publish_after_commit: Refunded
+          - if:
+              condition: order.refunded > 0
+              then:
+                - let:
+                    name: still_paid
+                    value: sum(order.lines, item.unit_price.amount * item.quantity) - order.discount - order.refunded
+                - return: still_paid
+          - return: 0
+        scenarios:
+          - name: refund_returns_what_is_still_paid
+            given:
+              clock: "2026-01-03T10:00:00+00:00"
+              aggregates: [{ type: Order, fields: { id: "00000000-0000-0000-0000-000000000001", status: delivered, currency: USD, discount: 0, refunded: 0, lines: [{ line_id: 1, sku: A, quantity: 2, unit_price: { amount: "5.00", currency: USD } }], delivered_at: "2026-01-01T10:00:00+00:00" } }]
+            when: { input: { order_id: "00000000-0000-0000-0000-000000000001", amount: "2.50" } }
+            then:
+              returns: "7.50"
+              emits: [{ event: Refunded, fields: { remaining: "7.50" } }]

@@ -230,7 +230,9 @@ export type StepIR =
   | ({ kind: "publish"; event: string; afterCommit: boolean } & Located)
   | ({ kind: "if"; condition: string; then: StepIR[]; else: StepIR[] } & Located)
   | ({ kind: "fail"; error: string } & Located)
-  | ({ kind: "return"; value: string } & Located);
+  | ({ kind: "return"; value: string } & Located)
+  /** Names a computed value for later steps. Scoped like `as`: a value named inside an if-branch stays in that branch. */
+  | ({ kind: "let"; name: string; value: string } & Located);
 
 /** Literal scenario data as written in YAML (strings, numbers, booleans, nested maps). */
 export type ScenarioValue = unknown;

@@ -1,8 +1,33 @@
-import { countNodes, ExprSyntaxError, parseExpr, type BinaryOp, type Expr } from "./expr.ts";
+import { countNodes, ExprSyntaxError, isArithOp, parseExpr, type ArithOp, type BinaryOp, type Expr, type NamedArg } from "./expr.ts";
 import type { AggregateIR, ContextIR, StateGuardIR } from "./ir.ts";
 import { assignable, closest, isNumeric, isOrderable, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
 
-export type BuiltinFn = "is_empty" | "contains" | "length";
+/** Built-in rule functions. Also reserved: they cannot name extension points, parameters or use case variables. */
+export const BUILTIN_FUNCTIONS = [
+  "is_empty",
+  "contains",
+  "length",
+  "days",
+  "hours",
+  "minutes",
+  "round",
+  "min",
+  "max",
+  "count",
+  "sum",
+  "any",
+  "all",
+  "append",
+  "remove",
+  "remove_where",
+  "replace_where",
+  "with",
+] as const;
+export type BuiltinFn = Exclude<(typeof BUILTIN_FUNCTIONS)[number], "with">;
+/** Functions whose 2nd (and 3rd) argument is evaluated once per element, with the element bound to `item`. */
+export const ITEM_FUNCTIONS = new Set<string>(["count", "sum", "any", "all", "remove_where", "replace_where"]);
+/** Name of the current element inside the per-element arguments of collection functions. */
+export const ITEM_NAME = "item";
 export type Port = "clock" | "ids";
 
 /** Typed, fully-resolved expression tree consumed by code generators. */
@@ -16,12 +41,32 @@ export type TExpr = { type: Type } & (
   | { t: "port"; port: Port; member: "now" | "new" }
   /** `receiver` undefined → guard of the current aggregate. */
   | { t: "guard"; aggregate: string; guard: string; receiver?: TExpr; args: TExpr[] }
+  /**
+   * Built-in function. For collection functions (`ITEM_FUNCTIONS`) `args[0]` is the list and the
+   * following arguments are evaluated per element with the element bound to `item`.
+   */
   | { t: "builtin"; fn: BuiltinFn; args: TExpr[] }
   | { t: "extension"; name: string; args: TExpr[] }
   | { t: "not"; operand: TExpr }
+  /** Comparison / logic (type Boolean) or arithmetic (`+ - * /`, type = result type). */
   | { t: "binary"; op: BinaryOp; left: TExpr; right: TExpr }
+  | { t: "neg"; operand: TExpr }
+  | { t: "list"; items: TExpr[] }
+  /** Value object / entity built from named fields: `Money(amount=x, currency="JPY")`. */
+  | { t: "construct"; kind: "vo" | "entity"; name: string; fields: NamedValue[] }
+  /** Copy of an entity with some fields changed (all invariants run on the copy): `with(item, quantity=q)`. */
+  | { t: "with"; target: TExpr; fields: NamedValue[] }
+  /** The current element inside a collection function; `depth` 0 is the outermost. */
+  | { t: "item"; depth: number }
   | { t: "isNull"; negate: boolean; operand: TExpr }
 );
+
+/** A `field=value` argument; `fieldType` is the declared type of the field. */
+export interface NamedValue {
+  name: string;
+  value: TExpr;
+  fieldType: Type;
+}
 
 export interface ExprError {
   message: string;
@@ -44,6 +89,8 @@ export interface ExprEnv {
   allowPorts: boolean;
   /** Allow calls to extension points. */
   allowExtensions: boolean;
+  /** Aggregate whose internal entities may be constructed (`OrderLine(...)`). Defaults to `self.aggregate`. */
+  scopeAggregate?: string;
 }
 
 export function makeEnv(context: ContextIR, init: Partial<ExprEnv> = {}): ExprEnv {
@@ -69,6 +116,8 @@ const BOOL = T.Boolean;
 
 class Checker {
   readonly errors: ExprError[] = [];
+  /** Element types of the enclosing collection functions (innermost last). */
+  readonly items: Type[] = [];
   constructor(readonly env: ExprEnv) {}
 
   fail(node: Expr, message: string, hint?: string): undefined {
@@ -114,6 +163,7 @@ class Checker {
     if (e.t === "field") return e.owner ? (this.key(e.owner) ? `${this.key(e.owner)}.${e.name}` : undefined) : `self.${e.name}`;
     if (e.t === "param") return `param.${e.name}`;
     if (e.t === "local") return `local.${e.name}`;
+    if (e.t === "item") return `item.${e.depth}`;
     return undefined;
   }
 
@@ -135,7 +185,7 @@ class Checker {
       case "member":
         return this.checkMember(node, narrowed);
       case "call":
-        return this.checkCall(node, narrowed);
+        return this.checkCall(node, narrowed, expected);
       case "not": {
         const operand = this.check(node.operand, narrowed, BOOL);
         if (!operand) return undefined;
@@ -143,13 +193,125 @@ class Checker {
         return { t: "not", operand, type: BOOL };
       }
       case "binary":
-        return this.checkBinary(node, narrowed);
+        return isArithOp(node.op) ? this.checkArith(node, narrowed) : this.checkBinary(node, narrowed);
+      case "neg": {
+        const operand = this.check(node.operand, narrowed);
+        if (!operand) return undefined;
+        if (operand.type.k === "optional") return this.fail(node.operand, "Cannot negate an optional value", "Check for null first, e.g. `x != null and -x < y`");
+        if (!isNumeric(operand.type) && operand.type.k !== "duration") {
+          return this.fail(node, `Unary "-" is not defined for ${typeToString(operand.type)}`, "Only Integer, Decimal and Duration values can be negated");
+        }
+        return { t: "neg", operand, type: operand.type };
+      }
+      case "list":
+        return this.checkList(node, narrowed, expected);
     }
+  }
+
+  checkList(node: Extract<Expr, { t: "list" }>, narrowed: Set<string>, expected?: Type): TExpr | undefined {
+    const target = expected?.k === "optional" ? expected.inner : expected;
+    const expectedItem = target?.k === "list" ? target.item : undefined;
+    if (node.items.length === 0) {
+      if (!expectedItem) {
+        return this.fail(node, "The item type of [] is unknown here", "Use [] where a List is expected: a List field in fields/changes, an argument of a List parameter, or append([], x)");
+      }
+      return { t: "list", items: [], type: { k: "list", item: expectedItem } };
+    }
+    const items: TExpr[] = [];
+    for (const n of node.items) {
+      const it = this.check(n, narrowed, expectedItem ?? items[0]?.type);
+      if (!it) return undefined;
+      items.push(it);
+    }
+    let itemType = expectedItem;
+    if (!itemType) {
+      itemType = items[0]!.type;
+      // Integer and Decimal items make a List[Decimal].
+      if (items.every((i) => isNumeric(i.type)) && items.some((i) => sameType(i.type, T.Decimal))) itemType = T.Decimal;
+    }
+    if (itemType.k === "optional" || itemType.k === "null") return this.fail(node, "Lists cannot contain null");
+    for (const [i, it] of items.entries()) {
+      if (!assignable(it.type, itemType)) {
+        return this.fail(node.items[i]!, `List items must be ${typeToString(itemType)}, got ${typeToString(it.type)}`);
+      }
+    }
+    return { t: "list", items, type: { k: "list", item: itemType } };
+  }
+
+  /** Result type of `left op right`, or an error with a hint. */
+  arithType(op: ArithOp, l: TExpr, r: TExpr): Type | { message: string; hint?: string } {
+    const lt = l.type;
+    const rt = r.type;
+    const isDur = (t: Type) => t.k === "duration";
+    const prim = (t: Type, n: string) => t.k === "primitive" && t.name === n;
+    if (isNumeric(lt) && isNumeric(rt)) {
+      if (op === "/") return T.Decimal;
+      return prim(lt, "Decimal") || prim(rt, "Decimal") ? T.Decimal : T.Integer;
+    }
+    const isDays = (e: TExpr) => e.t === "builtin" && e.fn === "days";
+    if (op === "+" || op === "-") {
+      if (prim(lt, "DateTime") && isDur(rt)) return T.DateTime;
+      if (op === "+" && isDur(lt) && prim(rt, "DateTime")) return T.DateTime;
+      if (op === "-" && prim(lt, "DateTime") && prim(rt, "DateTime")) return T.Duration;
+      if (op === "-" && prim(lt, "Date") && prim(rt, "Date")) return T.Duration;
+      if ((prim(lt, "Date") && isDur(rt)) || (op === "+" && isDur(lt) && prim(rt, "Date"))) {
+        if (isDays(prim(lt, "Date") ? r : l)) return T.Date;
+        return { message: "Only whole days can be added to or subtracted from a Date", hint: "Write the duration directly as days(n), e.g. due_on + days(30); use a DateTime for hours and minutes" };
+      }
+      if (isDur(lt) && isDur(rt)) return T.Duration;
+    }
+    if (op === "*") {
+      if (isDur(lt) && prim(rt, "Integer")) return T.Duration;
+      if (prim(lt, "Integer") && isDur(rt)) return T.Duration;
+      if ((isDur(lt) && isNumeric(rt)) || (isNumeric(lt) && isDur(rt))) return { message: "A Duration can only be multiplied by an Integer" };
+    }
+    const message = `"${op}" is not defined for ${typeToString(lt)} and ${typeToString(rt)}`;
+    for (const t of [lt, rt]) {
+      if (t.k === "vo") {
+        const fields = this.fieldsOfType(t) ?? new Map<string, Type>();
+        const numeric = [...fields].filter(([, ft]) => isNumeric(ft)).map(([n]) => n);
+        return {
+          message,
+          hint: `${t.name} is a value object: compute with its ${numeric.length ? `numeric field (e.g. .${numeric[0]})` : "fields"} and build a new value with ${t.name}(${[...fields.keys()].map((f) => `${f}=...`).join(", ")})`,
+        };
+      }
+    }
+    if (prim(lt, "String") || prim(rt, "String")) return { message, hint: "Strings cannot be concatenated or used in arithmetic in rules" };
+    if ([lt, rt].some((t) => prim(t, "DateTime") || prim(t, "Date"))) {
+      return { message, hint: "Add or subtract a Duration: days(n), hours(n) or minutes(n). DateTime - DateTime gives a Duration" };
+    }
+    if (isDur(lt) || isDur(rt)) return { message, hint: "Durations can be added to each other or to a DateTime, and multiplied by an Integer" };
+    return { message, hint: "Arithmetic works on Integer and Decimal values, DateTime/Date and Duration" };
+  }
+
+  checkArith(node: Extract<Expr, { t: "binary" }>, narrowed: Set<string>): TExpr | undefined {
+    const op = node.op as ArithOp;
+    const left = this.check(node.left, narrowed);
+    const right = this.check(node.right, narrowed);
+    if (!left || !right) return undefined;
+    for (const [side, n] of [
+      [left, node.left],
+      [right, node.right],
+    ] as const) {
+      if (side.type.k === "optional") {
+        return this.fail(n, `Cannot compute "${op}" with an optional value`, "Check for null first, e.g. `x != null and x + 1 > y`");
+      }
+    }
+    const r = this.arithType(op, left, right);
+    if ("message" in r) return this.fail(node, r.message, r.hint);
+    return { t: "binary", op, left, right, type: r };
   }
 
   checkName(node: Extract<Expr, { t: "name" }>, narrowed: Set<string>, expected?: Type): TExpr | undefined {
     const env = this.env;
     const n = node.name;
+    if (n === ITEM_NAME && this.items.length) {
+      if (this.isKnownName(n, false)) {
+        return this.fail(node, `"${ITEM_NAME}" is the current element here and hides the parameter, variable or field "${ITEM_NAME}"`, `Rename "${ITEM_NAME}" outside; inside collection functions "${ITEM_NAME}" always means the element`);
+      }
+      const depth = this.items.length - 1;
+      return this.narrow({ t: "item", depth, type: this.items[depth]! }, narrowed);
+    }
     const p = env.params.get(n);
     if (p) return this.narrow({ t: "param", name: n, type: p }, narrowed);
     const l = env.locals.get(n);
@@ -174,6 +336,12 @@ class Checker {
     const enumsWith = env.context.enums.filter((e) => e.values.includes(n));
     const candidates = [...env.params.keys(), ...env.locals.keys(), ...(env.self?.fields.keys() ?? [])];
     const suggestion = closest(n, candidates);
+    if (n === ITEM_NAME) {
+      return this.fail(node, `"${ITEM_NAME}" is only available inside collection functions`, "e.g. any(lines, item.line_id == line_id), sum(lines, item.quantity)");
+    }
+    if (env.context.valueObjects.some((v) => v.name === n) || env.context.aggregates.some((a) => a.entities.some((e) => e.name === n))) {
+      return this.fail(node, `${n} is a type; build a value with named fields, e.g. ${n}(field=...)`);
+    }
     return this.fail(
       node,
       `Unknown name "${n}"`,
@@ -262,11 +430,22 @@ class Checker {
     return { t: "guard", aggregate: aggregate.name, guard: guard.name, receiver, args, type: BOOL };
   }
 
-  checkCall(node: Extract<Expr, { t: "call" }>, narrowed: Set<string>): TExpr | undefined {
+  checkCall(node: Extract<Expr, { t: "call" }>, narrowed: Set<string>, expected?: Type): TExpr | undefined {
     const env = this.env;
     const callee = node.callee;
     if (callee.t === "name") {
       const name = callee.name;
+      const isType = (n: string) =>
+        env.context.valueObjects.some((v) => v.name === n) ||
+        env.context.aggregates.some((a) => a.name === n || a.entities.some((e) => e.name === n)) ||
+        env.context.enums.some((e) => e.name === n);
+      if (isType(name)) return this.checkConstruct(node, name, narrowed);
+      if (name === "with") return this.checkWith(node, narrowed);
+      if (node.named) {
+        return this.fail(node, `${name}() does not take named arguments`, "Named arguments (field=value) are for building values: Money(amount=1, currency=\"JPY\") and with(entity, field=value)");
+      }
+      const more = this.checkMoreBuiltins(node, name, narrowed, expected);
+      if (more !== false) return more;
       if (name === "is_empty" || name === "length") {
         if (node.args.length !== 1) return this.fail(node, `${name}() takes 1 argument`);
         const a = this.check(node.args[0]!, narrowed);
@@ -322,8 +501,10 @@ class Checker {
       if (g) {
         return this.fail(node, `State guard ${name} cannot be called here`, env.allowReceiverGuards ? `Call it on a loaded aggregate, e.g. \`invitation.${name}(...)\`` : "Guards are only referenced from operation `require` lists or use case conditions");
       }
-      return this.fail(node, `Unknown function "${name}"`, "Available functions: is_empty, contains, length");
+      const s = closest(name, BUILTIN_FUNCTIONS);
+      return this.fail(node, `Unknown function "${name}"`, s ? `Did you mean "${s}"?` : `Available functions: ${BUILTIN_FUNCTIONS.join(", ")}`);
     }
+    if (node.named) return this.fail(node, "Named arguments (field=value) are only for building values, e.g. Money(amount=1, currency=\"JPY\")");
     if (callee.t === "member" && env.allowReceiverGuards) {
       const owner = this.check(callee.object, narrowed);
       if (!owner) return undefined;
@@ -335,6 +516,250 @@ class Checker {
       }
     }
     return this.fail(node, "Only named functions and state guards can be called");
+  }
+
+  /** Checks `field=value` arguments against a field map (used by constructors and `with`). */
+  namedFields(owner: string, named: NamedArg[], fields: Map<string, Type>, narrowed: Set<string>): NamedValue[] | undefined {
+    const out: NamedValue[] = [];
+    let ok = true;
+    for (const a of named) {
+      const ft = fields.get(a.name);
+      if (!ft) {
+        const s = closest(a.name, [...fields.keys()]);
+        this.errors.push({ message: `${owner} has no field "${a.name}"`, hint: s ? `Did you mean "${s}"?` : `Fields: ${[...fields.keys()].join(", ")}`, start: a.start, end: a.end });
+        ok = false;
+        continue;
+      }
+      const v = this.check(a.value, narrowed, ft);
+      if (!v) {
+        ok = false;
+        continue;
+      }
+      if (!assignable(v.type, ft)) {
+        this.fail(a.value, `Field "${a.name}" of ${owner} is ${typeToString(ft)}, got ${typeToString(v.type)}`);
+        ok = false;
+        continue;
+      }
+      out.push({ name: a.name, value: v, fieldType: ft });
+    }
+    return ok ? out : undefined;
+  }
+
+  checkConstruct(node: Extract<Expr, { t: "call" }>, name: string, narrowed: Set<string>): TExpr | undefined {
+    const ctx = this.env.context;
+    const sig = (fields: Map<string, Type>) => `${name}(${[...fields.keys()].map((f) => `${f}=...`).join(", ")})`;
+    if (ctx.enums.some((e) => e.name === name)) return this.fail(node, `${name} is an enum; write a value such as ${name}.${ctx.enums.find((e) => e.name === name)!.values[0] ?? "value"}`);
+    if (ctx.aggregates.some((a) => a.name === name)) {
+      return this.fail(node, `Aggregate ${name} cannot be constructed in an expression`, "Aggregates are created by their factories (a create step in a use case)");
+    }
+    let kind: "vo" | "entity";
+    let type: Type;
+    const owner = ctx.aggregates.find((a) => a.entities.some((e) => e.name === name));
+    if (owner) {
+      const scope = this.env.scopeAggregate ?? this.env.self?.aggregate?.name;
+      if (scope !== owner.name) {
+        return this.fail(
+          node,
+          `Entity ${name} belongs to aggregate ${owner.name} and can only be constructed inside ${owner.name}'s factories and operations`,
+          `Give the operation the entity's fields as parameters and build it in changes, e.g. ${toFieldName(name)}s: append(${toFieldName(name)}s, ${name}(...))`,
+        );
+      }
+      kind = "entity";
+      type = { k: "entity", name, aggregate: owner.name };
+    } else {
+      kind = "vo";
+      type = { k: "vo", name };
+    }
+    const fields = this.fieldsOfType(type) ?? new Map<string, Type>();
+    if (node.args.length) return this.fail(node, `Write the fields of ${name} by name`, `e.g. ${sig(fields)}`);
+    const named = node.named ?? [];
+    const values = this.namedFields(name, named, fields, narrowed);
+    if (!values) return undefined;
+    const missing = [...fields].filter(([f, t]) => t.k !== "optional" && !named.some((a) => a.name === f)).map(([f]) => f);
+    if (missing.length) return this.fail(node, `Missing field${missing.length > 1 ? "s" : ""} ${missing.join(", ")} for ${name}`, `e.g. ${sig(fields)}`);
+    // Keep the declaration order so the generated code is stable.
+    const order = [...fields.keys()];
+    values.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    return { t: "construct", kind, name, fields: values, type };
+  }
+
+  checkWith(node: Extract<Expr, { t: "call" }>, narrowed: Set<string>): TExpr | undefined {
+    if (node.args.length !== 1 || !node.named?.length) {
+      return this.fail(node, "with(entity, field=value, ...) takes one entity and at least one named field", "e.g. with(item, quantity=quantity)");
+    }
+    const target = this.check(node.args[0]!, narrowed);
+    if (!target) return undefined;
+    const t = target.type;
+    if (t.k === "optional") return this.fail(node.args[0]!, "with() is applied to an optional value", "Check it for null first");
+    if (t.k === "vo") {
+      const fields = this.fieldsOfType(t) ?? new Map<string, Type>();
+      return this.fail(node, "with() copies entities; build a new value object instead", `e.g. ${t.name}(${[...fields.keys()].map((f) => `${f}=...`).join(", ")})`);
+    }
+    if (t.k === "aggregate") return this.fail(node, "Aggregates change through their operations, not with()");
+    if (t.k !== "entity") return this.fail(node.args[0]!, `with() expects an entity, got ${typeToString(t)}`);
+    const ag = this.env.context.aggregates.find((a) => a.name === t.aggregate);
+    const en = ag?.entities.find((e) => e.name === t.name);
+    const scope = this.env.scopeAggregate ?? this.env.self?.aggregate?.name;
+    if (scope !== t.aggregate) {
+      return this.fail(node, `Entity ${t.name} can only be changed inside ${t.aggregate}'s operations`, `Invoke an operation of ${t.aggregate} instead`);
+    }
+    const idArg = node.named.find((a) => a.name === en?.identity);
+    if (idArg) return this.fail(node, `with() must not change the identity field "${idArg.name}" of ${t.name}`, "Build a new entity instead");
+    const fields = this.fieldsOfType(t) ?? new Map<string, Type>();
+    const values = this.namedFields(t.name, node.named, fields, narrowed);
+    if (!values) return undefined;
+    const order = [...fields.keys()];
+    values.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    return { t: "with", target, fields: values, type: t };
+  }
+
+  /** Time, number and collection functions. Returns `false` when `name` is not one of them. */
+  checkMoreBuiltins(node: Extract<Expr, { t: "call" }>, name: string, narrowed: Set<string>, expected?: Type): TExpr | undefined | false {
+    const args = node.args;
+    const arity = (min: number, max: number, usage: string): boolean => {
+      if (args.length < min || args.length > max) {
+        this.fail(node, `${name}() takes ${min === max ? min : `${min} or ${max}`} argument${max === 1 ? "" : "s"}`, `Usage: ${usage}`);
+        return false;
+      }
+      return true;
+    };
+    const nonOptional = (e: TExpr, n: Expr): boolean => {
+      if (e.type.k !== "optional") return true;
+      this.fail(n, `${name}() is given an optional value`, "Check for null first, e.g. `x != null and ...`");
+      return false;
+    };
+    switch (name) {
+      case "days":
+      case "hours":
+      case "minutes": {
+        if (!arity(1, 1, `${name}(n: Integer)`)) return undefined;
+        const a = this.check(args[0]!, narrowed, T.Integer);
+        if (!a || !nonOptional(a, args[0]!)) return undefined;
+        if (!sameType(a.type, T.Integer)) return this.fail(args[0]!, `${name}() expects an Integer, got ${typeToString(a.type)}`, "Durations are built from whole numbers of minutes, hours or days");
+        return { t: "builtin", fn: name, args: [a], type: T.Duration };
+      }
+      case "round": {
+        if (!arity(2, 2, "round(x: Integer | Decimal, places)")) return undefined;
+        const x = this.check(args[0]!, narrowed);
+        if (!x || !nonOptional(x, args[0]!)) return undefined;
+        if (!isNumeric(x.type)) return this.fail(args[0]!, `round() expects a number, got ${typeToString(x.type)}`);
+        const p = args[1]!;
+        if (!(p.t === "lit" && p.kind === "integer" && (p.value as number) >= 0 && (p.value as number) <= 28)) {
+          return this.fail(p, "round() takes the number of decimal places as an integer literal (0-28)", "e.g. round(price * rate, 2)");
+        }
+        return { t: "builtin", fn: "round", args: [x, { t: "lit", value: p.value, kind: "integer", type: T.Integer }], type: T.Decimal };
+      }
+      case "min":
+      case "max": {
+        if (!arity(2, 2, `${name}(a, b)`)) return undefined;
+        const a = this.check(args[0]!, narrowed);
+        const b = this.check(args[1]!, narrowed);
+        if (!a || !b || !nonOptional(a, args[0]!) || !nonOptional(b, args[1]!)) return undefined;
+        let type: Type | undefined;
+        if (isNumeric(a.type) && isNumeric(b.type)) type = sameType(a.type, T.Decimal) || sameType(b.type, T.Decimal) ? T.Decimal : T.Integer;
+        else if (sameType(a.type, b.type) && isOrderable(a.type) && !sameType(a.type, T.String)) type = a.type;
+        if (!type) return this.fail(node, `${name}() is not defined for ${typeToString(a.type)} and ${typeToString(b.type)}`, "Both arguments must be numbers, or both DateTime, Date or Duration");
+        return { t: "builtin", fn: name, args: [a, b], type };
+      }
+      case "count":
+      case "sum":
+      case "any":
+      case "all":
+      case "append":
+      case "remove":
+      case "remove_where":
+      case "replace_where":
+        return this.checkCollection(node, name, narrowed, expected);
+    }
+    return false;
+  }
+
+  checkCollection(node: Extract<Expr, { t: "call" }>, name: BuiltinFn, narrowed: Set<string>, expected?: Type): TExpr | undefined {
+    const args = node.args;
+    const usage: Record<string, [number, number, string]> = {
+      count: [1, 2, "count(list) or count(list, <condition on item>)"],
+      sum: [1, 2, "sum(list_of_numbers) or sum(list, <number from item>)"],
+      any: [2, 2, "any(list, <condition on item>)"],
+      all: [2, 2, "all(list, <condition on item>)"],
+      append: [2, 2, "append(list, new_item)"],
+      remove: [2, 2, "remove(list, existing_item)"],
+      remove_where: [2, 2, "remove_where(list, <condition on item>)"],
+      replace_where: [3, 3, "replace_where(list, <condition on item>, <new item>)"],
+    };
+    const [min, max, use] = usage[name]!;
+    if (args.length < min || args.length > max) {
+      return this.fail(node, `${name}() takes ${min === max ? min : `${min} or ${max}`} arguments`, `Usage: ${use}`);
+    }
+    const returnsList = name === "append" || name === "remove" || name === "remove_where" || name === "replace_where";
+    const list = this.check(args[0]!, narrowed, returnsList ? expected : undefined);
+    if (!list) return undefined;
+    if (list.type.k !== "list") {
+      return this.fail(args[0]!, `${name}() expects a List as its first argument, got ${typeToString(list.type)}`, `Usage: ${use}`);
+    }
+    const listType = list.type;
+    const itemType = listType.item;
+    /** Checks a per-element argument with `item` bound to the element. */
+    const perItem = (n: Expr, exp?: Type): TExpr | undefined => {
+      this.items.push(itemType);
+      try {
+        return this.check(n, new Set(narrowed), exp);
+      } finally {
+        this.items.pop();
+      }
+    };
+    const condition = (n: Expr): TExpr | undefined => {
+      const c = perItem(n, BOOL);
+      if (!c) return undefined;
+      if (!sameType(c.type, BOOL)) {
+        return this.fail(n, `The condition of ${name}() must be Boolean, got ${typeToString(c.type)}`, `Compare a field of the element, e.g. ${ITEM_NAME}.id == id`);
+      }
+      return c;
+    };
+    switch (name) {
+      case "count": {
+        if (args.length === 1) return { t: "builtin", fn: "count", args: [list], type: T.Integer };
+        const c = condition(args[1]!);
+        return c && { t: "builtin", fn: "count", args: [list, c], type: T.Integer };
+      }
+      case "sum": {
+        const value = args.length === 2 ? perItem(args[1]!) : undefined;
+        if (args.length === 2 && !value) return undefined;
+        const t = value ? value.type : itemType;
+        if (!isNumeric(t) && t.k !== "duration") {
+          return this.fail(
+            args.length === 2 ? args[1]! : args[0]!,
+            `sum() adds numbers, got ${typeToString(t)}`,
+            args.length === 2 ? `Pick a numeric field of the element, e.g. ${ITEM_NAME}.quantity` : `Name the number to add: sum(${"list"}, ${ITEM_NAME}.<numeric field>)`,
+          );
+        }
+        return { t: "builtin", fn: "sum", args: value ? [list, value] : [list], type: t };
+      }
+      case "any":
+      case "all": {
+        const c = condition(args[1]!);
+        return c && { t: "builtin", fn: name, args: [list, c], type: BOOL };
+      }
+      case "append":
+      case "remove": {
+        const x = this.check(args[1]!, narrowed, itemType);
+        if (!x) return undefined;
+        if (!assignable(x.type, itemType)) return this.fail(args[1]!, `${name}() item must be ${typeToString(itemType)}, got ${typeToString(x.type)}`);
+        return { t: "builtin", fn: name, args: [list, x], type: listType };
+      }
+      case "remove_where": {
+        const c = condition(args[1]!);
+        return c && { t: "builtin", fn: "remove_where", args: [list, c], type: listType };
+      }
+      case "replace_where": {
+        const c = condition(args[1]!);
+        if (!c) return undefined;
+        const x = perItem(args[2]!, itemType);
+        if (!x) return undefined;
+        if (!assignable(x.type, itemType)) return this.fail(args[2]!, `The replacement must be ${typeToString(itemType)}, got ${typeToString(x.type)}`, `e.g. with(${ITEM_NAME}, quantity=quantity)`);
+        return { t: "builtin", fn: "replace_where", args: [list, c, x], type: listType };
+      }
+    }
+    return undefined;
   }
 
   checkBinary(node: Extract<Expr, { t: "binary" }>, narrowed: Set<string>): TExpr | undefined {
@@ -392,8 +817,9 @@ class Checker {
     return { t: "binary", op, left, right, type: BOOL };
   }
 
-  isKnownName(n: string): boolean {
+  isKnownName(n: string, withItem = true): boolean {
     const env = this.env;
+    if (withItem && n === ITEM_NAME && this.items.length) return true;
     return env.params.has(n) || env.locals.has(n) || !!env.self?.fields.has(n);
   }
 
@@ -434,29 +860,43 @@ export function checkExpression(src: string, env: ExprEnv, expected?: Type): Che
 
 /** Collects the self-field names referenced by an expression (for rule traceability). */
 export function referencedFields(e: TExpr, out = new Set<string>()): Set<string> {
+  if (e.t === "field" && !e.owner) out.add(e.name);
+  for (const c of exprChildren(e)) referencedFields(c, out);
+  return out;
+}
+
+/** Direct sub-expressions of a typed expression (for generic walks). */
+export function exprChildren(e: TExpr): TExpr[] {
   switch (e.t) {
     case "field":
-      if (!e.owner) out.add(e.name);
-      else referencedFields(e.owner, out);
-      break;
+      return e.owner ? [e.owner] : [];
     case "guard":
-      if (e.receiver) referencedFields(e.receiver, out);
-      e.args.forEach((a) => referencedFields(a, out));
-      break;
+      return [...(e.receiver ? [e.receiver] : []), ...e.args];
     case "builtin":
     case "extension":
-      e.args.forEach((a) => referencedFields(a, out));
-      break;
+      return e.args;
     case "not":
-      referencedFields(e.operand, out);
-      break;
-    case "binary":
-      referencedFields(e.left, out);
-      referencedFields(e.right, out);
-      break;
+    case "neg":
     case "isNull":
-      referencedFields(e.operand, out);
-      break;
+      return [e.operand];
+    case "binary":
+      return [e.left, e.right];
+    case "list":
+      return e.items;
+    case "construct":
+      return e.fields.map((f) => f.value);
+    case "with":
+      return [e.target, ...e.fields.map((f) => f.value)];
+    case "lit":
+    case "param":
+    case "local":
+    case "enumValue":
+    case "port":
+    case "item":
+      return [];
   }
-  return out;
+}
+
+function toFieldName(typeName: string): string {
+  return typeName.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }

@@ -26,8 +26,11 @@
     "pascal": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
     "snake": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
     "expression": {
-      "description": "Rule expression: fields, parameters, literals, ==, !=, <, <=, >, >=, and, or, not, is_empty(), contains(), length(), null checks.",
-      "type": ["string", "number", "boolean", "null"]
+      "description": "Rule expression: fields, parameters, literals, ==, !=, <, <=, >, >=, and, or, not, + - * / (Integer, Decimal, DateTime, Duration), null checks, list literals, Type(field=value) constructors and the functions is_empty, contains, length, days, hours, minutes, round, min, max, count, sum, any, all, append, remove, remove_where, replace_where, with. A YAML list (e.g. []) is read as a list literal.",
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } }
+      ]
     },
     "typeExpr": {
       "description": "String, Integer, Decimal, Boolean, UUID, DateTime, Date, an enum / value object / entity name, List[T] or Ref[Aggregate]. Quote bracketed types inside { }.",
@@ -301,6 +304,16 @@
         "publish_after_commit": { "$ref": "#/$defs/pascal" },
         "fail": { "$ref": "#/$defs/pascal" },
         "return": { "$ref": "#/$defs/expression" },
+        "let": {
+          "type": "object",
+          "description": "Names a computed value for later steps (scoped like as: a value named inside an if-branch stays in that branch).",
+          "required": ["name", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "$ref": "#/$defs/snake" },
+            "value": { "$ref": "#/$defs/expression" }
+          }
+        },
         "if": {
           "type": "object",
           "required": ["condition", "then"],

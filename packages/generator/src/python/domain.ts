@@ -1,6 +1,6 @@
 import { formatPath, resolveType, typeToString, type AggregateIR, type Constraints, type EntityIR, type EventEmissionIR, type FieldIR, type InvariantIR, type Type, type ValueObjectIR } from "@ddd/core";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { Code, emitExpr, enumMember, pyString, pyType, type Imports } from "./support.ts";
+import { Code, emitAs, emitExpr, enumMember, pyString, pyType, type Imports } from "./support.ts";
 
 export interface PyFile {
   path: string;
@@ -371,7 +371,7 @@ function aggregate(L: Layout, c: Code, ag: AggregateIR, imp: Imports): void {
         c.docstring(d.join("\n"));
         const args = ag.fields
           .filter((fd) => f.fields[fd.name] !== undefined)
-          .map((fd) => `${fd.name}=${emitExpr(X([...f.path, "fields", fd.name])!, L.exprCtx(imp, "cls"))}`);
+          .map((fd) => `${fd.name}=${emitAs(X([...f.path, "fields", fd.name])!, L.fieldTypes(ag.name).get(fd.name), L.exprCtx(imp, "cls"))}`);
         c.line(`aggregate = cls(${args.join(", ")})`);
         emitEvents(L, c, ag, f.emits, new Set(f.parameters.map((p) => p.name)), imp);
       });

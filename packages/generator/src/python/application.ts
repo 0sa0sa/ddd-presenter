@@ -1,7 +1,7 @@
 import { formatPath, resolveType, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { Code, emitExpr, pascal, pyType, toSnake, type ExprContext, type Imports } from "./support.ts";
+import { Code, emitAs, emitExpr, pascal, pyType, toSnake, type ExprContext, type Imports } from "./support.ts";
 
 export function repoAttr(aggregate: string): string {
   return `${toSnake(aggregate)}_repository`;
@@ -159,6 +159,9 @@ function describeSteps(steps: StepIR[], indent = "    ", counter = { n: 0 }): st
       case "return":
         out.push(`${p}return ${s.value}`);
         break;
+      case "let":
+        out.push(`${p}let ${s.name} = ${s.value}`);
+        break;
       case "if":
         out.push(`${p}if ${s.condition}:`);
         out.push(...describeSteps(s.then, indent + "    ", counter));
@@ -235,7 +238,7 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
     c.indent(() => {
       c.line("emitted: list[DomainEvent] = []");
       const counter = { n: 0 };
-      emitSteps(L, c, uc.steps, ectx, imp, counter, bindings(uc.steps));
+      emitSteps(L, c, uc.steps, ectx, imp, counter, bindings(uc.steps), info.returnType);
       if (ret === "None" && !endsTerminal(uc.steps)) c.line("return None");
     });
   });
@@ -249,12 +252,27 @@ function endsTerminal(steps: StepIR[]): boolean {
   return false;
 }
 
-function emitSteps(L: Layout, c: Code, steps: StepIR[], ectx: () => ExprContext, imp: Imports, counter: { n: number }, vars: Map<string, string>): void {
+function emitSteps(
+  L: Layout,
+  c: Code,
+  steps: StepIR[],
+  ectx: () => ExprContext,
+  imp: Imports,
+  counter: { n: number },
+  vars: Map<string, string>,
+  returnType: Type | undefined,
+): void {
   const aggregateOf = (v: string) => L.ca.ir.aggregates.find((a) => a.name === vars.get(v));
-  const X = (p: (string | number)[]) => {
+  const T_ = (p: (string | number)[]) => {
     const e = L.ca.exprs.get(formatPath(p));
     if (!e) throw new Error(`missing typed expression at ${formatPath(p)}`);
-    return emitExpr(e, ectx());
+    return e;
+  };
+  const X = (p: (string | number)[], target?: Type) => emitAs(T_(p), target, ectx());
+  /** Argument for an aggregate parameter (Integer → Decimal is made explicit for mypy). */
+  const arg = (owner: string, p: { name: string; type: string; required: boolean }, path: (string | number)[]) => {
+    const r = resolveType(p.type, { context: L.ca.ir, aggregate: owner });
+    return `${p.name}=${X(path, r.ok ? r.type : undefined)}`;
   };
   for (const s of steps) {
     const n = ++counter.n;
@@ -281,7 +299,7 @@ function emitSteps(L: Layout, c: Code, steps: StepIR[], ectx: () => ExprContext,
         imp.from(L.mod("aggregates"), s.aggregate);
         const ag = L.ca.ir.aggregates.find((a) => a.name === s.aggregate)!;
         const f = ag.factories.find((x) => x.name === s.factory)!;
-        const args = f.parameters.filter((p) => s.args[p.name] !== undefined).map((p) => `${p.name}=${X([...s.path, "args", p.name])}`);
+        const args = f.parameters.filter((p) => s.args[p.name] !== undefined).map((p) => arg(ag.name, p, [...s.path, "args", p.name]));
         c.line(`# ${n}. create ${s.aggregate} via ${s.factory}`);
         c.line(`transition_${n} = ${s.aggregate}.${s.factory}(${args.join(", ")})`);
         c.line(`${s.as} = transition_${n}.aggregate`);
@@ -291,7 +309,7 @@ function emitSteps(L: Layout, c: Code, steps: StepIR[], ectx: () => ExprContext,
       case "invoke": {
         const lookup = aggregateOf(s.target);
         const op = lookup?.operations.find((o) => o.name === s.operation);
-        const args = (op?.parameters ?? []).filter((p) => s.args[p.name] !== undefined).map((p) => `${p.name}=${X([...s.path, "args", p.name])}`);
+        const args = (op?.parameters ?? []).filter((p) => s.args[p.name] !== undefined).map((p) => arg(lookup!.name, p, [...s.path, "args", p.name]));
         c.line(`# ${n}. ${s.target}.${s.operation}`);
         c.line(`transition_${n} = ${s.target}.${s.operation}(${args.join(", ")})`);
         c.line(`${s.target} = transition_${n}.aggregate`);
@@ -317,11 +335,11 @@ function emitSteps(L: Layout, c: Code, steps: StepIR[], ectx: () => ExprContext,
         c.line(`if ${X([...s.path, "condition"])}:`);
         c.indent(() => {
           if (!s.then.length) c.line("pass");
-          emitSteps(L, c, s.then, ectx, imp, counter, vars);
+          emitSteps(L, c, s.then, ectx, imp, counter, vars, returnType);
         });
         if (s.else.length) {
           c.line("else:");
-          c.indent(() => emitSteps(L, c, s.else, ectx, imp, counter, vars));
+          c.indent(() => emitSteps(L, c, s.else, ectx, imp, counter, vars, returnType));
         }
         break;
       }
@@ -332,8 +350,14 @@ function emitSteps(L: Layout, c: Code, steps: StepIR[], ectx: () => ExprContext,
         break;
       case "return":
         c.line(`# ${n}. return`);
-        c.line(`return ${X(s.path)}`);
+        c.line(`return ${X(s.path, returnType)}`);
         break;
+      case "let": {
+        const e = T_([...s.path, "value"]);
+        c.line(`# ${n}. let ${s.name}`);
+        c.line(`${s.name}: ${pyType(e.type, imp, L.typeModule, { field: false })} = ${emitAs(e, e.type, ectx())}`);
+        break;
+      }
     }
   }
 }

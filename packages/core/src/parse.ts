@@ -112,11 +112,23 @@ class Reader {
     if (!m) return {};
     const out: Record<string, string> = {};
     for (const [k, val] of Object.entries(m)) {
-      if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") out[k] = String(val);
-      else if (val === null) out[k] = "null";
+      const e = exprText(val);
+      if (e !== undefined) out[k] = e;
       else this.bag.error("invalid-shape", `"${key}.${k}" must be an expression string`, [...path, key, k]);
     }
     return out;
+  }
+
+  /** A single expression value (scalar, or a YAML list such as `[]`). */
+  expr(o: Obj, key: string, path: Path, required: boolean): string | undefined {
+    const v = o[key];
+    if (v === undefined) {
+      if (required) this.bag.error("missing-key", `Missing required key "${key}"`, path);
+      return undefined;
+    }
+    const e = exprText(v);
+    if (e === undefined) this.bag.error("invalid-shape", `"${key}" must be an expression string`, [...path, key]);
+    return e;
   }
 
   dataMap(o: Obj, key: string, path: Path): Record<string, unknown> {
@@ -124,6 +136,20 @@ class Reader {
     if (v === undefined || v === null) return {};
     return this.obj(v, [...path, key], `"${key}"`) ?? {};
   }
+}
+
+/**
+ * Expression source of a YAML value. A YAML list (`lines: []`, `tags: [a, b]`) is read as a list
+ * literal so the empty list needs no quotes; its items are expressions.
+ */
+function exprText(v: unknown): string | undefined {
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v === null) return "null";
+  if (Array.isArray(v)) {
+    const items = v.map(exprText);
+    return items.every((x) => x !== undefined) ? `[${items.join(", ")}]` : undefined;
+  }
+  return undefined;
 }
 
 const CONSTRAINT_KEYS = [
@@ -410,7 +436,7 @@ function readSteps(r: Reader, items: { value: unknown; path: Path }[]): StepIR[]
     if (!o) continue;
     const keys = Object.keys(o);
     if (keys.length !== 1) {
-      r.bag.error("invalid-step", "A step must have exactly one key (load, create, invoke, save, publish, publish_after_commit, if, fail, return)", path);
+      r.bag.error("invalid-step", "A step must have exactly one key (load, create, invoke, save, publish, publish_after_commit, if, let, fail, return)", path);
       continue;
     }
     const kind = keys[0]!;
@@ -460,11 +486,21 @@ function readSteps(r: Reader, items: { value: unknown; path: Path }[]): StepIR[]
         break;
       }
       case "return": {
-        if (body === undefined || (typeof body === "object" && body !== null)) {
+        const value = exprText(body);
+        if (value === undefined) {
           r.bag.error("invalid-shape", '"return" step takes an expression', bpath);
           break;
         }
-        steps.push({ kind: "return", value: body === null ? "null" : String(body), path: bpath });
+        steps.push({ kind: "return", value, path: bpath });
+        break;
+      }
+      case "let": {
+        const b = r.obj(body, bpath, "let step");
+        if (!b) break;
+        r.keys(b, ["name", "value"], bpath, "let step");
+        const name = r.str(b, "name", bpath, true);
+        const value = r.expr(b, "value", bpath, true);
+        if (name && value !== undefined) steps.push({ kind: "let", name, value, path: bpath });
         break;
       }
       case "if": {
@@ -484,7 +520,7 @@ function readSteps(r: Reader, items: { value: unknown; path: Path }[]): StepIR[]
       }
       default:
         r.bag.error("invalid-step", `Unknown step "${kind}"`, [...path, kind], {
-          hint: "Use one of load, create, invoke, save, publish, publish_after_commit, if, fail, return",
+          hint: "Use one of load, create, invoke, save, publish, publish_after_commit, if, let, fail, return",
         });
     }
   }

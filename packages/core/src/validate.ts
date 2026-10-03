@@ -1,4 +1,4 @@
-import { checkExpression, makeEnv, referencedFields, type ExprEnv, type TExpr } from "./checker.ts";
+import { BUILTIN_FUNCTIONS, checkExpression, exprChildren, ITEM_NAME, makeEnv, referencedFields, type ExprEnv, type TExpr } from "./checker.ts";
 import { DiagnosticBag, formatPath, sortDiagnostics, type Diagnostic, type Path } from "./diagnostics.ts";
 import type {
   AggregateIR,
@@ -472,6 +472,11 @@ function crossesAsModelType(t: Type): boolean {
   return b.k === "enum" || b.k === "vo" || b.k === "entity" || b.k === "aggregate";
 }
 
+/** Python built-ins (and the loop variable) that generated expressions refer to by bare name. */
+const PY_EXPR_NAMES = new Set(["len", "sum", "min", "max", "any", "all", "tuple", "item_"]);
+/** Bare names inside a generated use case method. */
+const USE_CASE_RESERVED = new Set(["command", "emitted", "after_commit", "self"]);
+
 function checkSnakeName(bag: DiagnosticBag, name: string, what: string, path: Path, element?: string): void {
   if (!SNAKE.test(name)) {
     bag.error("invalid-name", `${what} "${name}" must be snake_case`, path, { element, hint: `e.g. ${toSnake(name)}` });
@@ -570,6 +575,13 @@ class ContextValidator {
 
   checkSnake(name: string, what: string, path: Path, element?: string): void {
     checkSnakeName(this.bag, name, what, path, element);
+  }
+
+  /** Parameters and use case variables become bare Python names; they must not shadow names the generated expressions use. */
+  checkLocalName(name: string, what: string, path: Path, element: string): void {
+    if (PY_EXPR_NAMES.has(name)) {
+      this.bag.error("reserved-name", `${what} "${name}" would hide the Python built-in ${name}() used by generated rules`, path, { element, hint: `e.g. ${name}_value` });
+    }
   }
 
   checkDuplicateSnake(items: { name: string; path: Path }[], what: string, element?: string): void {
@@ -802,6 +814,7 @@ class ContextValidator {
     this.checkDuplicateSnake(params.map((p) => ({ name: p.name, path: [...p.path, "name"] })), "parameter", el);
     for (const p of params) {
       this.checkSnake(p.name, "Parameter name", [...p.path, "name"], el);
+      this.checkLocalName(p.name, "Parameter name", [...p.path, "name"], el);
       const t = this.resolve(p.type, [...p.path, "type"], aggregate, el);
       if (t) m.set(p.name, p.required ? t : { k: "optional", inner: t });
     }
@@ -831,7 +844,7 @@ class ContextValidator {
     const types = this.checkEntityBase(ag, ag.name);
     for (const en of ag.entities) {
       const et = this.checkEntityBase(en, ag.name);
-      this.checkInvariants(en.invariants, makeEnv(this.ctx, { self: { name: en.name, fields: et } }), this.el(`${ag.name} › ${en.name}`), et, false);
+      this.checkInvariants(en.invariants, makeEnv(this.ctx, { self: { name: en.name, fields: et }, scopeAggregate: ag.name }), this.el(`${ag.name} › ${en.name}`), et, false);
     }
     // Entity cycles within the aggregate
     const deps = new Map<string, string[]>();
@@ -896,7 +909,7 @@ class ContextValidator {
           hint: "Express creation preconditions as invariants (checked on construct)",
         });
       }
-      const env = makeEnv(this.ctx, { params });
+      const env = makeEnv(this.ctx, { params, scopeAggregate: ag.name });
       for (const [field, src] of Object.entries(f.fields)) {
         const t = types.get(field);
         if (!t) {
@@ -987,6 +1000,13 @@ class ContextValidator {
         this.checkSnake(fd.name, "Event field", fd.path, el);
         if (fd.value !== undefined) {
           const e = this.expr(fd.value, [...fd.path, "value"], env, undefined, el);
+          if (e && hasDuration(e.type)) {
+            this.bag.error("invalid-event-field", `Event field "${fd.name}" carries a Duration; events carry declarable values`, [...fd.path, "value"], {
+              element: el,
+              hint: "Publish the resulting DateTime instead (e.g. placed_at + hours(24))",
+            });
+            continue;
+          }
           if (e) payload.push({ name: fd.name, type: e.type });
           continue;
         }
@@ -1043,7 +1063,7 @@ class ContextValidator {
     for (const x of this.ctx.extensionPoints) {
       const el = this.el(x.name);
       this.checkSnake(x.name, "Extension point name", [...x.path, "name"], el);
-      if (["is_empty", "contains", "length"].includes(x.name)) {
+      if ((BUILTIN_FUNCTIONS as readonly string[]).includes(x.name)) {
         this.bag.error("reserved-name", `"${x.name}" is a built-in rule function`, [...x.path, "name"], { element: el });
       }
       this.params(x.parameters, el);
@@ -1081,6 +1101,7 @@ class ContextValidator {
       dirty: new Map(),
       saved: new Set(),
       terminated: false,
+      declared: new Set(),
     };
     this.checkSteps(uc, uc.steps, state, info, returnTypes, el);
     if (!state.terminated) {
@@ -1092,8 +1113,12 @@ class ContextValidator {
     }
     if (returnTypes.length) {
       const first = returnTypes[0]!;
+      // Integer and Decimal returns unify to Decimal (the Integer is converted).
+      const numeric = returnTypes.every((r) => r.type.k === "primitive" && (r.type.name === "Integer" || r.type.name === "Decimal"));
+      let returnType = first.type;
+      if (numeric && returnTypes.some((r) => sameType(r.type, T.Decimal))) returnType = T.Decimal;
       for (const r of returnTypes.slice(1)) {
-        if (!sameType(r.type, first.type)) {
+        if (!numeric && !sameType(r.type, first.type)) {
           this.bag.error("inconsistent-return", `Returns ${typeToString(r.type)} here but ${typeToString(first.type)} elsewhere`, r.path, { element: el });
         }
       }
@@ -1103,7 +1128,7 @@ class ContextValidator {
           hint: "Add a return to every branch",
         });
       }
-      info.returnType = first.type;
+      info.returnType = returnType;
     }
     const dirtyAggregates = new Set([...state.aggregatesTouched ?? []]);
     if (uc.transaction === "required" && dirtyAggregates.size > 1) {
@@ -1255,6 +1280,23 @@ class ContextValidator {
           mergeState(state, a, b);
           break;
         }
+        case "let": {
+          const vpath = [...step.path, "value"];
+          const e = this.expr(step.value, vpath, this.stepEnv(state), undefined, el);
+          this.noteUsage(e, info);
+          const ok = this.declareVariable(step.name, [...step.path, "name"], state, el);
+          if (!e || !ok) break;
+          if (e.type.k === "aggregate") {
+            this.bag.error("invalid-let", `"${step.name}" would name the aggregate ${e.type.name}; aggregates are named by the "as" of a load or create step`, vpath, { element: el });
+            break;
+          }
+          if (e.type.k === "null") {
+            this.bag.error("invalid-let", `The type of "${step.name}" cannot be inferred from null`, vpath, { element: el });
+            break;
+          }
+          state.locals.set(step.name, e.type);
+          break;
+        }
         case "fail": {
           this.checkErrorRef(step.error, step.path, el);
           state.terminated = true;
@@ -1266,6 +1308,8 @@ class ContextValidator {
           if (e) {
             if (e.type.k === "aggregate" || e.type.k === "entity") {
               this.bag.error("invalid-return", "Use cases must not return aggregates or entities; return an identity or value", step.path, { element: el });
+            } else if (hasDuration(e.type)) {
+              this.bag.error("invalid-return", "Use cases cannot return a Duration", step.path, { element: el, hint: "Return a DateTime (e.g. the deadline) or another declarable value" });
             } else {
               returns.push({ type: e.type, path: step.path });
             }
@@ -1310,14 +1354,29 @@ class ContextValidator {
   }
 
   bind(name: string, aggregate: string, path: Path, state: StepState, el: string): void {
-    this.checkSnake(name, "Variable name", path, el);
-    if (state.locals.has(name)) {
-      this.bag.error("duplicate-name", `"${name}" is already defined in this use case`, path, { element: el });
-      return;
-    }
-    if (name === "clock" || name === "ids") this.bag.error("reserved-name", `"${name}" is reserved for ports`, path, { element: el });
+    if (!this.declareVariable(name, path, state, el)) return;
     state.locals.set(name, { k: "aggregate", name: aggregate });
     state.aggregates.set(name, aggregate);
+  }
+
+  /**
+   * Checks a new use case variable (`as` or `let`). Names are unique in the whole use case, even across
+   * if-branches, because each becomes one typed Python local. Returns false for a duplicate.
+   */
+  declareVariable(name: string, path: Path, state: StepState, el: string): boolean {
+    this.checkSnake(name, "Variable name", path, el);
+    if (state.locals.has(name) || state.declared.has(name)) {
+      this.bag.error("duplicate-name", `"${name}" is already defined in this use case`, path, {
+        element: el,
+        hint: state.locals.has(name) ? undefined : "Variables of different if-branches also need different names",
+      });
+      return false;
+    }
+    state.declared.add(name);
+    if (name === "clock" || name === "ids") this.bag.error("reserved-name", `"${name}" is reserved for ports`, path, { element: el });
+    else if (USE_CASE_RESERVED.has(name)) this.bag.error("reserved-name", `"${name}" is reserved by the generated use case code`, path, { element: el });
+    else this.checkLocalName(name, "Variable name", path, el);
+    return true;
   }
 
   unknownAggregate(name: string, path: Path, el: string): void {
@@ -1555,6 +1614,8 @@ interface StepState {
   saved: Set<string>;
   terminated: boolean;
   aggregatesTouched?: Set<string>;
+  /** Every variable name declared so far in the use case (shared by all branches). */
+  declared: Set<string>;
 }
 
 function cloneState(s: StepState): StepState {
@@ -1566,6 +1627,7 @@ function cloneState(s: StepState): StepState {
     saved: new Set(s.saved),
     terminated: s.terminated,
     aggregatesTouched: new Set(s.aggregatesTouched ?? []),
+    declared: s.declared,
   };
 }
 
@@ -1588,32 +1650,14 @@ function mergeState(target: StepState, a: StepState, b: StepState): void {
 
 function walk(e: TExpr, fn: (n: TExpr) => void): void {
   fn(e);
-  switch (e.t) {
-    case "field":
-      if (e.owner) walk(e.owner, fn);
-      break;
-    case "guard":
-      if (e.receiver) walk(e.receiver, fn);
-      e.args.forEach((a) => walk(a, fn));
-      break;
-    case "builtin":
-    case "extension":
-      e.args.forEach((a) => walk(a, fn));
-      break;
-    case "not":
-      walk(e.operand, fn);
-      break;
-    case "binary":
-      walk(e.left, fn);
-      walk(e.right, fn);
-      break;
-    case "isNull":
-      walk(e.operand, fn);
-      break;
-  }
+  for (const c of exprChildren(e)) walk(c, fn);
 }
 
 export { walk as walkExpr };
+
+function hasDuration(t: Type): boolean {
+  return unwrap(t).k === "duration";
+}
 
 function unwrap(t: Type): Type {
   if (t.k === "optional") return unwrap(t.inner);

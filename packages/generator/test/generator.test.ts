@@ -145,12 +145,29 @@ describe("expression emission", () => {
     expect(py("(total > 1 or total < 0) and not is_empty(tags)")).toBe("(self.total > 1 or self.total < 0) and not len(self.tags) == 0");
     expect(py("contains(tags, 'vip')")).toBe('"vip" in self.tags');
   });
+
+  test("arithmetic keeps the source grouping and divides integers exactly", () => {
+    expect(py("total + 1 > 2 * total")).toBe("self.total + 1 > 2 * self.total");
+    expect(py("(total + 1) * 2 > total - (1 - total)")).toBe("(self.total + 1) * 2 > self.total - (1 - self.total)");
+    expect(py("total / 3 > 1.5")).toBe('Decimal(self.total) / 3 > Decimal("1.5")');
+    expect(py("-total < -1 and -(total + 1) < 0")).toBe("-self.total < -1 and -(self.total + 1) < 0");
+    expect(py("round(total * 1.08, 0) > min(total, 2.5)")).toBe('(self.total * Decimal("1.08")).quantize(Decimal("1"), rounding=ROUND_HALF_UP) > min(Decimal(self.total), Decimal("2.5"))');
+  });
+
+  test("collection functions become comprehensions over tuples", () => {
+    expect(py("any(tags, item == 'vip') and all(tags, length(item) < 10)")).toBe('any([item_ == "vip" for item_ in self.tags]) and all([len(item_) < 10 for item_ in self.tags])');
+    expect(py("count(tags, item != 'x') == count(tags)")).toBe('len([item_ for item_ in self.tags if item_ != "x"]) == len(self.tags)');
+    expect(py("length(append(tags, 'a')) > length(remove(tags, 'b'))")).toBe('len((*self.tags, "a")) > len(tuple([item_ for item_ in self.tags if item_ != "b"]))');
+    expect(py("is_empty(remove_where(tags, item == 'a' or item == 'b'))")).toBe('len(tuple([item_ for item_ in self.tags if not (item_ == "a" or item_ == "b")])) == 0');
+    expect(py("length(replace_where(tags, item == 'a', 'b')) == 0")).toBe('len(tuple(["b" if item_ == "a" else item_ for item_ in self.tags])) == 0');
+  });
 });
 
 const VENV = join(EXAMPLE, ".venv/bin/python");
 
 const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.ddd.yaml"), "utf8");
 const CONTEXT_MAP = readFileSync(join(import.meta.dir, "fixtures/context-map.ddd.yaml"), "utf8");
+const ORDERING = readFileSync(join(import.meta.dir, "fixtures/ordering.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -162,6 +179,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the sample model", MODEL],
     ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
     ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
+    ["the ordering model (arithmetic, durations, collection functions, constructors, let)", ORDERING],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
