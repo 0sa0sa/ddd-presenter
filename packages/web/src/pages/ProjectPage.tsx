@@ -90,15 +90,33 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const dirty = saved !== undefined && text !== saved.yaml;
 
   // Keep unsaved edits in this browser until they are saved (or discarded).
+  const pendingDraft = useRef<ModelDraft>(undefined);
   useEffect(() => {
     if (!saved || draftOffer) return;
     if (!dirty) {
+      pendingDraft.current = undefined;
       clearDraft(id);
       return;
     }
-    const t = setTimeout(() => writeDraft(id, { yaml: text, baseVersion: saved.version, savedAt: new Date().toISOString() }), 400);
+    pendingDraft.current = { yaml: text, baseVersion: saved.version, savedAt: new Date().toISOString() };
+    const t = setTimeout(() => {
+      if (pendingDraft.current) writeDraft(id, pendingDraft.current);
+      pendingDraft.current = undefined;
+    }, 400);
     return () => clearTimeout(t);
   }, [id, text, dirty, saved, draftOffer]);
+  // Leaving the project or the page right after typing must not lose the last edits: write them now.
+  useEffect(() => {
+    const flush = () => {
+      if (pendingDraft.current) writeDraft(id, pendingDraft.current);
+      pendingDraft.current = undefined;
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [id]);
 
   useEffect(() => {
     api.assistStatus(id).then(setAi, () => setAi(undefined));

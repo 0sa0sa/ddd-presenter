@@ -48,8 +48,38 @@ export async function request<T>(method: string, path: string, body?: unknown, f
 }
 
 /** Human-readable message for any error thrown by the API client or UI code. */
+/** Japanese wording for the server messages people see (the server keeps English for the CLI and logs). */
+const MESSAGE_JA: [RegExp, string | ((m: RegExpMatchArray) => string)][] = [
+  [/^Invalid username or password$/, "ユーザー名かパスワードが違います"],
+  [/^This account has a password; sign in with it$/, "このアカウントにはパスワードがあります。パスワードでログインしてください"],
+  [/^That username is taken$/, "そのユーザー名はすでに使われています"],
+  [/^Registration is closed; ask the administrator for an account$/, "アカウントの登録は締め切られています。管理者にアカウントを作ってもらってください"],
+  [/^The current password is incorrect$/, "いまのパスワードが違います"],
+  [/^(\w+) must be at least (\d+) characters$/, (m) => `パスワードは ${m[2]} 文字以上にしてください`],
+  [/^password is required$/, "パスワードを入力してください"],
+  [/^username may contain letters, digits/, "ユーザー名に使えるのは英数字と . - _ だけです"],
+  [/^Not logged in$/, "ログインしていません。もう一度ログインしてください"],
+  [/^Too many failed (sign-ins|attempts)/, "失敗が続いたため、15分ほど操作できません。時間をおいてやり直してください"],
+  [/^Too many AI requests/, "AI へのリクエストが多すぎます。少し待ってからやり直してください"],
+  [/^Only users the server operator allows \(DDD_AI_ADMINS\) can turn AI on$/, "AI をオンにできるのは、サーバーの運用者が許可した人だけです（DDD_AI_ADMINS）"],
+  [/^AI assistance is not enabled for this workspace$/, "このワークスペースでは AI の提案がオフです"],
+  [/^Free-form proposals need AI to be enabled for this workspace$/, "自由な指示での提案には、ワークスペースで AI をオンにする必要があります"],
+  [/^A board can hold up to (\d+) stickies$/, (m) => `ボードに置ける付箋は ${m[1]} 枚までです`],
+  [/^A project can have up to (\d+) boards$/, (m) => `ボードはプロジェクトに ${m[1]} 枚までです`],
+  [/^The model is larger than 1 MB/, "モデルが 1 MB を超えています。コンテキストやプロジェクトを分けてください"],
+  [/^The main board cannot be deleted$/, "メインのボードは削除できません"],
+];
+
+export function localizeMessage(message: string): string {
+  for (const [re, ja] of MESSAGE_JA) {
+    const m = message.match(re);
+    if (m) return typeof ja === "string" ? ja : ja(m);
+  }
+  return message;
+}
+
 export function describeError(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) return localizeMessage(e.message);
   if (e instanceof Error) return `予期しないエラー: ${e.message}`;
   return `予期しないエラー: ${String(e)}`;
 }

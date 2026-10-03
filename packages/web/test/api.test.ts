@@ -63,3 +63,15 @@ describe("API client error handling", () => {
     expect(await request<unknown>("POST", "/api/x", undefined, fakeFetch(() => new Response("", { status: 200 })))).toEqual({});
   });
 });
+
+describe("server messages in Japanese", () => {
+  test("sign-in, limit and AI errors are shown in Japanese; unknown messages pass through", async () => {
+    const { localizeMessage } = await import("../src/api.ts");
+    expect(localizeMessage("Invalid username or password")).toBe("ユーザー名かパスワードが違います");
+    expect(localizeMessage("password must be at least 8 characters")).toBe("パスワードは 8 文字以上にしてください");
+    expect(localizeMessage("Too many failed sign-ins; try again in 15 minutes")).toContain("15分");
+    expect(localizeMessage("Too many AI requests; wait a moment and try again")).toContain("AI へのリクエスト");
+    expect(localizeMessage("A board can hold up to 3000 stickies")).toBe("ボードに置ける付箋は 3000 枚までです");
+    expect(localizeMessage("Something new")).toBe("Something new");
+  });
+});
