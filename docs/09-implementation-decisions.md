@@ -15,7 +15,7 @@
 
 ## 2. DSL（schema_version: 1）の決定
 
-- **Use Case手順は構造化オブジェクト**: `load / invoke / save / publish / publish_after_commit / if / fail / return`。文字列ミニ文法を使わない。
+- **Use Case手順は構造化オブジェクト**: `load / invoke / save / publish / publish_after_commit / if / let / fail / return`。文字列ミニ文法を使わない。
 - **Scenarioは構造化**: `given`（clock・既存Aggregateの全必須フィールド）、`when`（use case入力 / operation引数 / construct）、`then`（`state`・`emits`・`raises`）。機械検証できない`then`は検証エラー（FR-021）。
 - **Enum値の文脈解決**: `status == pending` のように、比較相手・代入先がEnum型の場合は裸の識別子をEnum値として解決する。`InvitationStatus.pending`も可。
 - **Invariant評価**: `check_on` に `construct` を含むものは全インスタンス化（遷移候補含む）で評価する。`transition` のみのものは操作の候補状態に対して明示評価する。
@@ -88,3 +88,21 @@
 - サブドメインの分類はモデルにも持つ（コンテキストの任意キー `subdomain`）。ボードからの反映は分類のないコンテキストにだけ入れ、違いは「モデル」タブで示してどちらに合わせるかを選ばせる。ポリシーも付箋の名前で結び付け、モデル → ボードでは「イベント → ポリシー → コマンド」の並びで置く。
 - ボードはプロジェクトに複数持てる（`project_boards`、既存のボードは「メイン」に移す）。旧 API（`/board`）はメインのボードを指す。
 - 画像はブラウザで描画した画面ではなく、ボードのデータから SVG を作る（依存を増やさず、どの環境でも同じ結果になるように）。PNG はその SVG を canvas に描いて作る。
+
+## 12. 式の拡張（算術・時間・コレクション, 2026-10-03）
+
+EC の試行（明細つきの注文・Money・返金・期限）で、合計・明細の追加削除・期限の判定が式で書けず、検査されない Extension point に逃げていた。式の言語を次のように広げた（詳細は docs/10 の 4.1〜4.4 と 6）。
+
+- **算術**: `+ - * /`・単項 `-`・括弧。Integer どうしの `+ - *` は Integer、Decimal が混ざれば Decimal。**`/` は常に Decimal**（`Decimal(a) / b` を生成）。整数の切り捨て除算や float は作らない（金額で誤差・切り捨てを起こさないため）。端数は `round(x, 桁)`（`ROUND_HALF_UP`、桁はリテラル）で明示的に丸める。0 除算は実行時の例外で、ガード・Invariant で防ぐ（式の中で 0 除算を Domain Error に変える仕組みは作らない）。
+- **型エラーの診断**: Value Object・String・optional・単位の違う時間の演算は、理由と書き直し方をヒントに出す（`Money` なら数値のフィールドと `Money(amount=..., currency=...)`）。
+- **時間**: `days/hours/minutes(n: Integer)` で Duration（`timedelta`）を作り、DateTime・Date と足し引き・比較する。Duration は式の中だけの型にした（フィールド・入力・イベント・戻り値に置けない）。宣言できる型にすると、シナリオの値の書き方（ISO 8601 の期間）やコンテキストをまたぐ扱いまで決める必要があり、試行の用途（締め切りの判定）には不要だったため。Date には `days(...)` を直接書いたときだけ足し引きできる（`timedelta(hours=…)` を Date に足すと Python は時間を黙って捨てるため）。
+- **コレクション**: ラムダは入れず、要素ごとの引数の中で予約名 `item` が要素を指す形にした（`any(lines, item.line_id == id)`）。型検査は「要素の型で `item` を束縛して式を検査する」だけで済み、ラムダの構文・変数名の衝突・クロージャを持ち込まない。関数は試行で必要だったものに絞った: `count` `sum` `any` `all` `append` `remove` `remove_where` `replace_where`。`find`（見つからないと null）は、式の中の null の絞り込みが式ひとつの範囲でしか効かないため入れず、存在確認は `any`、合計は `sum` で書く。
+- **生成**: リストは従来どおり tuple。コレクション関数は生成器式ではなくリスト内包で出す（長い行を引数ごとに折り返したとき、`any(<生成器式>,)` は構文エラーになるため）。ループ変数は `item_`（DSL の `item` と同名の引数があっても Python 側で衝突しない）。Integer を Decimal の場所に渡すところ（引数・タプル・`min/max`・戻り値・Pydantic の構築）は `Decimal(...)` で明示し、mypy --strict を通す。
+- **行の折り返しの修正（最小限）**: 1要素のグループ括弧（`if not (…)`・`holds=(…)`）を折り返すと末尾に `,` が付いてタプルになり、Invariant が常に成り立つ（検査が消える）不具合があった。式が長くなって起きやすくなったため、呼び出しでも元々のタプルでもない1要素の括弧には `,` を付けないようにした（layout.ts、別の作業で全体の修正が入る予定）。
+- **値の組み立て**: `Type(field=値, ...)`。名前付き引数は `=`（YAML の `: ` と衝突しないように）。Value Object はどこでも、Entity は所属 Aggregate の中だけで作れる。「明細の追加」は、Use case が Entity を作って渡すのではなく、**操作が明細のフィールドを引数で受け取り `changes` で組み立てる**形を推奨とした（Entity を境界の外で作らせない。Use case で作ろうとすると、この形を勧めるエラーになる）。Entity の一部の変更は `with(item, quantity=q)`（`_replace` で不変条件を再検査、識別子は変えられない）。
+- **Use case の `let`**: `- let: { name, value }` で計算した値に名前を付ける。スコープは `as` と同じ（if の枝の中の名前は枝の中だけ）。名前は Use case 全体で一意にした（枝ごとに型の違う同名の変数ができると、生成する型注釈付きの Python 変数が mypy で衝突するため）。Aggregate には付けられない（保存漏れの検査が `as` の変数を追っているため）。
+- **YAML**: `lines: []` は YAML ではリストになるので、式の位置のリストはリスト式として読む（`[]` に引用符が要らない）。フロー形式 `{ ... }` の中では `,` が区切りになるため、引数が2つ以上ある呼び出しはブロック形式で書く（docs/10 に明記）。
+- **予約名**: 組み込み関数名は Extension point の名前にできない。`len` `sum` `min` `max` `any` `all` `tuple` `item_` は引数・Use case の変数にできない（生成コードの Python 組み込みを隠すため）。`command` `emitted` `after_commit` `self` は Use case の変数にできない。
+- **テスト**: 生成器のフィクスチャ `packages/generator/test/fixtures/ordering.ddd.yaml`（注文・明細・Money・割引・期限・返金）を追加し、生成した Python が pytest と mypy --strict を通ることを確かめる。
+- **既知の制限**: 集約シナリオの `then.state` で Entity のリストを比べると識別子だけで比べる（数量の変更はイベントのペイロードなどで確かめる）。Web の手順の一覧（packages/web）はまだ `let` を表示しない。ルールの適用箇所の一覧（usage）は `let` の値の中のガード呼び出しを数えない。
+

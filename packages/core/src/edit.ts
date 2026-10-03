@@ -160,7 +160,7 @@ function isExpressionPosition(keys: string[]): boolean {
   const parent = keys[keys.length - 2] ?? "";
   if (keys.includes("scenarios")) return false; // scenario data are literals, never expressions
   if (["expression", "condition", "when", "return", "by"].includes(key)) return true;
-  if (key === "value" && keys.includes("emits")) return true;
+  if (key === "value" && (keys.includes("emits") || parent === "let")) return true;
   if (parent === "changes" || parent === "args") return true;
   if (parent === "fields" && keys.includes("factories")) return true;
   return keys.includes("require");
@@ -267,7 +267,7 @@ function renameGuard(doc: Document, context: string, aggregate: string, from: st
         if (typeof node.value !== "string") return;
         const keys = nearestKeys(path);
         const key = keys[keys.length - 1] ?? "";
-        if (["condition", "return"].includes(key) || keys[keys.length - 2] === "args") {
+        if (["condition", "return"].includes(key) || keys[keys.length - 2] === "args" || (key === "value" && keys[keys.length - 2] === "let")) {
           const next = node.value.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\.([A-Za-z_][A-Za-z0-9_]*)\b/g, (m, str, name) =>
             str ? m : name === from ? `.${to}` : m,
           );

@@ -691,7 +691,15 @@ class Checker {
       return this.fail(node, `${name}() takes ${min === max ? min : `${min} or ${max}`} arguments`, `Usage: ${use}`);
     }
     const returnsList = name === "append" || name === "remove" || name === "remove_where" || name === "replace_where";
-    const list = this.check(args[0]!, narrowed, returnsList ? expected : undefined);
+    let listExpected = returnsList ? expected : undefined;
+    // append([], x): the empty list takes the type of x.
+    if (name === "append" && listExpected === undefined && args[0]!.t === "list" && args[0]!.items.length === 0) {
+      const probe = new Checker(this.env);
+      probe.items.push(...this.items);
+      const x = probe.check(args[1]!, narrowed);
+      if (x && x.type.k !== "optional" && x.type.k !== "null") listExpected = { k: "list", item: x.type };
+    }
+    const list = this.check(args[0]!, narrowed, listExpected);
     if (!list) return undefined;
     if (list.type.k !== "list") {
       return this.fail(args[0]!, `${name}() expects a List as its first argument, got ${typeToString(list.type)}`, `Usage: ${use}`);
