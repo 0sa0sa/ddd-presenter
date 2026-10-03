@@ -182,7 +182,7 @@ operations:
    - `src/<package>/generated/<context>/domain/aggregates.py` — ルールが `_invariant_…` や State guard のメソッドとして確かめられている
    - `src/<package>/generated/<context>/README.md` — ルールがどの操作で使われ、どのテストで確かめられているかの表
    - `tests/generated/` — シナリオから生成されたテスト
-   **TypeScript で生成する場合**は、モデルの `generation` に `target: typescript` を書いてから（または `ddd generate --target typescript` で）生成する。初回に `package.json` と `tsconfig.json` も作られるので、そのまま依存を入れてテストと型検査を実行する。
+   **TypeScript で生成する場合**は、モデルの `generation` に `target: typescript` を書いてから（または `ddd generate --target typescript` で）生成する。初回に `package.json`・`tsconfig.json`・`.prettierrc.json` も作られるので、そのまま依存を入れてテストと型検査を実行する。
 
    ```sh
    cd ~/work/staff

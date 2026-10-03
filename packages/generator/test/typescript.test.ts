@@ -80,6 +80,10 @@ describe("TypeScript target: selection", () => {
     expect(validateModelText(companion).diagnostics.find((d) => d.code === "reserved-name")?.message).toContain("the input type of EmailAddress");
     const ctor = MODEL.replace("{ name: accepted_at, type: DateTime, required: false }", "{ name: constructor, type: String, required: false }");
     expect(validateModelText(ctor).diagnostics.some((d) => d.code === "reserved-name" && d.message.includes('"constructor"'))).toBe(true);
+    const eventSchema = companion.replace(/EmailAddressInput/g, "InvitationRevokedSchema");
+    expect(validateModelText(eventSchema).diagnostics.find((d) => d.code === "reserved-name")?.message).toContain("the schema of InvitationRevoked");
+    const typeField = MODEL.replace("              - name: InvitationRevoked\n                fields: [id]", "              - name: InvitationRevoked\n                fields: [id, { name: type, value: status }]");
+    expect(validateModelText(typeField).diagnostics.some((d) => d.code === "reserved-name" && d.message.includes('event field cannot be named "type"'))).toBe(true);
   });
 });
 
@@ -112,7 +116,7 @@ describe("TypeScript target: golden output", () => {
     ]) {
       expect({ p, o: byPath.get(p) }).toEqual({ p, o: "generated" });
     }
-    for (const p of ["package.json", "tsconfig.json", "src/cleaning_platform/index.ts", "src/cleaning_platform/extensions/cleaning-staff/extensions.ts"]) {
+    for (const p of ["package.json", "tsconfig.json", ".prettierrc.json", "src/cleaning_platform/index.ts", "src/cleaning_platform/extensions/cleaning-staff/extensions.ts"]) {
       expect({ p, o: byPath.get(p) }).toEqual({ p, o: "scaffold" });
     }
     expect(out.manifest.model_sha256).toBe(sha256(MODEL));
@@ -122,7 +126,8 @@ describe("TypeScript target: golden output", () => {
     expect(pkg.dependencies).toEqual({ "decimal.js": TS_DEPENDENCIES["decimal.js"], zod: TS_DEPENDENCIES.zod });
     expect(pkg.scripts).toEqual({ test: "vitest run", typecheck: "tsc --noEmit" });
     const tsconfig = JSON.parse(out.files.find((f) => f.path === "tsconfig.json")!.content);
-    expect(tsconfig.compilerOptions).toMatchObject({ strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, verbatimModuleSyntax: true, module: "NodeNext" });
+    expect(tsconfig.compilerOptions).toMatchObject({ strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, verbatimModuleSyntax: true, erasableSyntaxOnly: true, noUnusedParameters: true, module: "NodeNext" });
+    expect(JSON.parse(out.files.find((f) => f.path === ".prettierrc.json")!.content)).toEqual({ printWidth: 100 });
     const bun = gen(asTypeScript(MODEL, "bun"));
     expect(JSON.parse(bun.files.find((f) => f.path === "package.json")!.content).scripts.test).toBe("bun test");
     expect(bun.files.find((f) => f.path.endsWith("invariants.test.ts"))!.content).toContain('from "bun:test"');

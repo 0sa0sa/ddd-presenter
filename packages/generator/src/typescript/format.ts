@@ -1285,8 +1285,12 @@ function shouldBreakAfterOperator(right: Node, hasShortKey: boolean): boolean {
   if (right.k === "bin") return true;
   if (right.k === "cond") return right.test.k === "bin";
   if (hasShortKey) return false;
-  let node = right;
-  while (node.k === "unary" || node.k === "await" || node.k === "nonnull") node = node.k === "nonnull" ? node.expr : node.arg;
+  let node: Node = right;
+  for (;;) {
+    if (node.k === "unary" || node.k === "await") node = node.arg;
+    else if (node.k === "nonnull") node = node.expr;
+    else break;
+  }
   return (node.k === "lit" && !!node.str) || isPoorlyBreakableMemberOrCallChain(node);
 }
 
