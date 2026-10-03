@@ -192,7 +192,8 @@ function emitCoerced(e: TExpr, target: Type | undefined, ctx: ExprContext): [str
     ctx.imports.from("decimal", "Decimal");
     return [`Decimal(${emitExpr(e, ctx)})`, ATOM];
   }
-  if (target?.k === "list" && e.t === "list") return emitTuple(e.items, target.item, ctx);
+  const list = target?.k === "optional" ? target.inner : target;
+  if (list?.k === "list" && e.t === "list") return emitTuple(e.items, list.item, ctx);
   return emit(e, ctx);
 }
 

@@ -6,6 +6,7 @@ import { parse } from "yaml";
 
 const schema = JSON.parse(readFileSync(join(import.meta.dir, "../schema/model.schema.json"), "utf8"));
 const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform/model.ddd.yaml"), "utf8");
+const ORDERING = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/ordering.ddd.yaml"), "utf8");
 const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
 
 describe("published JSON Schema", () => {
@@ -13,6 +14,13 @@ describe("published JSON Schema", () => {
     const ok = validate(parse(SAMPLE));
     expect(validate.errors ?? []).toEqual([]);
     expect(ok).toBe(true);
+  });
+
+  test("accepts the expression extensions (let steps, [] values, constructors)", () => {
+    const ok = validate(parse(ORDERING));
+    expect(validate.errors ?? []).toEqual([]);
+    expect(ok).toBe(true);
+    expect(validate(parse(ORDERING.replace("              value: count(order.lines)\n", "")))).toBe(false);
   });
 
   test("rejects unknown keys and bad names like the built-in parser", () => {

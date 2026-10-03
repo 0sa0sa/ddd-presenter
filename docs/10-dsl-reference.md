@@ -298,6 +298,8 @@ contexts:
 | 時計・ID | `clock.now`、`ids.new` | 生成されるハンドラが Clock / IdGenerator を受け取る |
 | 値 | `"text"`、`1`、`true`、`pending`（入力が Enum のとき） | |
 
+イベントのフィールドを使った計算（`event.total * 2` など）は書けない。計算は Use case の手順（`let`）に書く。イベントを使わない式（`clock.now + days(7)` など）は書ける。
+
 検査:
 
 - `when` のイベント・コンテキスト、`run` の Use case が存在するか（候補つき）。
