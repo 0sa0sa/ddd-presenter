@@ -82,7 +82,12 @@ if (import.meta.main) {
   try {
     process.exit(run(process.argv.slice(2), io));
   } catch (e) {
-    console.error(`ddd: internal error: ${(e as Error).stack ?? e}`);
+    // Problems in the user's input are diagnostics with exit code 1; reaching this point is a bug in ddd itself.
+    // The stack trace is for whoever fixes it, so it is shown only on request.
+    const err = e as Error;
+    console.error(`ddd: internal error: ${err.message ?? e}`);
+    if (process.env.DDD_DEBUG) console.error(err.stack ?? "");
+    else console.error("Please report this. Set DDD_DEBUG=1 to print the stack trace.");
     process.exit(3);
   }
 }

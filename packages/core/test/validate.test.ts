@@ -355,3 +355,110 @@ describe("expressions", () => {
     expect(checkExpression("length(total) > 1", env(), T.Boolean).errors.length).toBe(1);
   });
 });
+
+describe("QA fixes (2026-10-03)", () => {
+  const twoOrders = (extraInput = "") =>
+    model(
+      `        operations:
+          - name: place
+            changes: { status: placed }`,
+    ) +
+    `    use_cases:
+      - name: place_both
+        command: PlaceBoth
+        transaction: required
+        input: [{ name: first_id, type: UUID }, { name: second_id, type: UUID }${extraInput}]
+        steps:
+          - load: { aggregate: Order, by: first_id, as: first, not_found: Invalid }
+          - load: { aggregate: Order, by: second_id, as: second, not_found: Invalid }
+          - invoke: { target: first, operation: place }
+          - invoke: { target: second, operation: place }
+          - save: first
+          - save: second
+`;
+
+  test("two instances of the same aggregate changed in one transaction are reported", () => {
+    const d = validateModelText(twoOrders()).diagnostics.find((x) => x.code === "multi-aggregate-transaction");
+    expect(d?.severity).toBe("warning");
+    expect(d?.message).toBe("Use case place_both changes several aggregates (first: Order, second: Order) in one transaction");
+    // One instance changed twice is still one aggregate.
+    const once = twoOrders().replace("          - invoke: { target: second, operation: place }\n", "          - invoke: { target: first, operation: place }\n").replace("          - save: second\n", "");
+    expect(validateModelText(once).diagnostics.map((x) => x.code)).not.toContain("multi-aggregate-transaction");
+  });
+
+  test("YAML that expands too many aliases is a positioned diagnostic, not a crash", () => {
+    const yaml = "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nd: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]\n";
+    const r = validateModelText(yaml);
+    expect(r.ok).toBe(false);
+    expect(r.diagnostics).toHaveLength(1);
+    expect(r.diagnostics[0]).toMatchObject({ severity: "error", code: "yaml-aliases", line: 2, column: 8, path: ["b", 0] });
+  });
+
+  test("an unquoted bracket in a flow map gets a precise hint and location", () => {
+    const text = model().replace("          - { name: total, type: Integer }", "          - { name: tags, type: List[String] }");
+    const ds = validateModelText(text).diagnostics;
+    expect(ds).toHaveLength(1); // the parser's follow-up errors on the same line are dropped
+    expect(ds[0]).toMatchObject({ code: "yaml-syntax", path: ["contexts", 0, "aggregates", 0, "fields", 2, "type"] });
+    expect(ds[0]!.hint).toBe('Write it quoted: type: "List[String]"');
+    expect(ds[0]!.line).toBeGreaterThan(0);
+  });
+
+  test("a field named like an enum value: the diagnostic names the shadowing and the qualified form", () => {
+    const text = model(
+      `        invariants:
+          - { name: r, expression: status == placed, error: Invalid }`,
+    ).replace("          - { name: note, type: String, required: false }", "          - { name: placed, type: Integer }");
+    const d = validateModelText(text).diagnostics.find((x) => x.severity === "error")!;
+    expect(d.message).toBe('Cannot compare Status with Integer: "placed" is the field placed (Integer), not the enum value Status.placed');
+    expect(d.hint).toContain("Write Status.placed for the enum value");
+    // The qualified form works end to end.
+    expect(codes(text.replace("status == placed", "status == Status.placed"))).toEqual([]);
+  });
+
+  test("a field whose type is wrong is reported once, not again where it is used", () => {
+    const text = model(
+      `        invariants:
+          - { name: r, expression: other != null, error: Invalid }
+        operations:
+          - name: relink
+            changes: { other: other }
+        scenarios:
+          - name: s
+            when:
+              construct: { id: "00000000-0000-0000-0000-000000000001", status: draft, total: 1, other: "00000000-0000-0000-0000-000000000002" }
+            then: { raises: Invalid }`,
+    ).replace("          - { name: note, type: String, required: false }", '          - { name: other, type: "Ref[Status]", required: false }');
+    const errors = validateModelText(text).diagnostics.filter((d) => d.severity === "error");
+    expect(errors.map((d) => d.code)).toEqual(["unknown-type"]);
+  });
+
+  test("entity-typed parameters are flagged: a use case can only pass entities it already holds", () => {
+    const text = model(
+      `        entities:
+          - name: Line
+            identity: line_id
+            fields: [{ name: line_id, type: Integer }]
+        operations:
+          - name: replace_lines
+            parameters: [{ name: lines, type: "List[Line]" }]
+            changes: { lines: lines }`,
+    ).replace("          - { name: note, type: String, required: false }", '          - { name: lines, type: "List[Line]" }');
+    const d = validateModelText(text).diagnostics.find((x) => x.code === "entity-parameter");
+    expect(d).toMatchObject({ severity: "warning", path: ["contexts", 0, "aggregates", 0, "operations", 0, "parameters", 0, "type"] });
+    expect(d!.message).toBe('Operation replace_lines takes entity List[Line] as "lines", which a use case cannot create');
+    // Passing the lines of a loaded aggregate is the one way a use case can call it.
+    const withUseCase =
+      text +
+      `    use_cases:
+      - name: copy_lines
+        command: CopyLines
+        input: [{ name: from_id, type: UUID }, { name: to_id, type: UUID }]
+        steps:
+          - load: { aggregate: Order, by: from_id, as: source, not_found: Invalid }
+          - load: { aggregate: Order, by: to_id, as: target, not_found: Invalid }
+          - invoke: { target: target, operation: replace_lines, args: { lines: source.lines } }
+          - save: target
+`;
+    expect(codes(withUseCase)).toEqual([]);
+  });
+});

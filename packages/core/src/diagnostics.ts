@@ -63,5 +63,6 @@ export function formatDiagnostic(d: Diagnostic, file = "model"): string {
   const loc = d.line ? `${file}:${d.line}:${d.column ?? 1}` : file;
   const where = d.element ? ` (${d.element})` : "";
   const hint = d.hint ? `\n    hint: ${d.hint}` : "";
-  return `${loc}: ${d.severity} [${d.code}]${where} ${d.message}\n    at ${formatPath(d.path)}${hint}`;
+  const at = d.path.length ? `\n    at ${formatPath(d.path)}` : "";
+  return `${loc}: ${d.severity} [${d.code}]${where} ${d.message}${at}${hint}`;
 }

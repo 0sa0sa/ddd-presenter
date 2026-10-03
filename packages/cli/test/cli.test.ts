@@ -108,6 +108,19 @@ describe("ddd CLI", () => {
     expect(r.out).toContain("test_expired_invitation_is_rejected");
   });
 
+  test("YAML with excessive aliases is an ordinary diagnostic (exit 1), never an internal error with a stack trace", () => {
+    const { model } = project();
+    writeFileSync(model, "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\n");
+    const r = cli(["validate", model]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("model.ddd.yaml:2:8: error [yaml-aliases]");
+    // The real process: same exit code, no "internal error", no stack frames.
+    const p = Bun.spawnSync(["bun", join(import.meta.dir, "../src/main.ts"), "validate", model], { env: { ...process.env, NO_COLOR: "1", DDD_DEBUG: "" } });
+    expect(p.exitCode).toBe(1);
+    expect(p.stderr.toString()).not.toContain("internal error");
+    expect(p.stderr.toString()).not.toMatch(/at .*\.(ts|js):\d+/);
+  });
+
   test("migrate is a no-op on the current schema", () => {
     const { model } = project();
     expect(cli(["migrate", model]).out).toContain("nothing to migrate");
