@@ -181,6 +181,16 @@ describe("rules", () => {
     expect(codes(text)).toContain("duplicate-event");
   });
 
+  test("the event tag event_type and the event union AnyEvent are reserved", () => {
+    const op = (fields: string) => `        operations:
+          - name: place
+            changes: { status: placed }
+            emits: [{ name: Placed, fields: ${fields} }]`;
+    expect(codes(model(op("[id]")))).toEqual([]);
+    expect(codes(model(op('[id, { name: event_type, value: "x" }]')))).toContain("reserved-name");
+    expect(codes(model().replace("name: Status,", "name: AnyEvent,").replace("type: Status }", "type: AnyEvent }"))).toContain("reserved-name");
+  });
+
   test("the same event emitted with different payloads is a contract mismatch", () => {
     const text = model(`        operations:
           - name: place

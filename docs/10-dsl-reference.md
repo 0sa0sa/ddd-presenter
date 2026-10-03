@@ -57,7 +57,7 @@ TypeScript のとき、生成物は `src/<package>/generated/` に、初回だ�
 
 フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。
 
-命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。
+命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。イベントのフィールド名 `event_type`（生成するイベントが必ず持つタグ）と型名 `AnyEvent`（コンテキストのイベントの共用体）も予約されている。
 
 ## 2. 型
 

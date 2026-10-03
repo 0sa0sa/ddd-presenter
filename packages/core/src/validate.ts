@@ -114,6 +114,7 @@ const RESERVED_TYPES = new Set([
   "ConstraintViolation",
   "AggregateNotFound",
   "DomainEvent",
+  "AnyEvent",
   "Transition",
   "StateGuard",
   "BaseModel",
@@ -1174,6 +1175,12 @@ class ContextValidator {
         if (fieldNames.has(fd.name)) this.bag.error("duplicate-name", `Duplicate event field "${fd.name}"`, fd.path, { element: el });
         fieldNames.add(fd.name);
         this.checkSnake(fd.name, "Event field", fd.path, el);
+        if (fd.name === "event_type") {
+          this.bag.error("reserved-name", `Event field "event_type" clashes with the tag every generated event carries`, fd.path, {
+            element: el,
+            hint: "Rename the field, e.g. { name: kind, value: event_type }",
+          });
+        }
         if (fd.value !== undefined) {
           const e = this.expr(fd.value, [...fd.path, "value"], env, undefined, el);
           if (e && hasDuration(e.type)) {
