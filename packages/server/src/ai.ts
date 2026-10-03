@@ -273,10 +273,50 @@ export interface RunResult {
 }
 
 /** Runs a command with stdin; injectable for tests. */
-export type Runner = (cmd: string[], opts: { stdin: string; cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<RunResult>;
+export type Runner = (cmd: string[], opts: { stdin: string; cwd: string; timeoutMs: number; signal?: AbortSignal; env?: Record<string, string> }) => Promise<RunResult>;
 
-export const spawnRunner: Runner = async (cmd, { stdin, cwd, timeoutMs, signal }) => {
-  const proc = Bun.spawn(cmd, { cwd, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
+/** Variables every CLI needs to run (locale, home for its login, temp dir, proxies and CA bundles). */
+const BASE_ENV = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "XDG_CONFIG_HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+
+/** Credentials and settings each CLI reads; nothing else of the server's environment (DB path, other secrets) is passed. */
+export const CLI_ENV: Record<"claude" | "codex", string[]> = {
+  claude: [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AWS_REGION",
+    "AWS_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+  ],
+  codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY"],
+};
+
+/**
+ * A minimal environment for a model CLI: the base variables, the CLI's own credentials, and any names the
+ * operator lists in `DDD_AI_PASS_ENV` (comma-separated).
+ */
+export function cliEnv(cli: "claude" | "codex", source: Record<string, string | undefined> = process.env): Record<string, string> {
+  const extra = (source.DDD_AI_PASS_ENV ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const env: Record<string, string> = {};
+  for (const k of [...BASE_ENV, ...CLI_ENV[cli], ...extra]) {
+    const v = source[k];
+    if (v !== undefined) env[k] = v;
+  }
+  env.NO_COLOR = "1";
+  return env;
+}
+
+export const spawnRunner: Runner = async (cmd, { stdin, cwd, timeoutMs, signal, env }) => {
+  const proc = Bun.spawn(cmd, { cwd, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe", env: env ?? { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NO_COLOR: "1" } });
   const kill = () => proc.kill();
   const timer = setTimeout(kill, timeoutMs);
   signal?.addEventListener("abort", kill, { once: true });
@@ -289,12 +329,20 @@ export const spawnRunner: Runner = async (cmd, { stdin, cwd, timeoutMs, signal }
   }
 };
 
-/** At most `max` model processes at a time; waiting requests give up when aborted. */
-export function limiter(max: number) {
+/** Thrown when the model queue is full; the server answers 429. */
+export class AiBusyError extends Error {
+  constructor() {
+    super("The AI queue is full");
+  }
+}
+
+/** At most `max` model processes at a time and at most `maxQueue` waiting; waiting requests give up when aborted. */
+export function limiter(max: number, maxQueue = Infinity) {
   let running = 0;
   const queue: (() => void)[] = [];
   return async function run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (running >= max) {
+      if (queue.length >= maxQueue) throw new AiBusyError();
       await new Promise<void>((resolve, reject) => {
         const go = () => {
           signal?.removeEventListener("abort", cancel);
@@ -338,7 +386,15 @@ export interface CliOptions {
   /** Working directory for the CLI: an empty directory so no project files or instructions are picked up. */
   cwd?: string;
   concurrency?: number;
+  /** Requests that may wait for a free process; more are refused with AiBusyError (default DDD_AI_QUEUE or 8). */
+  queue?: number;
+  /** Environment for the CLI process (default: cliEnv(), a minimal allowlist). */
+  env?: Record<string, string>;
+  /** Codex only: load the user's config.toml and rules (default false; DDD_CODEX_USER_CONFIG=1). */
+  userConfig?: boolean;
 }
+
+const queueSize = (o: CliOptions) => o.queue ?? (Number(process.env.DDD_AI_QUEUE) || 8);
 
 const emptyDir = () => mkdtempSync(join(tmpdir(), "ddd-ai-"));
 
@@ -355,7 +411,8 @@ export function claudeCodeCompleter(options: CliOptions = {}): Completer {
   const bin = options.bin ?? "claude";
   const run = options.run ?? spawnRunner;
   const cwd = options.cwd ?? emptyDir();
-  const limit = limiter(options.concurrency ?? 2);
+  const limit = limiter(options.concurrency ?? 2, queueSize(options));
+  const env = options.env ?? cliEnv("claude");
   const model = options.model ?? process.env.DDD_AI_MODEL;
   // Ghost text must arrive within seconds; the CLI's default (large) model takes far longer.
   const inlineModel = options.inlineModel ?? process.env.DDD_AI_INLINE_MODEL ?? "haiku";
@@ -382,7 +439,7 @@ export function claudeCodeCompleter(options: CliOptions = {}): Completer {
           ...(m ? ["--model", m] : []),
           ...(req.schema ? ["--json-schema", JSON.stringify(req.schema)] : []),
         ];
-        const r = await run(cmd, { stdin: flatten(req.messages), cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal });
+        const r = await run(cmd, { stdin: flatten(req.messages), cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal, env });
         const out = parseJson<{ is_error?: boolean; result?: string; structured_output?: unknown; stop_reason?: string }>(r.stdout.trim().split("\n").pop());
         if (!out) throw cliError("claude", r);
         if (out.is_error) throw new Error(`claude: ${String(out.result ?? "error").slice(0, 300)}`);
@@ -401,7 +458,11 @@ export function codexCompleter(options: CliOptions = {}): Completer {
   const bin = options.bin ?? "codex";
   const run = options.run ?? spawnRunner;
   const cwd = options.cwd ?? emptyDir();
-  const limit = limiter(options.concurrency ?? 2);
+  const limit = limiter(options.concurrency ?? 2, queueSize(options));
+  const env = options.env ?? cliEnv("codex");
+  // Auth stays in CODEX_HOME (~/.codex); the user's config.toml (MCP servers, profiles, notify hooks) and
+  // execpolicy rules are not loaded. DDD_CODEX_USER_CONFIG=1 keeps loading them (e.g. a custom model provider).
+  const isolation = (options.userConfig ?? process.env.DDD_CODEX_USER_CONFIG === "1") ? [] : ["--ignore-user-config", "--ignore-rules"];
   const model = options.model ?? process.env.DDD_AI_CODEX_MODEL;
   const inlineModel = options.inlineModel ?? process.env.DDD_AI_CODEX_INLINE_MODEL ?? model;
   return {
@@ -419,6 +480,7 @@ export function codexCompleter(options: CliOptions = {}): Completer {
             "exec",
             "--skip-git-repo-check",
             "--ephemeral",
+            ...isolation,
             "--sandbox",
             "read-only",
             "--color",
@@ -435,7 +497,7 @@ export function codexCompleter(options: CliOptions = {}): Completer {
             "-",
           ];
           const stdin = `<instructions>\n${SYSTEM}\n</instructions>\n\n${flatten(req.messages)}`;
-          const r = await run(cmd, { stdin, cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal });
+          const r = await run(cmd, { stdin, cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal, env });
           if (r.code !== 0) throw cliError("codex", r);
           const text = await readFile(outFile, "utf8").catch(() => "");
           return text.trim() ? text : undefined;

@@ -87,6 +87,18 @@ const MIGRATIONS: string[] = [
    INSERT INTO project_boards (project_id, board_id, name, position, created_at, version, json, updated_by, updated_at)
      SELECT project_id, 'main', 'メイン', 0, updated_at, version, json, updated_by, updated_at FROM boards;
    DROP TABLE boards;`,
+  // Real accounts: password hashes (Bun.password, argon2id). NULL = no password yet (dev login / SSO users).
+  // Sessions issued by the old username-only login are dropped so everyone signs in again under the new rules.
+  `ALTER TABLE users ADD COLUMN password_hash TEXT;
+   DELETE FROM sessions;
+   CREATE INDEX sessions_by_user ON sessions(user_id);
+   CREATE INDEX sessions_by_expiry ON sessions(expires_at);`,
+  // Who turned AI on: AI stays active only while that user is still allowed to enable it (DDD_AI_ADMINS).
+  `ALTER TABLE workspaces ADD COLUMN ai_enabled_by TEXT REFERENCES users(id) ON DELETE SET NULL;
+   UPDATE workspaces SET ai_enabled_by = (
+     SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.workspace_id = workspaces.id AND m.role = 'owner' ORDER BY u.created_at LIMIT 1
+   ) WHERE ai_enabled = 1;`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

@@ -1,29 +1,29 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { assistantsFromEnv, PROVIDER_LABEL, type ProviderId } from "./ai.ts";
-import { createApp } from "./app.ts";
+import { createApp, purgeExpiredSessions } from "./app.ts";
+import { configFromEnv } from "./config.ts";
 import { openDatabase } from "./db.ts";
+import { serveWebApp } from "./static.ts";
 
-/** Default port; 8787 is commonly taken by other local dev servers. Override with PORT or DDD_PORT. */
-const port = Number(process.env.PORT ?? process.env.DDD_PORT ?? 4870);
+const config = configFromEnv();
+const { port, host } = config;
 const dbPath = process.env.DDD_DB ?? join(import.meta.dir, "../data/ddd.sqlite");
 if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
 const db = openDatabase(dbPath);
 const assistants = assistantsFromEnv();
-const app = createApp(db, { secureCookies: process.env.DDD_SECURE_COOKIES === "1", assistants });
+const app = createApp(db, { ...config.app, assistants });
 
 // Serve the built web app (packages/web/dist) when present; the Vite dev server proxies /api otherwise.
-const dist = join(import.meta.dir, "../../web/dist");
-app.get("*", async (c) => {
-  if (!existsSync(dist)) return c.text("Web UI not built. Run `bun run build:web`, or use `bun run dev:web` for development.", 404);
-  const rel = normalize(decodeURIComponent(new URL(c.req.url).pathname)).replace(/^(\.\.[/\\])+/, "");
-  const file = Bun.file(join(dist, rel));
-  if (rel !== "/" && (await file.exists())) return new Response(file);
-  return new Response(Bun.file(join(dist, "index.html")), { headers: { "content-type": "text/html; charset=utf-8" } });
-});
+serveWebApp(app, join(import.meta.dir, "../../web/dist"), { sourceMaps: config.sourceMaps });
+
+// Expired sessions are removed hourly (and on every sign-in).
+purgeExpiredSessions(db);
+setInterval(() => purgeExpiredSessions(db), 3600_000).unref();
 
 try {
-  Bun.serve({ port, fetch: app.fetch });
+  // 4 MB is the most any route accepts (boards: 2 MB, models: ~1.3 MB); larger bodies are cut off by Bun.
+  Bun.serve({ port, hostname: host.replace(/^\[|\]$/g, ""), fetch: app.fetch, maxRequestBodySize: 4 * 1024 * 1024 });
 } catch (e) {
   const code = (e as { code?: string }).code;
   if (code === "EADDRINUSE") {
@@ -32,4 +32,8 @@ try {
   }
   throw e;
 }
-console.log(`DDD Presenter server on http://localhost:${port} (db: ${dbPath}; AI: ${Object.keys(assistants).length ? (Object.keys(assistants) as ProviderId[]).map((id) => PROVIDER_LABEL[id]).join(", ") : "off - set ANTHROPIC_API_KEY or install the claude / codex CLI"})`);
+const shown = config.loopback ? "localhost" : host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+console.log(
+  `DDD Presenter server on http://${shown}:${port} (listening on ${host}; db: ${dbPath}; AI: ${Object.keys(assistants).length ? (Object.keys(assistants) as ProviderId[]).map((id) => PROVIDER_LABEL[id]).join(", ") : "off - set ANTHROPIC_API_KEY or install the claude / codex CLI"})`,
+);
+for (const w of config.warnings) console.warn(w);
