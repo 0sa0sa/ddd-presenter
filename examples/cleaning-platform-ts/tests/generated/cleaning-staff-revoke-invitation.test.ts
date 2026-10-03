@@ -6,14 +6,19 @@
 import { describe, expect, test } from "vitest";
 
 import { RevokeInvitationUseCase } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
-import { CleaningStaffInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
+import {
+  CleaningStaffInvitation,
+  type CleaningStaffInvitationInput,
+} from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
 import { RevokeInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
 import { parseCleaningStaffEvent } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import {
+  aggregateViaJson,
   CapturingEventPublisher,
   expectPresent,
   FakeUnitOfWork,
   InMemoryCleaningStaffInvitationRepository,
+  jsonOf,
   plain,
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
@@ -62,6 +67,12 @@ describe("revoke_invitation", () => {
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("revoked");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(
+      aggregateViaJson(stored0, (input: CleaningStaffInvitationInput) =>
+        CleaningStaffInvitation.from(input),
+      ),
+    ).toEqual(jsonOf(stored0));
     expect(eventPublisher.published.map((event) => event.type)).toEqual([
       "CleaningStaff.InvitationRevoked",
     ]);

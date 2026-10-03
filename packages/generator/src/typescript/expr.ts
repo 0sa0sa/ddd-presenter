@@ -8,7 +8,7 @@ import { isDecimal, isPrim, strip } from "./types.ts";
  * TypeScript emission of typed rule expressions.
  *
  * The model's operators are value operators, so emission is type-directed: Decimal arithmetic and comparisons
- * become decimal.js method calls (exact, never floating point), date-times compare by `getTime()`, value objects /
+ * become decimal.js method calls (exact, never floating point), instants and dates are canonical ISO strings (so `===` / `<` compare them), value objects /
  * lists / optional decimals compare with the runtime `equals`, durations are milliseconds.
  */
 export interface ExprContext {
@@ -194,7 +194,7 @@ function emitBuiltin(e: Extract<TExpr, { t: "builtin" }>, ctx: ExprContext): Out
   }
 }
 
-/** Equality of two operands by their types (`===` for primitives, decimal.js / getTime / `equals` otherwise). */
+/** Equality of two operands by their types (`===` for primitives and instants, decimal.js / `equals` otherwise). */
 function emitEquality(e: Extract<TExpr, { t: "binary" }>, ctx: ExprContext): Out {
   const neg = e.op === "!=";
   const lt = actualType(e.left, ctx);
@@ -214,10 +214,6 @@ function emitEquality(e: Extract<TExpr, { t: "binary" }>, ctx: ExprContext): Out
     const call = `${decimal(a, ctx)}.eq(${emitExpr(b, ctx)})`;
     return neg ? [`!${call}`, P.unary] : [call, P.atom];
   }
-  if (isPrim(l, "DateTime")) {
-    if (optional) return useEquals();
-    return [`${wrap(emit(e.left, ctx), P.atom)}.getTime() ${neg ? "!==" : "==="} ${wrap(emit(e.right, ctx), P.atom)}.getTime()`, P.eq];
-  }
   if (l.k === "vo" || l.k === "entity" || l.k === "list" || r.k === "vo" || r.k === "entity" || r.k === "list") return useEquals();
   const bl = brand(l);
   const br = brand(r);
@@ -233,9 +229,6 @@ function emitOrdering(e: Extract<TExpr, { t: "binary" }>, ctx: ExprContext): Out
   const r = strip(e.right.type);
   if (isDecimal(l)) return [`${decimal(e.left, ctx)}.${DECIMAL_COMPARE[e.op]}(${emitExpr(e.right, ctx)})`, P.atom];
   if (isDecimal(r)) return [`${decimal(e.right, ctx)}.${DECIMAL_COMPARE[FLIPPED[e.op]!]}(${emitExpr(e.left, ctx)})`, P.atom];
-  if (isPrim(l, "DateTime")) {
-    return [`${wrap(emit(e.left, ctx), P.atom)}.getTime() ${e.op} ${wrap(emit(e.right, ctx), P.atom)}.getTime()`, P.rel];
-  }
   return [`${wrap(emit(e.left, ctx), P.add)} ${e.op} ${wrap(emit(e.right, ctx), P.add)}`, P.rel];
 }
 
@@ -253,15 +246,15 @@ function emitArithmetic(e: Extract<TExpr, { t: "binary" }>, ctx: ExprContext): O
   const date = (t: Type) => isPrim(t, "Date");
   const dur = (t: Type) => t.k === "duration";
   if (e.op === "+") {
-    if (dt(l) && dur(r)) return call("plusDuration", e.left, e.right);
-    if (dur(l) && dt(r)) return call("plusDuration", e.right, e.left);
-    if (date(l) && dur(r)) return call("plusDays", e.left, e.right);
-    if (dur(l) && date(r)) return call("plusDays", e.right, e.left);
+    if (dt(l) && dur(r)) return call("addDuration", e.left, e.right);
+    if (dur(l) && dt(r)) return call("addDuration", e.right, e.left);
+    if (date(l) && dur(r)) return call("addDays", e.left, e.right);
+    if (dur(l) && date(r)) return call("addDays", e.right, e.left);
   }
   if (e.op === "-") {
-    if (dt(l) && dur(r)) return call("minusDuration", e.left, e.right);
+    if (dt(l) && dur(r)) return call("subtractDuration", e.left, e.right);
     if (dt(l) && dt(r)) return call("durationBetween", e.left, e.right);
-    if (date(l) && dur(r)) return call("minusDays", e.left, e.right);
+    if (date(l) && dur(r)) return call("subtractDays", e.left, e.right);
     if (date(l) && date(r)) return call("daysBetween", e.left, e.right);
   }
   if (isDecimal(e.type)) {

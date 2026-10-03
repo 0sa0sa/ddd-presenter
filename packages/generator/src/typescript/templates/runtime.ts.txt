@@ -31,17 +31,38 @@ export function idSchema<A extends string>(owner: A): z.ZodType<Id<A>, string> {
 }
 
 /**
- * Point in time: a `Date`, or an ISO 8601 string with an offset (`2026-01-01T10:00:00+00:00`).
- * A `Date` input is copied, so changing the caller's object later cannot change validated state.
+ * A point in time: a canonical ISO 8601 string in UTC with milliseconds
+ * (`2026-01-08T10:00:00.000Z`). Accepts an ISO 8601 string with an offset (`Z`, `+09:00`) or a
+ * `Date`. Because the form is canonical, `===` is value equality and `<` / `>` are chronological
+ * order; the value is immutable and is its own JSON. Only years 0001–9999 (in UTC, the range of
+ * Python's `datetime`): outside them `toISOString()` writes a signed 6-digit year and string order
+ * would no longer be time order. Precision is milliseconds (finer fractions are truncated).
  */
-export const dateTimeSchema = z.union([
-  z.date().transform((value) => new Date(value.getTime())),
-  z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
-]);
+export const InstantSchema = z
+  .union([z.iso.datetime({ offset: true }), z.date()])
+  .transform((value, ctx) => {
+    // Zod 4: a transform reports problems on `ctx.issues` (it must not throw for invalid input).
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      ctx.issues.push({ code: "custom", message: "Invalid date-time", input: value });
+      return z.NEVER;
+    }
+    const text = date.toISOString();
+    if (!/^(?!0000)\d{4}-/.test(text)) {
+      const message = "Expected a year from 0001 to 9999 (UTC)";
+      ctx.issues.push({ code: "custom", message, input: value });
+      return z.NEVER;
+    }
+    return text;
+  })
+  .brand<"Instant">();
+export type Instant = z.output<typeof InstantSchema>;
+/** What `InstantSchema` accepts: an ISO 8601 string with an offset, or a `Date`. */
+export type InstantInput = z.input<typeof InstantSchema>;
 
 /** Calendar date as an ISO 8601 string (`2026-01-31`). Ordered like the dates it denotes. */
-export const localDateSchema = z.iso.date().brand<"LocalDate">();
-export type LocalDate = z.output<typeof localDateSchema>;
+export const LocalDateSchema = z.iso.date().brand<"LocalDate">();
+export type LocalDate = z.output<typeof LocalDateSchema>;
 
 /** Length of time in milliseconds (expression-only: never stored in a field). */
 export type Duration = number;
@@ -107,14 +128,24 @@ export function id<A extends string>(owner: A, value: string): Id<A> {
   return parseWith(idSchema(owner), value, `Id<${owner}>`);
 }
 
-/** Parses an ISO 8601 date-time with a UTC offset (throws ConstraintViolation). */
-export function dateTime(value: string): Date {
-  return parseWith(dateTimeSchema, value, "DateTime");
+/** Parses a point in time: `instant("2026-01-08T19:00:00+09:00")` (throws ConstraintViolation). */
+export function instant(value: InstantInput): Instant {
+  return parseWith(InstantSchema, value, "DateTime");
+}
+
+/** The current time (what `SystemClock` returns). */
+export function nowInstant(): Instant {
+  return instant(new Date());
+}
+
+/** A new `Date` for `value`, for formatting and for libraries that need one. */
+export function toDate(value: Instant): Date {
+  return new Date(value);
 }
 
 /** Parses an ISO 8601 calendar date (throws ConstraintViolation). */
 export function localDate(value: string): LocalDate {
-  return parseWith(localDateSchema, value, "Date");
+  return parseWith(LocalDateSchema, value, "Date");
 }
 
 // ---------------------------------------------------------------------------
@@ -301,17 +332,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Model equality: decimals and date-times by value, entities by identity, value objects and lists
- * structurally.
+ * Model equality: decimals by value, entities by identity, value objects and lists structurally.
+ * Instants, dates and ids are canonical strings, so `===` already compares them by value.
  */
 export function equals(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null || a === undefined || b === undefined) return false;
   if (DecimalJs.isDecimal(a)) return (typeof b === "number" || DecimalJs.isDecimal(b)) && a.eq(b);
   if (DecimalJs.isDecimal(b)) return typeof a === "number" && b.eq(a);
-  if (a instanceof Date || b instanceof Date) {
-    return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
-  }
   if (a instanceof Entity || b instanceof Entity) {
     return (
       a instanceof Entity &&
@@ -356,17 +384,19 @@ export const days = (n: number): Duration => n * 86_400_000;
 export const hours = (n: number): Duration => n * 3_600_000;
 export const minutes = (n: number): Duration => n * 60_000;
 
-export function plusDuration(at: Date, duration: Duration): Date {
-  return new Date(at.getTime() + duration);
+/** `at + duration` (throws ConstraintViolation if the result is outside the years 0001–9999). */
+export function addDuration(at: Instant, duration: Duration): Instant {
+  return instant(new Date(Date.parse(at) + duration));
 }
 
-export function minusDuration(at: Date, duration: Duration): Date {
-  return new Date(at.getTime() - duration);
+/** `at - duration` (throws ConstraintViolation if the result is outside the years 0001–9999). */
+export function subtractDuration(at: Instant, duration: Duration): Instant {
+  return addDuration(at, -duration);
 }
 
-/** `later - earlier` as a duration. */
-export function durationBetween(later: Date, earlier: Date): Duration {
-  return later.getTime() - earlier.getTime();
+/** `later - earlier` as a duration (negative if `later` is earlier). */
+export function durationBetween(later: Instant, earlier: Instant): Duration {
+  return Date.parse(later) - Date.parse(earlier);
 }
 
 function dayNumber(date: LocalDate): number {
@@ -374,16 +404,18 @@ function dayNumber(date: LocalDate): number {
 }
 
 function fromDayNumber(day: number): LocalDate {
-  return new Date(day * 86_400_000).toISOString().slice(0, 10) as LocalDate;
+  const date = new Date(day * 86_400_000);
+  return localDate(Number.isNaN(date.getTime()) ? "invalid" : date.toISOString().slice(0, 10));
 }
 
-/** `date + days(n)` (the duration is a whole number of days). */
-export function plusDays(date: LocalDate, duration: Duration): LocalDate {
+/** `date + days(n)` (whole days; throws ConstraintViolation past the year 9999). */
+export function addDays(date: LocalDate, duration: Duration): LocalDate {
   return fromDayNumber(dayNumber(date) + Math.trunc(duration / 86_400_000));
 }
 
-export function minusDays(date: LocalDate, duration: Duration): LocalDate {
-  return plusDays(date, -duration);
+/** `date - days(n)` (the duration is a whole number of days). */
+export function subtractDays(date: LocalDate, duration: Duration): LocalDate {
+  return addDays(date, -duration);
 }
 
 /** `later - earlier` for calendar dates, as a duration. */
@@ -391,16 +423,14 @@ export function daysBetween(later: LocalDate, earlier: LocalDate): Duration {
   return (dayNumber(later) - dayNumber(earlier)) * 86_400_000;
 }
 
-function instant(value: Date | LocalDate): number | string {
-  return value instanceof Date ? value.getTime() : value;
+/** The earlier of two instants or dates (canonical strings: string order is time order). */
+export function earliest<T extends Instant | LocalDate>(a: T, b: T): T {
+  return b < a ? b : a;
 }
 
-export function earliest<T extends Date | LocalDate>(a: T, b: T): T {
-  return instant(b) < instant(a) ? b : a;
-}
-
-export function latest<T extends Date | LocalDate>(a: T, b: T): T {
-  return instant(b) > instant(a) ? b : a;
+/** The later of two instants or dates. */
+export function latest<T extends Instant | LocalDate>(a: T, b: T): T {
+  return b > a ? b : a;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +442,7 @@ export type Awaitable<T> = T | Promise<T>;
 
 /** Source of the current time. Rules never read a hidden global clock. */
 export interface Clock {
-  now(): Date;
+  now(): Instant;
 }
 
 /** Source of new identities. */

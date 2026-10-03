@@ -272,8 +272,8 @@ function sampleLiteral(v: unknown, t: Type, U: TsLayout, imp: TsImports): string
           imp.value(U.runtime, "uuid");
           return `uuid(${tsString(String(v))})`;
         case "DateTime":
-          imp.value(U.runtime, "dateTime");
-          return `dateTime(${tsString(String(v))})`;
+          imp.value(U.runtime, "instant");
+          return `instant(${tsString(String(v))})`;
         case "Date":
           imp.value(U.runtime, "localDate");
           return `localDate(${tsString(String(v))})`;
@@ -337,8 +337,7 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
     const kw = [`useCase: useCase${suffix}`];
     if (r.info.usesClock) {
       imp.value(L.contextTesting, "FixedClock");
-      imp.value(L.runtime, "dateTime");
-      lines.push(`const clock${suffix} = new FixedClock(dateTime(${tsString(SAMPLE_NOW)}));`);
+      lines.push(`const clock${suffix} = new FixedClock(${tsString(SAMPLE_NOW)});`);
       kw.push(`clock: clock${suffix}`);
     }
     const ids: string[] = [];

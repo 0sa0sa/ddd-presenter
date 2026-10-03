@@ -6,14 +6,14 @@
 import { describe, expect, test } from "vitest";
 
 import * as cleaningStaffEvents from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
-import { dateTime, dispatch, uuid } from "../../src/cleaning_platform/generated/runtime.js";
+import { dispatch, instant, uuid } from "../../src/cleaning_platform/generated/runtime.js";
 import {
   RegisterStaffOnAcceptancePolicy,
   type RegisterStaffRunner,
   subscriptions,
 } from "../../src/cleaning_platform/generated/staffing/application/policies.js";
 import type { RegisterStaff } from "../../src/cleaning_platform/generated/staffing/domain/commands.js";
-import { expectPresent, plain } from "../../src/cleaning_platform/generated/staffing/testing.js";
+import { expectPresent } from "../../src/cleaning_platform/generated/staffing/testing.js";
 
 /** Stands in for use case register_staff and records the commands it receives. */
 class RecordingRegisterStaff implements RegisterStaffRunner {
@@ -39,13 +39,13 @@ describe("Staffing policies", () => {
     const event: cleaningStaffEvents.InvitationAccepted = {
       type: cleaningStaffEvents.InvitationAccepted.type,
       id: uuid("00000000-0000-0000-0000-0000000000e1"),
-      at: dateTime("2026-01-02T09:00:00+00:00"),
+      at: instant("2026-01-02T09:00:00+00:00"),
     };
     await policy.handle(event);
     expect(useCase.commands).toHaveLength(1);
     const command = expectPresent(useCase.commands[0]);
     expect(command.invitationId).toBe(uuid("00000000-0000-0000-0000-0000000000e1"));
-    expect(plain(command.joinedAt)).toEqual(plain(dateTime("2026-01-02T09:00:00+00:00")));
+    expect(command.joinedAt).toBe(instant("2026-01-02T09:00:00+00:00"));
   });
 
   /** Dispatching the events through subscriptions() reaches every policy exactly once. */
@@ -55,7 +55,7 @@ describe("Staffing policies", () => {
     const event0: cleaningStaffEvents.InvitationAccepted = {
       type: cleaningStaffEvents.InvitationAccepted.type,
       id: uuid("00000000-0000-0000-0000-0000000000e1"),
-      at: dateTime("2026-01-02T09:00:00+00:00"),
+      at: instant("2026-01-02T09:00:00+00:00"),
     };
     const registry = subscriptions({ registerStaffOnAcceptance: policy0 });
     await dispatch(registry, [event0]);

@@ -2,6 +2,7 @@ import type { Type } from "@ddd/core";
 import { tsString, type TsImports } from "./code.ts";
 import type { TsLayout } from "./layout.ts";
 import { prop } from "./names.ts";
+import { isPrim } from "./types.ts";
 
 /**
  * Scenario values (YAML data) as TypeScript.
@@ -9,7 +10,7 @@ import { prop } from "./names.ts";
  * - `inputValue`: what a schema accepts (`X.from({...})`, `Command.create({...})`): strings for decimals, date-times
  *   and ids, plain objects for value objects. Entities are built with `X.from(...)`.
  * - `typedValue`: an already-typed value (operation arguments, expected values): `new Decimal("1.50")`,
- *   `dateTime("…")`, `id("Order", "…")`, `Money.create({...})`.
+ *   `instant("…")`, `id("Order", "…")`, `Money.create({...})`.
  */
 export function inputValue(v: unknown, t: Type, imp: TsImports, L: TsLayout): string {
   if (t.k === "optional") return v === null || v === undefined ? "null" : inputValue(v, t.inner, imp, L);
@@ -65,8 +66,8 @@ export function typedValue(v: unknown, t: Type, imp: TsImports, L: TsLayout): st
           imp.value(L.runtime, "uuid");
           return `uuid(${tsString(String(v))})`;
         case "DateTime":
-          imp.value(L.runtime, "dateTime");
-          return `dateTime(${tsString(String(v))})`;
+          imp.value(L.runtime, "instant");
+          return `instant(${tsString(String(v))})`;
         case "Date":
           imp.value(L.runtime, "localDate");
           return `localDate(${tsString(String(v))})`;
@@ -93,18 +94,34 @@ export function typedValue(v: unknown, t: Type, imp: TsImports, L: TsLayout): st
 export function comparesByIdentity(t: Type): boolean {
   const s = t.k === "optional" ? t.inner : t;
   if (s.k === "enum" || s.k === "ref") return true;
-  return s.k === "primitive" && ["String", "Integer", "Boolean", "UUID", "Date"].includes(s.name);
+  return s.k === "primitive" && ["String", "Integer", "Boolean", "UUID", "Date", "DateTime"].includes(s.name);
 }
 
 export function isBranded(t: Type): boolean {
   const s = t.k === "optional" ? t.inner : t;
-  return s.k === "ref" || (s.k === "primitive" && (s.name === "UUID" || s.name === "Date"));
+  return s.k === "ref" || (s.k === "primitive" && ["UUID", "Date", "DateTime"].includes(s.name));
+}
+
+/**
+ * The canonical form `InstantSchema` stores for a scenario date-time (`2026-01-08T10:00:00.000Z`), or undefined
+ * when the generator cannot compute it the same way (then the test parses it at run time).
+ */
+export function canonicalInstant(v: unknown): string | undefined {
+  const date = new Date(String(v));
+  if (Number.isNaN(date.getTime())) return undefined;
+  const text = date.toISOString();
+  return /^(?!0000)\d{4}-/.test(text) ? text : undefined;
 }
 
 /** An assertion that `actual` equals the scenario value `v` of type `t`. */
 export function expectEqual(actual: string, v: unknown, t: Type, imp: TsImports, L: TsLayout): string {
   if (v === null || v === undefined) return `expect(${actual}).toBeNull();`;
-  // Branded strings (ids, dates) are compared as plain strings: `toBe` is typed by the actual value in bun:test.
+  // Branded strings (ids, dates, instants) are compared as plain strings: `toBe` is typed by the actual value in
+  // bun:test. An instant is expected in its canonical form (what the schema stores).
+  if (isPrim(t, "DateTime")) {
+    const canonical = canonicalInstant(v);
+    return `expect(String(${actual})).toBe(${canonical ? tsString(canonical) : typedValue(v, t, imp, L)});`;
+  }
   if (isBranded(t)) return `expect(String(${actual})).toBe(${inputValue(v, t, imp, L)});`;
   if (comparesByIdentity(t)) return `expect(${actual}).toBe(${inputValue(v, t, imp, L)});`;
   imp.value(L.contextTesting, "plain");

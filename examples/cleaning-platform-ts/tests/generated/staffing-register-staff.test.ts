@@ -5,19 +5,25 @@
 
 import { describe, expect, test } from "vitest";
 
-import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
+import { id } from "../../src/cleaning_platform/generated/runtime.js";
 import { RegisterStaffUseCase } from "../../src/cleaning_platform/generated/staffing/application/use-cases.js";
+import {
+  StaffMember,
+  type StaffMemberInput,
+} from "../../src/cleaning_platform/generated/staffing/domain/aggregates.js";
 import { RegisterStaff } from "../../src/cleaning_platform/generated/staffing/domain/commands.js";
 import {
   parseStaffingEvent,
   StaffRegistered,
 } from "../../src/cleaning_platform/generated/staffing/domain/events.js";
 import {
+  aggregateViaJson,
   CapturingEventPublisher,
   expectEvent,
   expectPresent,
   FakeUnitOfWork,
   InMemoryStaffMemberRepository,
+  jsonOf,
   plain,
   SequentialIds,
   viaJson,
@@ -57,7 +63,11 @@ describe("register_staff", () => {
       "stored StaffMember",
     );
     expect(String(stored0.invitationId)).toBe("00000000-0000-0000-0000-000000000001");
-    expect(plain(stored0.joinedAt)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
+    expect(String(stored0.joinedAt)).toBe("2026-01-02T10:00:00.000Z");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(aggregateViaJson(stored0, (input: StaffMemberInput) => StaffMember.from(input))).toEqual(
+      jsonOf(stored0),
+    );
     expect(eventPublisher.published.map((event) => event.type)).toEqual([
       "Staffing.StaffRegistered",
     ]);

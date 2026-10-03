@@ -14,14 +14,13 @@ import {
   InMemoryCleaningStaffInvitationRepository,
   SequentialIds,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
-import { dateTime } from "../../src/cleaning_platform/generated/runtime.js";
 
 function makeUseCase(blocked: string[]) {
   const unitOfWork = new FakeUnitOfWork();
   const eventPublisher = new CapturingEventPublisher();
   const useCase = new IssueInvitationUseCase({
     cleaningStaffInvitationRepository: new InMemoryCleaningStaffInvitationRepository(unitOfWork),
-    clock: new FixedClock(dateTime("2026-01-01T10:00:00+00:00")),
+    clock: new FixedClock("2026-01-01T10:00:00+00:00"),
     ids: new SequentialIds(["00000000-0000-0000-0000-000000000001"]),
     extensions: new CleaningStaffExtensions(blocked),
     eventPublisher,

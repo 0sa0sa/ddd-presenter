@@ -5,13 +5,13 @@
 
 import { z } from "zod";
 
-import { dateTimeSchema, parseWith, uuidSchema } from "../../runtime.js";
+import { InstantSchema, parseWith, uuidSchema } from "../../runtime.js";
 import { EmailAddressSchema } from "./value-objects.js";
 
 const IssueInvitationFields = z
   .strictObject({
     email: EmailAddressSchema,
-    validUntil: dateTimeSchema,
+    validUntil: InstantSchema,
   })
   .readonly();
 

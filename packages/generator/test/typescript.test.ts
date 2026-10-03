@@ -76,6 +76,10 @@ describe("TypeScript target: selection", () => {
     const clash = MODEL.replace("name: EmailAddress\n", "name: Map\n").replace(/type: EmailAddress/g, "type: Map");
     expect(validateModelText(clash).diagnostics.find((d) => d.code === "reserved-name")?.message).toContain('"Map" cannot name a value object');
     expect(validateModelText(clash.replace("target: typescript", "target: python")).ok).toBe(true);
+    for (const runtimeName of ["Instant", "InstantSchema", "LocalDateSchema"]) {
+      const named = MODEL.replace("name: EmailAddress\n", `name: ${runtimeName}\n`).replace(/type: EmailAddress/g, `type: ${runtimeName}`);
+      expect(validateModelText(named).diagnostics.find((d) => d.code === "reserved-name")?.message).toContain(`"${runtimeName}" cannot name a value object`);
+    }
     const companion = MODEL.replace("- name: InvitationNotFound\n", "- name: EmailAddressInput\n").replace(/not_found: InvitationNotFound/g, "not_found: EmailAddressInput").replace(/raises: InvitationNotFound/g, "raises: EmailAddressInput");
     expect(validateModelText(companion).diagnostics.find((d) => d.code === "reserved-name")?.message).toContain("the input type of EmailAddress");
     const ctor = MODEL.replace("{ name: accepted_at, type: DateTime, required: false }", "{ name: constructor, type: String, required: false }");
@@ -164,7 +168,7 @@ describe("TypeScript target: plan", () => {
       {
         path: "src/cleaning_platform/generated/cleaning-staff/domain/aggregates.ts",
         symbol: "CleaningStaffInvitation.accept",
-        reason: "signature changed: (args: {readonly at: Date}) → (args: {readonly at: Date; readonly note?: string | null})",
+        reason: "signature changed: (args: {readonly at: Instant}) → (args: {readonly at: Instant; readonly note?: string | null})",
       },
     ]);
   });
@@ -261,10 +265,12 @@ describe("TypeScript target: expression emission", () => {
     expect(ts("price == 0 and discount != null and discount == price")).toBe("this.price.eq(0) && this.discount !== null && this.discount.eq(this.price)");
   });
 
-  test("date-times compare by getTime(); durations are milliseconds; calendar dates are ISO strings", () => {
-    expect(ts("at - placed_at < hours(24) and at <= placed_at + days(7)")).toBe("durationBetween(at, this.placedAt) < hours(24) && at.getTime() <= plusDuration(this.placedAt, days(7)).getTime()");
-    expect(ts("due + days(14) >= due and due - due > days(0)")).toBe("plusDays(this.due, days(14)) >= this.due && daysBetween(this.due, this.due) > days(0)");
-    expect(ts("min(at, placed_at) == max(at, placed_at)")).toBe("earliest(at, this.placedAt).getTime() === latest(at, this.placedAt).getTime()");
+  test("instants and calendar dates are canonical ISO strings compared with plain operators; durations are milliseconds", () => {
+    expect(ts("at - placed_at < hours(24) and at <= placed_at + days(7)")).toBe("durationBetween(at, this.placedAt) < hours(24) && at <= addDuration(this.placedAt, days(7))");
+    expect(ts("at - hours(1) > placed_at and at != placed_at")).toBe("subtractDuration(at, hours(1)) > this.placedAt && at !== this.placedAt");
+    expect(ts("due + days(14) >= due and due - due > days(0) and due - days(1) < due")).toBe("addDays(this.due, days(14)) >= this.due && daysBetween(this.due, this.due) > days(0) && subtractDays(this.due, days(1)) < this.due");
+    expect(ts("min(at, placed_at) == max(at, placed_at)")).toBe("earliest(at, this.placedAt) === latest(at, this.placedAt)");
+    for (const code of [ts("at == placed_at"), ts("at < placed_at")]) expect(code).not.toContain("getTime");
   });
 
   test("collections: callbacks with `item`, entity removal by identity, nested element functions", () => {
@@ -315,10 +321,10 @@ describe("TypeScript target: Prettier-compatible formatting", () => {
   });
 
   test("a long boolean argument continues indented; a negated condition hugs `if (!(`", () => {
-    expect(fmt("      this.status === OrderStatus.delivered && this.deliveredAt !== null && at.getTime() <= this.deliveredAt.getTime(),")).toEqual([
+    expect(fmt("      this.status === OrderStatus.delivered && this.deliveredAt !== null && at <= addDuration(this.deliveredAt, days(7)),")).toEqual([
       "      this.status === OrderStatus.delivered &&",
       "        this.deliveredAt !== null &&",
-      "        at.getTime() <= this.deliveredAt.getTime(),",
+      "        at <= addDuration(this.deliveredAt, days(7)),",
     ]);
     expect(fmt("    if (!(this.refunded === null || (this.captured !== null && this.refunded.amount.lte(this.captured.amount)))) {")).toEqual([
       "    if (!(",
@@ -378,7 +384,7 @@ describe("TypeScript target: Prettier-compatible formatting", () => {
       "export type SalesEvent =",
       "  LineAdded | LineRemoved | OrderCancelled | OrderOpened | OrderPlaced | QuantityChanged;",
     ]);
-    expect(fmt('import { AggregateRoot, dateTimeSchema, type DomainEvent, type Id, idSchema, parseWith, StateGuard } from "../../runtime.js";')[0]).toBe("import {");
+    expect(fmt('import { AggregateRoot, InstantSchema, type DomainEvent, type Id, idSchema, parseWith, StateGuard } from "../../runtime.js";')[0]).toBe("import {");
     expect(tsString('currency != "JPY"')).toBe("'currency != \"JPY\"'");
     expect(tsString("it's")).toBe('"it\'s"');
     expect(strWidth("招待")).toBe(4);

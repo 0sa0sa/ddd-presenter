@@ -4,12 +4,19 @@
 /** Reference adapters for the clock and id ports (usable in every context). */
 
 import { randomUUID } from "node:crypto";
-import { uuid, type Clock, type IdGenerator, type UUID } from "./runtime.js";
+import {
+  nowInstant,
+  uuid,
+  type Clock,
+  type IdGenerator,
+  type Instant,
+  type UUID,
+} from "./runtime.js";
 
 /** Clock backed by the system time. */
 export class SystemClock implements Clock {
-  now(): Date {
-    return new Date();
+  now(): Instant {
+    return nowInstant();
   }
 }
 

@@ -6,6 +6,10 @@
 import { describe, expect, test } from "vitest";
 
 import { IssueInvitationUseCase } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
+import {
+  CleaningStaffInvitation,
+  type CleaningStaffInvitationInput,
+} from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
 import { IssueInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
 import {
   EmailBlocked,
@@ -17,6 +21,7 @@ import {
 } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import { EmailAddress } from "../../src/cleaning_platform/generated/cleaning-staff/domain/value-objects.js";
 import {
+  aggregateViaJson,
   CapturingEventPublisher,
   expectEvent,
   expectPresent,
@@ -24,12 +29,13 @@ import {
   FakeUnitOfWork,
   FixedClock,
   InMemoryCleaningStaffInvitationRepository,
+  jsonOf,
   plain,
   SequentialIds,
   StubExtensions,
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
-import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
+import { id } from "../../src/cleaning_platform/generated/runtime.js";
 
 describe("issue_invitation", () => {
   /**
@@ -46,7 +52,7 @@ describe("issue_invitation", () => {
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
       unitOfWork,
     );
-    const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-01T10:00:00+00:00");
     const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000aa"]);
     const extensions = new StubExtensions();
     const eventPublisher = new CapturingEventPublisher();
@@ -72,7 +78,13 @@ describe("issue_invitation", () => {
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("pending");
-    expect(plain(stored0.expiresAt)).toEqual(plain(dateTime("2026-01-08T10:00:00+00:00")));
+    expect(String(stored0.expiresAt)).toBe("2026-01-08T10:00:00.000Z");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(
+      aggregateViaJson(stored0, (input: CleaningStaffInvitationInput) =>
+        CleaningStaffInvitation.from(input),
+      ),
+    ).toEqual(jsonOf(stored0));
     expect(eventPublisher.published.map((event) => event.type)).toEqual([
       "CleaningStaff.InvitationIssued",
     ]);
@@ -96,7 +108,7 @@ describe("issue_invitation", () => {
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
       unitOfWork,
     );
-    const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-01T10:00:00+00:00");
     const ids = new SequentialIds([]);
     const extensions = new StubExtensions({ isBlockedEmail: true });
     const eventPublisher = new CapturingEventPublisher();
@@ -130,7 +142,7 @@ describe("issue_invitation", () => {
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
       unitOfWork,
     );
-    const clock = new FixedClock(dateTime("2026-01-01T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-01T10:00:00+00:00");
     const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000aa"]);
     const extensions = new StubExtensions();
     const eventPublisher = new CapturingEventPublisher();

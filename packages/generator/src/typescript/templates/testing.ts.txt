@@ -1,10 +1,13 @@
 import {
   Decimal,
   Entity,
+  instant,
   uuid,
   type AggregateRoot,
   type DomainEvent,
   type EventType,
+  type Instant,
+  type InstantInput,
   type RecordedResult,
   type UUID,
 } from "./runtime.js";
@@ -104,14 +107,15 @@ export class InMemoryIdempotencyStore implements Transactional {
   }
 }
 
+/** Clock that always returns the same instant (an ISO 8601 string with an offset, or a `Date`). */
 export class FixedClock {
-  readonly #now: Date;
+  readonly #now: Instant;
 
-  constructor(now: Date) {
-    this.#now = now;
+  constructor(now: InstantInput) {
+    this.#now = instant(now);
   }
 
-  now(): Date {
+  now(): Instant {
     return this.#now;
   }
 }
@@ -187,11 +191,11 @@ export function expectEvent<E extends DomainEvent>(
 
 /**
  * A plain, comparable form of a model value for assertions: decimals become normalized strings,
- * date-times ISO strings, entities their identity (entities are equal when their identities are).
+ * entities their identity (entities are equal when their identities are). Instants, dates and ids
+ * are canonical strings already.
  */
 export function plain(value: unknown): unknown {
   if (Decimal.isDecimal(value)) return value.toString();
-  if (value instanceof Date) return value.toISOString();
   if (value instanceof Entity) return { identity: plain(value.identity) };
   if (Array.isArray(value)) return value.map(plain);
   if (typeof value === "object" && value !== null) {
@@ -209,4 +213,19 @@ export function viaJson(
   parse: (input: unknown) => DomainEvent,
 ): unknown[] {
   return events.map((event) => plain(parse(JSON.parse(JSON.stringify(event)))));
+}
+
+/** The JSON form of `value` (`JSON.stringify`, parsed back): what a document store would hold. */
+export function jsonOf(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
+/**
+ * `aggregate` serialized to JSON and rebuilt with `from` (schemas, normalization and invariants run
+ * again), as JSON: compare with `jsonOf(aggregate)` to check that the aggregate round-trips.
+ * `from` gets the parsed JSON as its input type (e.g. `(input: XInput) => X.from(input)`).
+ * Aggregates with entity fields do not round-trip: an entity field accepts entity instances only.
+ */
+export function aggregateViaJson<A>(aggregate: A, from: (input: never) => A): unknown {
+  return jsonOf(from(jsonOf(aggregate) as never));
 }

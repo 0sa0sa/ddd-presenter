@@ -7,10 +7,11 @@ import { z } from "zod";
 
 import {
   AggregateRoot,
-  dateTimeSchema,
   type DomainEvent,
   type Id,
   idSchema,
+  type Instant,
+  InstantSchema,
   parseWith,
   StateGuard,
   transition,
@@ -30,9 +31,9 @@ const CleaningStaffInvitationProps = z.strictObject({
   id: idSchema("CleaningStaffInvitation"),
   email: EmailAddressSchema,
   status: InvitationStatusSchema,
-  createdAt: dateTimeSchema,
-  expiresAt: dateTimeSchema,
-  acceptedAt: dateTimeSchema.nullable().default(null),
+  createdAt: InstantSchema,
+  expiresAt: InstantSchema,
+  acceptedAt: InstantSchema.nullable().default(null),
 });
 export type CleaningStaffInvitationProps = z.output<typeof CleaningStaffInvitationProps>;
 export type CleaningStaffInvitationInput = z.input<typeof CleaningStaffInvitationProps>;
@@ -46,9 +47,9 @@ export class CleaningStaffInvitation extends AggregateRoot {
   readonly id: Id<"CleaningStaffInvitation">;
   readonly email: EmailAddress;
   readonly status: InvitationStatus;
-  readonly createdAt: Date;
-  readonly expiresAt: Date;
-  readonly acceptedAt: Date | null;
+  readonly createdAt: Instant;
+  readonly expiresAt: Instant;
+  readonly acceptedAt: Instant | null;
 
   private constructor(props: CleaningStaffInvitationProps) {
     super();
@@ -106,7 +107,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
    * Checked on: construct, transition. Violation raises InvalidInvitationWindow.
    */
   #invariantExpiryAfterCreation(): void {
-    if (!(this.expiresAt.getTime() > this.createdAt.getTime())) {
+    if (!(this.expiresAt > this.createdAt)) {
       throw new InvalidInvitationWindow({ rule: "expiry_after_creation", id: this.id });
     }
   }
@@ -133,10 +134,10 @@ export class CleaningStaffInvitation extends AggregateRoot {
    *
    * Violation raises InvitationNotDeliverable. Required by: accept.
    */
-  pendingUntilExpiry(at: Date): StateGuard {
+  pendingUntilExpiry(at: Instant): StateGuard {
     return new StateGuard(
       "pending_until_expiry",
-      this.status === InvitationStatus.pending && at.getTime() < this.expiresAt.getTime(),
+      this.status === InvitationStatus.pending && at < this.expiresAt,
       () => new InvitationNotDeliverable({ guard: "pending_until_expiry", id: this.id }),
     );
   }
@@ -165,8 +166,8 @@ export class CleaningStaffInvitation extends AggregateRoot {
   static issue(args: {
     readonly id: UUID;
     readonly email: EmailAddress;
-    readonly at: Date;
-    readonly expiresAt: Date;
+    readonly at: Instant;
+    readonly expiresAt: Instant;
   }): Transition<CleaningStaffInvitation> {
     const { id, email, at, expiresAt } = args;
     const aggregate = CleaningStaffInvitation.from({
@@ -189,7 +190,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
    * Emits: InvitationAccepted
    * Invariants are checked on the candidate state before it is returned.
    */
-  accept(args: { readonly at: Date }): Transition<CleaningStaffInvitation> {
+  accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
     const { at } = args;
     this.pendingUntilExpiry(at).assertHolds();
     const aggregate = this.#with({ status: InvitationStatus.accepted, acceptedAt: at });

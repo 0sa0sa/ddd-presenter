@@ -6,7 +6,10 @@
 import { describe, expect, test } from "vitest";
 
 import { AcceptInvitationUseCase } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
-import { CleaningStaffInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
+import {
+  CleaningStaffInvitation,
+  type CleaningStaffInvitationInput,
+} from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
 import { AcceptInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
 import {
   InvitationNotDeliverable,
@@ -17,6 +20,7 @@ import {
   parseCleaningStaffEvent,
 } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import {
+  aggregateViaJson,
   CapturingEventPublisher,
   expectEvent,
   expectPresent,
@@ -24,10 +28,11 @@ import {
   FakeUnitOfWork,
   FixedClock,
   InMemoryCleaningStaffInvitationRepository,
+  jsonOf,
   plain,
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
-import { dateTime, id } from "../../src/cleaning_platform/generated/runtime.js";
+import { id } from "../../src/cleaning_platform/generated/runtime.js";
 
 describe("accept_invitation", () => {
   /**
@@ -53,7 +58,7 @@ describe("accept_invitation", () => {
         expiresAt: "2026-01-08T10:00:00+00:00",
       }),
     );
-    const clock = new FixedClock(dateTime("2026-01-02T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-02T10:00:00+00:00");
     const eventPublisher = new CapturingEventPublisher();
     const useCase = new AcceptInvitationUseCase({
       cleaningStaffInvitationRepository,
@@ -73,7 +78,13 @@ describe("accept_invitation", () => {
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("accepted");
-    expect(plain(stored0.acceptedAt)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
+    expect(String(stored0.acceptedAt)).toBe("2026-01-02T10:00:00.000Z");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(
+      aggregateViaJson(stored0, (input: CleaningStaffInvitationInput) =>
+        CleaningStaffInvitation.from(input),
+      ),
+    ).toEqual(jsonOf(stored0));
     expect(eventPublisher.published.map((event) => event.type)).toEqual([
       "CleaningStaff.InvitationAccepted",
     ]);
@@ -83,7 +94,7 @@ describe("accept_invitation", () => {
     );
     const event0 = expectEvent(eventPublisher.published, 0, InvitationAccepted);
     expect(String(event0.id)).toBe("00000000-0000-0000-0000-000000000001");
-    expect(plain(event0.at)).toEqual(plain(dateTime("2026-01-02T10:00:00+00:00")));
+    expect(String(event0.at)).toBe("2026-01-02T10:00:00.000Z");
   });
 
   /**
@@ -108,7 +119,7 @@ describe("accept_invitation", () => {
         expiresAt: "2026-01-08T10:00:00+00:00",
       }),
     );
-    const clock = new FixedClock(dateTime("2026-01-08T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-08T10:00:00+00:00");
     const eventPublisher = new CapturingEventPublisher();
     const useCase = new AcceptInvitationUseCase({
       cleaningStaffInvitationRepository,
@@ -129,6 +140,12 @@ describe("accept_invitation", () => {
       "stored CleaningStaffInvitation",
     );
     expect(stored0.status).toBe("pending");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(
+      aggregateViaJson(stored0, (input: CleaningStaffInvitationInput) =>
+        CleaningStaffInvitation.from(input),
+      ),
+    ).toEqual(jsonOf(stored0));
     expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
   });
 
@@ -144,7 +161,7 @@ describe("accept_invitation", () => {
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
       unitOfWork,
     );
-    const clock = new FixedClock(dateTime("2026-01-02T10:00:00+00:00"));
+    const clock = new FixedClock("2026-01-02T10:00:00+00:00");
     const eventPublisher = new CapturingEventPublisher();
     const useCase = new AcceptInvitationUseCase({
       cleaningStaffInvitationRepository,

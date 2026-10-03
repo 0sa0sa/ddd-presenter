@@ -154,6 +154,19 @@ function eventAsserts(L: TsLayout, c: Code, events: string, then: ScenarioThenIR
   });
 }
 
+/**
+ * The stored aggregate survives JSON: rebuilt from its JSON with `from`, it has the same JSON. Only for aggregates
+ * without entity fields (an entity field accepts instances only, see `jsonSerializable`).
+ */
+function aggregateJsonAssert(L: TsLayout, c: Code, target: string, aggregate: string, imp: TsImports): void {
+  if (![...L.fieldTypes(aggregate).values()].every((t) => jsonSerializable(L, t))) return;
+  imp.value(L.contextTesting, "aggregateViaJson", "jsonOf");
+  imp.value(L.mod("aggregates"), aggregate);
+  imp.type(L.mod("aggregates"), `${aggregate}Input`);
+  c.comment("The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.");
+  c.line(`expect(aggregateViaJson(${target}, (input: ${aggregate}Input) => ${aggregate}.from(input))).toEqual(jsonOf(${target}));`);
+}
+
 function recordAsserts(L: TsLayout, c: Code, target: string, owner: string, rec: Record<string, unknown>, imp: TsImports): void {
   for (const [k, v] of Object.entries(rec)) {
     const t = L.tsFieldType(owner, k)!;
@@ -303,8 +316,7 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
     for (const a of g.aggregates) c.line(`${repoName(a.type)}.seed(${build(L, a.type, "aggregate", a.fields, imp)});`);
     if (deps.clock) {
       T("FixedClock");
-      imp.value(L.runtime, "dateTime");
-      c.line(`const clock = new FixedClock(dateTime(${tsString(g.clock ?? "1970-01-01T00:00:00+00:00")}));`);
+      c.line(`const clock = new FixedClock(${tsString(g.clock ?? "1970-01-01T00:00:00+00:00")});`);
     }
     if (deps.ids) {
       T("SequentialIds");
@@ -350,6 +362,7 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
         const key = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
         c.line(`const stored${i} = expectPresent(${repoName(ag.name)}.get(${key}), ${tsString(`stored ${ag.name}`)});`);
         recordAsserts(L, c, `stored${i}`, ag.name, s.fields, imp);
+        aggregateJsonAssert(L, c, `stored${i}`, ag.name, imp);
       });
     }
     if (then.emits) {

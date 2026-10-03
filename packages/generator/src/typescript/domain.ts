@@ -228,7 +228,7 @@ function isAggregate(x: EntityIR | AggregateIR): x is AggregateIR {
   return "operations" in x;
 }
 
-/** Argument object type of a factory / operation: `{ readonly at: Date; readonly note?: string | null }`. */
+/** Argument object type of a factory / operation: `{ readonly at: Instant; readonly note?: string | null }`. */
 function argsType(L: TsLayout, owner: AggregateIR, params: ParameterIR[], imp: TsImports): string {
   const types = L.paramTypes(owner, params);
   const fields = params.map((p) => {

@@ -7,10 +7,11 @@ import { z } from "zod";
 
 import {
   AggregateRoot,
-  dateTimeSchema,
   type DomainEvent,
   type Id,
   idSchema,
+  type Instant,
+  InstantSchema,
   parseWith,
   transition,
   type Transition,
@@ -22,7 +23,7 @@ import { StaffRegistered } from "./events.js";
 const StaffMemberProps = z.strictObject({
   id: idSchema("StaffMember"),
   invitationId: uuidSchema,
-  joinedAt: dateTimeSchema,
+  joinedAt: InstantSchema,
 });
 export type StaffMemberProps = z.output<typeof StaffMemberProps>;
 export type StaffMemberInput = z.input<typeof StaffMemberProps>;
@@ -35,7 +36,7 @@ export type StaffMemberInput = z.input<typeof StaffMemberProps>;
 export class StaffMember extends AggregateRoot {
   readonly id: Id<"StaffMember">;
   readonly invitationId: UUID;
-  readonly joinedAt: Date;
+  readonly joinedAt: Instant;
 
   private constructor(props: StaffMemberProps) {
     super();
@@ -64,7 +65,7 @@ export class StaffMember extends AggregateRoot {
   static register(args: {
     readonly id: UUID;
     readonly invitationId: UUID;
-    readonly joinedAt: Date;
+    readonly joinedAt: Instant;
   }): Transition<StaffMember> {
     const { id, invitationId, joinedAt } = args;
     const aggregate = StaffMember.from({ id, invitationId, joinedAt });

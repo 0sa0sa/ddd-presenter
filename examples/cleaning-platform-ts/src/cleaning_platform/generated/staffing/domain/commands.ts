@@ -5,12 +5,12 @@
 
 import { z } from "zod";
 
-import { dateTimeSchema, parseWith, uuidSchema } from "../../runtime.js";
+import { InstantSchema, parseWith, uuidSchema } from "../../runtime.js";
 
 const RegisterStaffFields = z
   .strictObject({
     invitationId: uuidSchema,
-    joinedAt: dateTimeSchema,
+    joinedAt: InstantSchema,
   })
   .readonly();
 

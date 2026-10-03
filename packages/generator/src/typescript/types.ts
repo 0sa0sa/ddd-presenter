@@ -20,7 +20,8 @@ export function tsType(t: Type, imp: TsImports, L: TsLayout): string {
           imp.type(L.runtime, "UUID");
           return "UUID";
         case "DateTime":
-          return "Date";
+          imp.type(L.runtime, "Instant");
+          return "Instant";
         case "Date":
           imp.type(L.runtime, "LocalDate");
           return "LocalDate";
@@ -94,11 +95,11 @@ export function zodSchema(t: Type, imp: TsImports, L: TsLayout, constraints: Con
           imp.value(L.runtime, "uuidSchema");
           return "uuidSchema";
         case "DateTime":
-          imp.value(L.runtime, "dateTimeSchema");
-          return "dateTimeSchema";
+          imp.value(L.runtime, "InstantSchema");
+          return "InstantSchema";
         case "Date":
-          imp.value(L.runtime, "localDateSchema");
-          return "localDateSchema";
+          imp.value(L.runtime, "LocalDateSchema");
+          return "LocalDateSchema";
       }
       break;
     case "ref":

@@ -6,9 +6,9 @@
 import { z } from "zod";
 
 import {
-  dateTimeSchema,
   type DomainEvent,
   type EventType,
+  InstantSchema,
   parseWith,
   uuidSchema,
 } from "../../runtime.js";
@@ -18,7 +18,7 @@ const InvitationAcceptedSchema = z
   .strictObject({
     type: z.literal("CleaningStaff.InvitationAccepted"),
     id: uuidSchema,
-    at: dateTimeSchema,
+    at: InstantSchema,
   })
   .readonly();
 
@@ -53,7 +53,7 @@ const InvitationIssuedSchema = z
     type: z.literal("CleaningStaff.InvitationIssued"),
     id: uuidSchema,
     email: EmailAddressSchema,
-    expiresAt: dateTimeSchema,
+    expiresAt: InstantSchema,
   })
   .readonly();
 
