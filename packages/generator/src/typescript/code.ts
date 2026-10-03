@@ -430,7 +430,11 @@ function splitString(line: string, max: number): string[] {
     }
   }
   chunks.push(cur);
-  if (chunks.length < 2) return [line];
+  if (chunks.length < 2) {
+    // Short enough on a line of its own: move the value below its key.
+    const value = `${indent}  "${body}"${comma}`;
+    return key && value.length <= max + 1 ? [`${indent}${key.trimEnd()}`, value] : [line];
+  }
   const lines = chunks.map((c, i) => `${indent}  "${c}"${i === chunks.length - 1 ? comma : " +"}`);
   return [`${indent}${key.trimEnd()}`, ...lines];
 }

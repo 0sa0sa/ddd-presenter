@@ -65,6 +65,30 @@ describe("ddd CLI", () => {
     expect(readFileSync(agg, "utf8")).not.toContain("# hand edit");
   });
 
+  test("init --target typescript scaffolds a TypeScript model; generate follows the model's target", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-cli-ts-"));
+    expect(cli(["init", dir, "--target", "typescript"]).code).toBe(0);
+    const model = join(dir, "model.ddd.yaml");
+    expect(readFileSync(model, "utf8")).toContain("target: typescript");
+    const g = cli(["generate", model]);
+    expect(g.code).toBe(0);
+    expect(existsSync(join(dir, "src/cleaning_platform/generated/cleaning-staff/domain/aggregates.ts"))).toBe(true);
+    expect(existsSync(join(dir, "package.json"))).toBe(true);
+    expect(existsSync(join(dir, "tests/generated/cleaning-staff-accept-invitation.test.ts"))).toBe(true);
+    // The untouched scaffold still throws: the TypeScript scaffold is checked like the Python one.
+    expect(g.err).toContain('extension is_blocked_email still throws "not implemented yet"');
+    expect(cli(["diff", model, "--check"]).code).toBe(0);
+    expect(cli(["generate", model, "--target", "rust"]).code).toBe(2);
+  });
+
+  test("--target overrides the model's target", () => {
+    const { dir, model } = project();
+    expect(cli(["generate", model, "--target", "typescript"]).code).toBe(0);
+    expect(existsSync(join(dir, "src/cleaning_platform/generated/runtime.ts"))).toBe(true);
+    expect(existsSync(join(dir, "src/cleaning_platform/generated/_runtime.py"))).toBe(false);
+    expect(cli(["diff", model, "--check", "--target", "typescript"]).code).toBe(0);
+  });
+
   test("scaffolded extension code survives regeneration", () => {
     const { dir, model } = project();
     cli(["generate", model]);

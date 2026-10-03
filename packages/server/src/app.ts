@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { boardGhosts, emptyBoard, normalizeBoard, proposeLocally, ruleUsage, STICKY_KINDS, validateModelText, type Board, type BoardGhost, type ProposalKind, type StickyKind, type ValidateResult } from "@ddd/core";
 import { AiBusyError, PROVIDER_LABEL, type ModelAssistant, type ProviderId } from "./ai.ts";
 import { fitToCursor } from "./fit.ts";
-import { computePlan, generatePython, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
+import { computePlan, generate, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
 import { strToU8, zipSync } from "fflate";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -726,7 +726,7 @@ export function createApp(db: Database, options: AppOptions = {}) {
     try {
       const text = yaml ?? versionYaml(projectId, version);
       const r = validate(text);
-      if (r.ok && r.analysis) out = generatePython(r.analysis, text);
+      if (r.ok && r.analysis) out = generate(r.analysis, text);
     } catch (e) {
       // A stored version that crashes the generator is treated like one with errors; the preview never 500s on it.
       if (e instanceof HTTPException) throw e;

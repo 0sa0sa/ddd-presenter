@@ -1,9 +1,9 @@
-import { coverageDiagnostics, formatDiagnostic, parseModel, ruleUsage, SCHEMA_VERSION, sortDiagnostics, validateModelText, type Diagnostic } from "@ddd/core";
-import { computePlan, GENERATOR_VERSION, generatePython, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
+import { coverageDiagnostics, formatDiagnostic, parseModel, ruleUsage, SCHEMA_VERSION, sortDiagnostics, toSnake, validateModelText, type Diagnostic, type GenerationTarget } from "@ddd/core";
+import { computePlan, generate, GENERATOR_VERSION, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { atomicApply, readText, safeJoin, type WriteOp } from "./fsops.ts";
-import { SAMPLE_MODEL } from "./sample.ts";
+import { SAMPLE_MODEL, SAMPLE_MODEL_TS } from "./sample.ts";
 
 export interface Io {
   out: (s: string) => void;
@@ -15,6 +15,8 @@ export interface CommonOpts {
   model: string;
   out?: string;
   format: "text" | "json";
+  /** Overrides the model's `generation.target` (`--target`). */
+  target?: GenerationTarget;
 }
 
 const paint = (io: Io, code: string, s: string) => (io.color ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -93,7 +95,7 @@ function prepare(io: Io, opts: CommonOpts & { prune?: boolean; force?: boolean }
     io.err(paint(io, "31", `✗ Generation stopped: ${summary(m.result.diagnostics)}`));
     return { ok: false as const, code: EXIT.failed };
   }
-  const output = generatePython(m.result.analysis, m.text);
+  const output = generate(m.result.analysis, m.text, opts.target);
   const previousText = readText(join(m.root, output.manifestPath));
   let previous: Manifest | undefined;
   if (previousText) {
@@ -126,7 +128,8 @@ function printPlan(io: Io, plan: Plan, verbose: boolean): void {
   }
 }
 
-function extensionWarnings(io: Io, root: string, analysis: NonNullable<ReturnType<typeof validateModelText>["analysis"]>, pkg: string, src: string): void {
+function extensionWarnings(io: Io, root: string, analysis: NonNullable<ReturnType<typeof validateModelText>["analysis"]>, pkg: string, src: string, target: GenerationTarget): void {
+  if (target === "typescript") return typeScriptExtensionWarnings(io, root, analysis, pkg, src);
   for (const ca of analysis.contexts.values()) {
     if (!ca.ir.extensionPoints.length) continue;
     const snake = ca.ir.name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
@@ -137,6 +140,23 @@ function extensionWarnings(io: Io, root: string, analysis: NonNullable<ReturnTyp
       const def = new RegExp(`def ${x.name}\\(([\\s\\S]*?)(?=\\n    def |\\n\\S|$)`).exec(text);
       if (!def) io.err(paint(io, "33", `warning: extension ${x.name} is not implemented in ${file}`));
       else if (/raise NotImplementedError/.test(def[0])) io.err(paint(io, "33", `warning: extension ${x.name} still raises NotImplementedError (${file})`));
+    }
+  }
+}
+
+/** The TypeScript scaffold: a method per extension point that throws "<name> is not implemented yet" until written. */
+function typeScriptExtensionWarnings(io: Io, root: string, analysis: NonNullable<ReturnType<typeof validateModelText>["analysis"]>, pkg: string, src: string): void {
+  for (const ca of analysis.contexts.values()) {
+    if (!ca.ir.extensionPoints.length) continue;
+    const dir = toSnake(ca.ir.name).replace(/_/g, "-");
+    const file = [src, pkg, "extensions", dir, "extensions.ts"].filter((p) => p !== ".").join("/");
+    const text = readText(join(root, file));
+    if (text === undefined) continue;
+    for (const x of ca.ir.extensionPoints) {
+      const method = x.name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+      const def = new RegExp(`\\n {2}(?:async )?${method}\\(([\\s\\S]*?)(?=\\n {2}(?:async )?\\w+\\(|\\n\\}|$)`).exec(text);
+      if (!def) io.err(paint(io, "33", `warning: extension ${x.name} is not implemented in ${file}`));
+      else if (/is not implemented yet/.test(def[0])) io.err(paint(io, "33", `warning: extension ${x.name} still throws "not implemented yet" (${file})`));
     }
   }
 }
@@ -258,14 +278,20 @@ export function cmdGenerate(io: Io, opts: CommonOpts & { force: boolean; prune: 
   if (kept && !opts.prune) {
     io.out(paint(io, "33", `${kept} stale file(s) kept. Review them and re-run with --prune to delete.`));
   }
-  extensionWarnings(io, m.root, p.analysis, p.analysis.model.generation.package, p.analysis.model.generation.srcDir);
+  extensionWarnings(io, m.root, p.analysis, p.analysis.model.generation.package, p.analysis.model.generation.srcDir, opts.target ?? p.analysis.model.generation.target);
   io.out(paint(io, "32", `✓ Wrote ${ops.length} file(s) to ${m.root}`));
   return EXIT.ok;
 }
 
 export function cmdVersion(io: Io, format: "text" | "json"): number {
-  const info = { generator: "ddd-presenter", generator_version: GENERATOR_VERSION, schema_version: SCHEMA_VERSION, target: "python>=3.11 / pydantic v2" };
-  io.out(format === "json" ? JSON.stringify(info, null, 2) : `ddd-presenter ${info.generator_version}\nmodel schema_version ${info.schema_version}\ntarget ${info.target}`);
+  const info = {
+    generator: "ddd-presenter",
+    generator_version: GENERATOR_VERSION,
+    schema_version: SCHEMA_VERSION,
+    target: "python>=3.11 / pydantic v2",
+    targets: { python: "python>=3.11 / pydantic v2 / pytest", typescript: "typescript (strict, ESM) / zod v4 / decimal.js / vitest or bun test" },
+  };
+  io.out(format === "json" ? JSON.stringify(info, null, 2) : `ddd-presenter ${info.generator_version}\nmodel schema_version ${info.schema_version}\ntargets: python (${info.targets.python}), typescript (${info.targets.typescript})`);
   return EXIT.ok;
 }
 
@@ -292,14 +318,16 @@ export function cmdMigrate(io: Io, opts: CommonOpts & { write: boolean }): numbe
   return EXIT.failed;
 }
 
-export function cmdInit(io: Io, dir: string): number {
+export function cmdInit(io: Io, dir: string, language: GenerationTarget = "python"): number {
   const target = join(resolve(dir), "model.ddd.yaml");
   if (existsSync(target)) {
     io.err(`✗ ${target} already exists`);
     return EXIT.failed;
   }
-  atomicApply(resolve(dir), [{ path: "model.ddd.yaml", content: SAMPLE_MODEL }]);
-  io.out(`✓ Created ${target}\n\nNext steps:\n  ddd validate ${join(dir, "model.ddd.yaml")}\n  ddd diff ${join(dir, "model.ddd.yaml")}\n  ddd generate ${join(dir, "model.ddd.yaml")}`);
+  atomicApply(resolve(dir), [{ path: "model.ddd.yaml", content: language === "typescript" ? SAMPLE_MODEL_TS : SAMPLE_MODEL }]);
+  const model = join(dir, "model.ddd.yaml");
+  const run = language === "typescript" ? `\n  npm install && npm test   (in ${dir}; or bun install && bun run test)` : "";
+  io.out(`✓ Created ${target}\n\nNext steps:\n  ddd validate ${model}\n  ddd diff ${model}\n  ddd generate ${model}${run}`);
   return EXIT.ok;
 }
 

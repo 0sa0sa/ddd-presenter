@@ -141,6 +141,50 @@ const RESERVED_TYPES = new Set([
   "Date",
 ]);
 
+/**
+ * Type names the TypeScript target cannot give to model types: JavaScript globals and runtime / test-double names the
+ * generated modules use unqualified next to the model's types.
+ */
+const TS_RESERVED_TYPES = new Set([
+  "Array",
+  "Error",
+  "Function",
+  "JSON",
+  "Map",
+  "Math",
+  "Number",
+  "Object",
+  "Partial",
+  "Promise",
+  "Readonly",
+  "ReadonlyArray",
+  "ReadonlyMap",
+  "Record",
+  "Set",
+  "Symbol",
+  "TypeError",
+  "AggregateRoot",
+  "Awaitable",
+  "CapturingEventPublisher",
+  "ConstraintIssue",
+  "Duration",
+  "Entity",
+  "ErrorDetails",
+  "EventType",
+  "FakeUnitOfWork",
+  "FixedClock",
+  "Id",
+  "IdempotencyStore",
+  "InMemoryIdempotencyStore",
+  "InMemoryRepository",
+  "LocalDate",
+  "RecordedResult",
+  "Rule",
+  "SequentialIds",
+  "StubExtensions",
+  "Subscriptions",
+]);
+
 const PASCAL = /^[A-Z][A-Za-z0-9]*$/;
 
 /** A relative directory inside the project: plain segments only (no absolute, drive-letter, `~`, empty or `..` parts). */
@@ -189,6 +233,7 @@ class Validator {
     for (const ctx of m.contexts) this.checkPolicies(ctx);
     this.checkPolicyCycles();
     this.checkContractUsage();
+    if (m.generation.target === "typescript") this.checkTypeScriptNames();
   }
 
   // -- context map ------------------------------------------------------------
@@ -445,6 +490,77 @@ class Validator {
         element: this.el(first.ctx, first.policy),
         hint: "Each event runs a use case that publishes an event of the loop again. Stop the chain with a condition in a use case, or split the reaction",
       });
+    }
+  }
+
+  /**
+   * Names the TypeScript target cannot emit: type names that the generated modules also use unqualified (JavaScript
+   * globals, runtime exports, generated companions such as `OrderInput`), and class fields named `constructor`.
+   */
+  checkTypeScriptNames(): void {
+    for (const ca of this.contexts.values()) {
+      const ctx = ca.ir;
+      const types: { name: string; kind: string; path: Path }[] = [
+        ...ctx.errors.map((e) => ({ name: e.name, kind: "error", path: [...e.path, "name"] })),
+        ...ctx.enums.map((e) => ({ name: e.name, kind: "enum", path: [...e.path, "name"] })),
+        ...ctx.valueObjects.map((v) => ({ name: v.name, kind: "value object", path: [...v.path, "name"] })),
+        ...ctx.aggregates.flatMap((a) => [
+          { name: a.name, kind: "aggregate", path: [...a.path, "name"] },
+          ...a.entities.map((en) => ({ name: en.name, kind: "entity", path: [...en.path, "name"] })),
+        ]),
+        ...ctx.useCases.map((u) => ({ name: u.command, kind: "command", path: [...u.path, "command"] })),
+        ...[...ca.events.values()].map((e) => ({ name: e.name, kind: "event", path: [...ctx.path, "name"] })),
+      ];
+      // Companions the TypeScript target declares next to the model's types (one module namespace per context).
+      const companions = new Map<string, string>();
+      const add = (name: string, of: string) => companions.set(name, of);
+      for (const e of ctx.errors) if (e.details.length) add(`${e.name}Details`, `the details type of ${e.name}`);
+      for (const e of ctx.enums) add(`${e.name}Schema`, `the schema of ${e.name}`);
+      for (const v of ctx.valueObjects) {
+        add(`${v.name}Input`, `the input type of ${v.name}`);
+        add(`${v.name}Schema`, `the schema of ${v.name}`);
+      }
+      for (const a of ctx.aggregates) {
+        for (const x of [a, ...a.entities]) {
+          add(`${x.name}Props`, `the props type of ${x.name}`);
+          add(`${x.name}Input`, `the input type of ${x.name}`);
+        }
+        add(`InMemory${a.name}Repository`, `the test repository of ${a.name}`);
+      }
+      for (const u of ctx.useCases) {
+        add(`${u.command}Input`, `the input type of ${u.command}`);
+        add(`${pascal(u.name)}Runner`, `the runner interface of ${u.name}`);
+      }
+      for (const e of ca.events.values()) add(`${e.name}Input`, `the payload type of ${e.name}`);
+      if (ca.events.size) add(`${ctx.name}Event`, `the union of the events of ${ctx.name}`);
+      for (const p of ca.policies.values()) {
+        if (p.crossContext) {
+          add(`${p.event.context}Translator`, `the translator interface from ${p.event.context}`);
+          add(`PassThrough${p.event.context}Translator`, `the pass-through translator from ${p.event.context}`);
+        }
+      }
+      for (const t of types) {
+        if (TS_RESERVED_TYPES.has(t.name)) {
+          this.bag.error("reserved-name", `"${t.name}" cannot name a ${t.kind} when generating TypeScript: the generated code uses it`, t.path, {
+            element: `${ctx.name} › ${t.name}`,
+            hint: "It is a JavaScript global or a name of the generated runtime; rename the type",
+          });
+        } else if (companions.has(t.name)) {
+          this.bag.error("reserved-name", `"${t.name}" clashes with ${companions.get(t.name)} in the generated TypeScript`, t.path, {
+            element: `${ctx.name} › ${t.name}`,
+            hint: "Rename the type",
+          });
+        }
+      }
+      for (const x of ctx.aggregates.flatMap((a) => [a, ...a.entities])) {
+        for (const f of x.fields) {
+          if (f.name === "constructor") {
+            this.bag.error("reserved-name", `A field cannot be named "constructor" when generating TypeScript (it is not a valid class field)`, [...f.path, "name"], {
+              element: `${ctx.name} › ${x.name}`,
+            });
+          }
+        }
+      }
     }
   }
 

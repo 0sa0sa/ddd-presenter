@@ -41,7 +41,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       <section className="login-model" aria-label="DDD Presenter について">
         <h1>業務ルールに名前を付けて、一度だけ書く。</h1>
         <p>
-          Entity、Value Object、Aggregate、不変条件と状態ガード、ユースケースの手順と期待結果をひとつのモデルにまとめます。モデルを検証し、Pythonのドメインコードとテストを生成します。生成物はあなたのリポジトリのものです。
+          Entity、Value Object、Aggregate、不変条件と状態ガード、ユースケースの手順と期待結果をひとつのモデルにまとめます。モデルを検証し、Python または TypeScript のドメインコードとテストを生成します。生成物はあなたのリポジトリのものです。
         </p>
         <div className="rule-sample" aria-label="ルールの例">
           <span>

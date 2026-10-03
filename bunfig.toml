@@ -1,0 +1,4 @@
+# `bun test` at the repository root runs the tool's own tests only. The examples carry generated tests for their
+# own runners (pytest, vitest) and dependencies; they are checked by `bun run verify:example` / `verify:example:ts`.
+[test]
+root = "packages"

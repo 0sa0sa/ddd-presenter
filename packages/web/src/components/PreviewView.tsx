@@ -30,7 +30,7 @@ export function PreviewView({ projectId, version, dirty }: { projectId: string; 
         if (cancelled) return;
         setLoading(false);
         setPreview(p);
-        const first = p.plan.find((e) => e.action === "update" || e.action === "stale") ?? p.plan.find((e) => e.path.endsWith("aggregates.py"));
+        const first = p.plan.find((e) => e.action === "update" || e.action === "stale") ?? p.plan.find((e) => /(^|\/)aggregates\.(py|ts)$/.test(e.path));
         setSelected(first?.path);
         setMode(first?.diff ? "diff" : "file");
       },

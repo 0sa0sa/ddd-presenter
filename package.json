@@ -14,6 +14,7 @@
     "start": "bun packages/server/src/main.ts",
     "admin": "bun packages/server/src/admin.ts",
     "verify:example": "cd examples/cleaning-platform && bun ../../packages/cli/src/main.ts diff --check && .venv/bin/python -m pytest -q && .venv/bin/mypy src tests",
+    "verify:example:ts": "cd examples/cleaning-platform-ts && bun ../../packages/cli/src/main.ts diff --check && bun install && bun run typecheck && bun run test",
     "build:vscode": "cd packages/vscode && bun run build && bunx @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license"
   },
   "devDependencies": {

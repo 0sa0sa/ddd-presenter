@@ -230,13 +230,13 @@ export const TOURS: Record<string, TourStop[]> = {
     {
       target: "tab-preview",
       title: "「生成プレビュー」を開きます",
-      body: "保存済みのモデルから生成される Python のコードとテストを確認できます。",
+      body: "保存済みのモデルから生成される Python（または TypeScript）のコードとテストを確認できます。",
       advanceOnClick: true,
     },
     {
       target: "preview-files",
       title: "生成されるファイルの一覧です",
-      body: "aggregates.py を選ぶと、ルールがメソッドとして確かめられている様子が見られます。tests/generated の下がシナリオから作られたテストです。変更の多い版では差分も表示します。",
+      body: "aggregates.py（TypeScript なら aggregates.ts）を選ぶと、ルールがメソッドとして確かめられている様子が見られます。tests/generated の下がシナリオから作られたテストです。変更の多い版では差分も表示します。",
       whenMissing: "モデルにエラーがあるとプレビューを作れません。先にエラーを直して保存します。",
     },
   ],
@@ -244,7 +244,7 @@ export const TOURS: Record<string, TourStop[]> = {
     {
       target: "export-link",
       title: "モデルを書き出します",
-      body: "ここから model.ddd.yaml を保存し、自分のリポジトリに置きます。そのあと `bun run ddd generate model.ddd.yaml` で生成し、pytest でテストを実行します（手順は docs/12-tutorial.md）。",
+      body: "ここから model.ddd.yaml を保存し、自分のリポジトリに置きます。そのあと `bun run ddd generate model.ddd.yaml` で生成し、pytest（TypeScript なら vitest）でテストを実行します（手順は docs/12-tutorial.md）。",
     },
   ],
 };

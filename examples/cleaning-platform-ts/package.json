@@ -1,0 +1,20 @@
+{
+  "name": "cleaning-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "清掃スタッフの招待と受諾を扱うサンプルモデル（TypeScript / Zod で生成）",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

@@ -2,22 +2,23 @@
 import { parseArgs } from "node:util";
 import { cmdDiff, cmdGenerate, cmdInit, cmdMigrate, cmdRules, cmdValidate, cmdVersion, EXIT, type Io } from "./commands.ts";
 
-const HELP = `ddd — DDD Presenter CLI (model-driven Python domain code)
+const HELP = `ddd — DDD Presenter CLI (model-driven Python / TypeScript domain code)
 
 Usage:
   ddd validate [model] [--strict] [--format json]   Check the model; non-zero exit on errors
                                                    (--strict: warnings fail too, plus untested rules,
                                                    unused errors and unused extension points)
   ddd diff     [model] [--patch] [--check]          Show what generate would change (--check: fail if out of date)
-  ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock]
+  ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock] [--target python|typescript]
   ddd rules    [model] [--format json]              Where each named rule is applied and tested
   ddd migrate  [model] [--write]                    Upgrade an older schema_version
-  ddd init     [dir]                                Create a sample model.ddd.yaml
+  ddd init     [dir] [--target python|typescript]   Create a sample model.ddd.yaml
   ddd version  [--format json]
 
 Options:
   --out <dir>     Project root for generated files (default: the model's directory)
   --format <f>    text (default) or json
+  --target <t>    python or typescript; overrides generation.target of the model (diff, generate)
   --no-color      Disable colors
 
 The model defaults to ./model.ddd.yaml. Nothing is sent over the network.`;
@@ -45,6 +46,7 @@ export function run(argv: string[], io: Io): number {
         "update-lock": { type: "boolean", default: false },
         write: { type: "boolean", default: false },
         "no-color": { type: "boolean", default: false },
+        target: { type: "string" },
       },
     });
   } catch (e) {
@@ -56,8 +58,13 @@ export function run(argv: string[], io: Io): number {
     io.err(`--format must be text or json`);
     return EXIT.usage;
   }
+  if (v.target !== undefined && v.target !== "python" && v.target !== "typescript") {
+    io.err(`--target must be python or typescript`);
+    return EXIT.usage;
+  }
   if (v["no-color"]) io.color = false;
-  const common = { model: parsed.positionals[0] ?? "model.ddd.yaml", out: v.out, format: v.format as "text" | "json" };
+  const target = v.target as "python" | "typescript" | undefined;
+  const common = { model: parsed.positionals[0] ?? "model.ddd.yaml", out: v.out, format: v.format as "text" | "json", ...(target ? { target } : {}) };
   switch (command) {
     case "validate":
       return cmdValidate(io, { ...common, strict: v.strict! });
@@ -70,7 +77,7 @@ export function run(argv: string[], io: Io): number {
     case "migrate":
       return cmdMigrate(io, { ...common, write: v.write! });
     case "init":
-      return cmdInit(io, parsed.positionals[0] ?? ".");
+      return cmdInit(io, parsed.positionals[0] ?? ".", target);
     case "version":
       return cmdVersion(io, common.format);
     default:

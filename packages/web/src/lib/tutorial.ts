@@ -119,8 +119,8 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "preview",
     title: "生成されるコードとテストを見る",
-    why: "モデルから Python のドメインコードと pytest が生成されます。ルールが、どのメソッドでどう確かめられるかを確認できます。",
-    how: ["「生成プレビュー」タブを開き、aggregates.py やテストファイルを見ます", "ZIP でダウンロードすることもできます"],
+    why: "モデルから Python（または TypeScript）のドメインコードとテストが生成されます。ルールが、どのメソッドでどう確かめられるかを確認できます。",
+    how: ["「生成プレビュー」タブを開き、aggregates.py（TypeScript なら aggregates.ts）やテストファイルを見ます", "ZIP でダウンロードすることもできます"],
     tab: "preview",
   },
   {
@@ -130,7 +130,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     how: [
       "右上の「YAMLをエクスポート」で model.ddd.yaml を保存します",
       "リポジトリで `bun run ddd generate path/to/model.ddd.yaml` を実行します",
-      "生成された tests/generated を pytest で実行します（詳しくは docs/12-tutorial.md）",
+      "生成された tests/generated を pytest（TypeScript なら vitest）で実行します（詳しくは docs/12-tutorial.md）",
     ],
     tab: "preview",
     manual: true,

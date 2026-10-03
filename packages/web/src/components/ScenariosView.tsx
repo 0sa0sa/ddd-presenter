@@ -38,7 +38,7 @@ export function ScenariosView({ model, onGoto }: { model: ModelIR; onGoto: (p: P
   return (
     <div className="view">
       <p className="muted">
-        シナリオはそのまま pytest のテストになります。ドメインエキスパートと一緒に、前提・操作・期待する結果が業務の理解と合っているかを確認してください。
+        シナリオはそのまま生成テスト（pytest / vitest）になります。ドメインエキスパートと一緒に、前提・操作・期待する結果が業務の理解と合っているかを確認してください。
       </p>
       {cards.length === 0 && <p>シナリオがありません。Aggregateか Use case の scenarios に Given / When / Then を書くと、ここに表示されテストが生成されます。</p>}
       {owners.map((o) => (
