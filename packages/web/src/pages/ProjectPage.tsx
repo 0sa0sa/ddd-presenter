@@ -18,6 +18,7 @@ import { buildOutline, flatten } from "../lib/outline.ts";
 import { BoardTabs } from "../components/board/BoardTabs.tsx";
 import { BoardView } from "../components/board/BoardView.tsx";
 import { renameOnBoards, type Rename } from "../lib/boardRenames.ts";
+import { clearDraft, readDraft, writeDraft, type ModelDraft } from "../lib/drafts.ts";
 import { TutorialCoach } from "../components/TutorialCoach.tsx";
 import { tutorialStore } from "../lib/tutorial.ts";
 
@@ -64,6 +65,8 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
     }
   });
   const [boardsVersion, setBoardsVersion] = useState(0);
+  /** Unsaved edits left from an earlier visit (offered for restore). */
+  const [draftOffer, setDraftOffer] = useState<ModelDraft>();
   const selectBoard = useCallback(
     (bid: string, name: string) => {
       setBoard((prev) => (prev.id === bid && prev.name === name ? prev : { id: bid, name }));
@@ -86,6 +89,17 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const canEdit = role !== "viewer";
   const dirty = saved !== undefined && text !== saved.yaml;
 
+  // Keep unsaved edits in this browser until they are saved (or discarded).
+  useEffect(() => {
+    if (!saved || draftOffer) return;
+    if (!dirty) {
+      clearDraft(id);
+      return;
+    }
+    const t = setTimeout(() => writeDraft(id, { yaml: text, baseVersion: saved.version, savedAt: new Date().toISOString() }), 400);
+    return () => clearTimeout(t);
+  }, [id, text, dirty, saved, draftOffer]);
+
   useEffect(() => {
     api.assistStatus(id).then(setAi, () => setAi(undefined));
     Promise.all([api.project(id), api.model(id), api.layout(id)]).then(
@@ -94,6 +108,9 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
         setRole(p.role);
         setSaved({ version: m.version, yaml: m.yaml });
         setText(m.yaml);
+        const draft = readDraft(id);
+        if (draft && draft.yaml !== m.yaml) setDraftOffer(draft);
+        else if (draft) clearDraft(id);
         // A project whose model has no aggregates yet starts on the discovery board.
         const parsed = validateModelText(m.yaml).model;
         if (parsed && parsed.contexts.every((c) => c.aggregates.length === 0 && c.useCases.length === 0)) setDefaultTab("discovery");
@@ -253,7 +270,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           setSelectedId(n.id);
           if (tab === "model") gotoPath(n.path);
         }} />
-        <section className="main">
+        <section className={`main${draftOffer && canEdit ? " has-notice" : ""}`}>
           <div className="tabs" role="tablist" aria-label="表示">
             {TABS.map((t) => (
               <button key={t.id} className="tab" role="tab" data-tour={`tab-${t.id}`} aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
@@ -262,6 +279,38 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
               </button>
             ))}
           </div>
+          {draftOffer && canEdit && (
+            <div className="merge-note" role="status" data-tour="draft-offer">
+              <strong>前回の未保存の変更があります</strong>
+              <span className="small">
+                v{draftOffer.baseVersion} を元に {new Date(draftOffer.savedAt).toLocaleString()} まで編集した内容です。
+                {draftOffer.baseVersion !== saved.version && ` その後 v${saved.version} が保存されています。復元して保存すると、差分を確認してからどちらを残すか選べます。`}
+              </span>
+              <div className="row" style={{ gap: 6 }}>
+                <button
+                  className="small-button primary"
+                  onClick={() => {
+                    setText(draftOffer.yaml);
+                    // Saving against the version the draft was based on lets the normal conflict check show the diff.
+                    if (draftOffer.baseVersion !== saved.version) setSaved({ version: draftOffer.baseVersion, yaml: saved.yaml });
+                    setDraftOffer(undefined);
+                    setStatus("未保存の変更を復元しました。確認して保存してください");
+                  }}
+                >
+                  復元する
+                </button>
+                <button
+                  className="quiet small-button"
+                  onClick={() => {
+                    clearDraft(id);
+                    setDraftOffer(undefined);
+                  }}
+                >
+                  破棄する
+                </button>
+              </div>
+            </div>
+          )}
           <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" || tab === "discovery" ? " fill" : ""}`} role="tabpanel">
             {tab === "discovery" && (
               <div className="board-page">

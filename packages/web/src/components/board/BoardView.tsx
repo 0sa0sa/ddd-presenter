@@ -21,6 +21,7 @@ import { api, ApiError, describeError } from "../../api.ts";
 import { acceptGhost, addConnector, addFrame, addItem, addLane, duplicate, frameContents, History, removeIds, updateItem, updateLane, visibleGhosts } from "../../lib/boardOps.ts";
 import { AssistPanel } from "./AssistPanel.tsx";
 import { DrawioImportDialog } from "./DrawioImportDialog.tsx";
+import { mergeBoards, type MergeConflict } from "../../lib/boardMerge.ts";
 import { ItemPanel } from "./ItemPanel.tsx";
 import { nodeTypes, STICKY_GLYPH, type FrameData, type GhostData, type LaneData, type StickyData } from "./nodes.tsx";
 import { ReflectDialog } from "./ReflectDialog.tsx";
@@ -65,7 +66,11 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
   const [board, setBoard] = useState<Board>();
   const [saved, setSaved] = useState<{ version: number; json: string }>({ version: 0, json: "" });
   const [status, setStatus] = useState<string>();
-  const [conflict, setConflict] = useState<{ version: number; board: Board }>();
+  /** Same stickies changed by someone else at the same time (kept ours; theirs can be restored). */
+  const [mergeNote, setMergeNote] = useState<{ conflicts: MergeConflict[]; theirs: Board; by?: string }>();
+  const [saveError, setSaveError] = useState<string>();
+  const retries = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [tool, setTool] = useState<Tool>("event");
   const [editingId, setEditingId] = useState<string>();
   const [selected, setSelected] = useState<string[]>(NO_HIGHLIGHT);
@@ -106,30 +111,68 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
     void load();
   }, [load]);
 
-  const save = useCallback(
-    async (baseVersion?: number) => {
-      const b = boardRef.current;
-      if (!b || !canEdit) return;
-      const body = JSON.stringify(b);
-      try {
-        const r = await api.saveBoard(projectId, b, baseVersion ?? saved.version, boardId);
-        setSaved({ version: r.version, json: body });
-        setConflict(undefined);
-        setStatus("保存しました");
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 409) setConflict({ version: Number(e.body.current_version), board: e.body.board as Board });
-        else setStatus(`保存できませんでした: ${describeError(e)}`);
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
+
+  const save = useCallback(async (): Promise<void> => {
+    const b = boardRef.current;
+    if (!b || !canEdit) return;
+    clearTimeout(retryTimer.current);
+    const body = JSON.stringify(b);
+    const base = savedRef.current;
+    try {
+      const r = await api.saveBoard(projectId, b, base.version, boardId);
+      setSaved({ version: r.version, json: body });
+      setSaveError(undefined);
+      retries.current = 0;
+      setStatus("保存しました");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Someone saved meanwhile: merge their board with ours and save the result (the autosave picks it up).
+        const theirs = e.body.board as Board;
+        const baseBoard = base.json ? (JSON.parse(base.json) as Board) : { version: 1 as const, items: [], frames: [], connectors: [] };
+        const merged = mergeBoards(baseBoard, boardRef.current ?? b, theirs);
+        setSaved({ version: Number(e.body.current_version), json: JSON.stringify(theirs) });
+        setBoard(merged.board);
+        setSaveError(undefined);
+        if (merged.conflicts.length) setMergeNote({ conflicts: merged.conflicts, theirs });
+        setStatus(merged.conflicts.length ? "ほかの人の変更と合わせました（同時に変えた付箋はあなたの変更を残しました）" : "ほかの人の変更と合わせて保存します");
+        // Save the merged board now: when it equals what we already had, the autosave would not notice.
+        retryTimer.current = setTimeout(() => void saveRef.current(), 200);
+      } else {
+        // Network or server trouble: keep the changes and try again with backoff.
+        setSaveError(describeError(e));
+        const delay = Math.min(30_000, 2_000 * 2 ** retries.current++);
+        retryTimer.current = setTimeout(() => void saveRef.current(), delay);
       }
-    },
-    [projectId, boardId, saved.version, canEdit],
-  );
+    }
+  }, [projectId, boardId, canEdit]);
+  const saveRef = useRef(save);
+  saveRef.current = save;
 
   useEffect(() => {
-    if (!dirty || !canEdit || conflict) return;
+    if (!dirty || !canEdit || saveError) return;
     setStatus("保存待ち…");
     const t = setTimeout(() => void save(), 800);
     return () => clearTimeout(t);
-  }, [json, dirty, canEdit, conflict, save]);
+  }, [json, dirty, canEdit, saveError, save]);
+
+  // Unsaved changes are never dropped silently: flush when leaving the board, warn when leaving the page.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(
+    () => () => {
+      clearTimeout(retryTimer.current);
+      if (dirtyRef.current) void saveRef.current();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!dirty || !canEdit) return;
+    const onUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [dirty, canEdit]);
 
   // Show other people's changes when we have nothing unsaved.
   useEffect(() => {
@@ -617,7 +660,18 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
           </button>
         )}
         <span className="small muted" aria-live="polite">
-          {conflict ? "ほかの人の変更と衝突しています" : dirty ? "未保存" : status}
+          {saveError ? (
+            <span className="sev-error">
+              保存できませんでした（{saveError}）。自動で再試行します{" "}
+              <button className="linklike small" onClick={() => void save()}>
+                今すぐ再試行
+              </button>
+            </span>
+          ) : dirty ? (
+            "未保存"
+          ) : (
+            status
+          )}
         </span>
       </div>
       <div className="board-body">
@@ -746,26 +800,34 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
           }}
         />
       )}
-      {conflict && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="board-conflict">
-          <div className="modal">
-            <h2 id="board-conflict">ほかの人が先にボードを保存しました（v{conflict.version}）</h2>
-            <p>あなたの変更はまだ保存されていません。どちらを残すか選んでください。</p>
-            <div className="row" style={{ flexWrap: "wrap" }}>
-              <button
-                onClick={() => {
-                  setBoard(conflict.board);
-                  setSaved({ version: conflict.version, json: JSON.stringify(conflict.board) });
-                  history.current.clear();
-                  setConflict(undefined);
-                }}
-              >
-                相手のボードを読み込む（自分の変更を破棄）
-              </button>
-              <button className="primary" onClick={() => void save(conflict.version)}>
-                自分のボードで上書き保存
-              </button>
-            </div>
+      {mergeNote && (
+        <div className="merge-note" role="status" aria-labelledby="board-conflict">
+          <strong id="board-conflict">ほかの人が同じ付箋を同時に変更しました</strong>
+          <span className="small">
+            {mergeNote.conflicts.slice(0, 5).map((c) => `「${c.label}」${c.reason === "deleted" ? "（相手は削除）" : ""}`).join("、")}
+            {mergeNote.conflicts.length > 5 ? ` ほか ${mergeNote.conflicts.length - 5} 件` : ""}。あなたの変更を残しました。ほかの変更はすべて合わせてあります。
+          </span>
+          <div className="row" style={{ gap: 6 }}>
+            <button className="small-button" onClick={() => focus(mergeNote.conflicts.map((c) => c.id))}>
+              該当する付箋を表示
+            </button>
+            <button
+              className="small-button"
+              onClick={() => {
+                const b = boardRef.current;
+                if (!b) return;
+                const ids = new Set(mergeNote.conflicts.map((c) => c.id));
+                const t = mergeNote.theirs;
+                const pick = <T extends { id: string }>(mine: T[], theirs: T[]) => [...mine.filter((x) => !ids.has(x.id)), ...theirs.filter((x) => ids.has(x.id))];
+                commit({ ...b, items: pick(b.items, t.items), frames: pick(b.frames, t.frames), connectors: pick(b.connectors, t.connectors), ...(b.lanes || t.lanes ? { lanes: pick(b.lanes ?? [], t.lanes ?? []) } : {}) });
+                setMergeNote(undefined);
+              }}
+            >
+              相手の版に戻す
+            </button>
+            <button className="quiet small-button" onClick={() => setMergeNote(undefined)}>
+              閉じる
+            </button>
           </div>
         </div>
       )}

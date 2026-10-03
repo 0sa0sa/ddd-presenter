@@ -2291,3 +2291,31 @@ input[aria-invalid="true"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* merge / draft notices */
+.merge-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, #e6a23c 16%, var(--surface));
+}
+.board .merge-note {
+  position: absolute;
+  z-index: 15;
+  left: 50%;
+  top: 110px;
+  transform: translateX(-50%);
+  max-width: min(720px, 90%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 15%);
+}
+.board {
+  position: relative;
+}
+.main.has-notice {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
