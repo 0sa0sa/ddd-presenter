@@ -46,6 +46,8 @@ export interface ReadEndpoint<K extends z.ZodType, O extends z.ZodType> {
   readonly method: "GET";
   readonly path: string;
   readonly id: K;
+  /** How the `:id` path segment is read before `id` validates it ("number" for Integer ids). */
+  readonly idType: "string" | "number";
   readonly output: O;
   readonly errors: ErrorStatuses;
 }
@@ -181,7 +183,8 @@ export function readRoute<D, K extends z.ZodType, O extends z.ZodType>(
     async handle(_request, dependencies, id) {
       const repository = dependency(dependencies);
       if (repository === undefined) return undefined;
-      const aggregate = await repository.get(parseWith(endpoint.id, id, endpoint.name + " id"));
+      const raw = endpoint.idType === "number" && /^-?\d+$/.test(id) ? Number(id) : id;
+      const aggregate = await repository.get(parseWith(endpoint.id, raw, endpoint.name + " id"));
       if (aggregate === null || aggregate === undefined) {
         throw new AggregateNotFound({ aggregate: endpoint.name, id });
       }
@@ -261,7 +264,11 @@ function matchPath(
     const segment = segments[i] ?? "";
     if (part === ":id") {
       if (!segment) return undefined;
-      id = decodeURIComponent(segment);
+      try {
+        id = decodeURIComponent(segment);
+      } catch {
+        return undefined; // malformed percent-encoding: no endpoint matches
+      }
     } else if (part !== segment) {
       return undefined;
     }

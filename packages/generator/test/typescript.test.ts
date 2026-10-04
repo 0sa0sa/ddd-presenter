@@ -20,6 +20,8 @@ const KITCHEN_SINK = fixture("kitchen-sink.ddd.yaml");
 const CONTEXT_MAP = fixture("context-map.ddd.yaml");
 const ORDERING = fixture("ordering.ddd.yaml");
 const LONG_RULES = fixture("long-rules.ddd.yaml");
+/** Aggregates identified by a String and by an Integer (the API's keys and paths must not assume UUIDs). */
+const IDENTITIES = fixture("identities.ddd.yaml");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -524,7 +526,7 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
     expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n      },");
     expect(contract).toContain("output: uuidSchema,");
     expect(contract).toContain("errors: { constraint_violation: 400, email_blocked: 422, invalid_invitation_window: 422 },");
-    expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      output: CleaningStaffInvitationJson,');
+    expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      idType: "string",\n      output: CleaningStaffInvitationJson,');
     expect(contract).toContain("acceptedAt: InstantSchema.nullable(),");
     expect(file("api/contract.ts")).toContain('export const API_BASE_PATH = "/api";');
     const root = gen(withApi(withoutApi(MODEL), '{ base_path: "" }')).files.find((f) => f.path.endsWith("api/cleaning-staff/contract.ts"))!.content;
@@ -560,6 +562,16 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
     const hooks = file("api/cleaning-staff/hooks.ts");
     expect(hooks).toContain("return useQuery(cleaningStaffInvitationQueries.detailOrSkip(useApiClient(), id));");
     expect(hooks).toContain("return useMutation(cleaningStaffMutations.acceptInvitation(useApiClient()));");
+  });
+
+  test("String and Integer identities: keys are not lower-cased, Integer ids are numbers in keys and paths", () => {
+    const files = gen(withApi(IDENTITIES)).files;
+    const q = files.find((f) => f.path.endsWith("api/catalog/queries.ts"))!.content;
+    expect(q).toContain("detail: (id: string | undefined) => [...productKeys.details(), id] as const,");
+    expect(q).toContain("detail: (id: number | undefined) => [...shelfKeys.details(), id] as const,");
+    expect(q).toContain("detail: (api: ApiClient, id: number) =>");
+    const contract = files.find((f) => f.path.endsWith("api/catalog/contract.ts"))!.content;
+    expect(contract).toContain('idType: "number",');
   });
 
   test("register.ts augments TanStack Query's Register (a module, so it augments instead of replacing)", () => {
@@ -680,6 +692,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
     ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions; HTTP API)", CONTEXT_MAP, true],
     ["the ordering model (arithmetic, durations, collection functions, constructors, with, let; HTTP API with entities)", ORDERING, true],
     ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES, false],
+    ["the identities model (String and Integer aggregate identities through the HTTP API)", IDENTITIES, true],
     ["a model reflected from the discovery board", FROM_BOARD, false],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml, false],
   ] as [string, string, boolean][])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source, api) => {
@@ -725,6 +738,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       ["context-map", withApi(CONTEXT_MAP)],
       ["ordering", withApi(ORDERING)],
       ["long-rules", asTypeScript(LONG_RULES)],
+      ["identities", withApi(IDENTITIES)],
       ["from-board", asTypeScript(FROM_BOARD)],
       ["proposed", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
     ];

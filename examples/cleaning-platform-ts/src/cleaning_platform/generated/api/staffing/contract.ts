@@ -44,6 +44,7 @@ export const contract = {
       method: "GET",
       path: "/api/staffing/staff-member/:id",
       id: idSchema("StaffMember"),
+      idType: "string",
       output: StaffMemberJson,
       errors: { constraint_violation: 400, aggregate_not_found: 404 },
     }),

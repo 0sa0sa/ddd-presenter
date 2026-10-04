@@ -1,0 +1,86 @@
+schema_version: 1
+project: identities
+generation:
+  package: identities
+
+contexts:
+  - name: Catalog
+    errors:
+      - { name: ProductNotFound, code: product_not_found, message: not found }
+    aggregates:
+      - name: Product
+        identity: sku
+        fields:
+          - { name: sku, type: String }
+          - { name: name, type: String }
+        factories:
+          - name: register
+            parameters:
+              - { name: sku, type: String }
+              - { name: name, type: String }
+            fields: { sku: sku, name: name }
+        operations:
+          - name: rename
+            parameters:
+              - { name: name, type: String }
+            changes: { name: name }
+      - name: Shelf
+        identity: number
+        fields:
+          - { name: number, type: Integer }
+          - { name: label, type: String }
+        factories:
+          - name: open
+            parameters:
+              - { name: number, type: Integer }
+              - { name: label, type: String }
+            fields: { number: number, label: label }
+    use_cases:
+      - name: rename_product
+        command: RenameProduct
+        transaction: none
+        input:
+          - { name: sku, type: String }
+          - { name: name, type: String }
+        steps:
+          - load: { aggregate: Product, by: sku, as: product, not_found: ProductNotFound }
+          - invoke: { target: product, operation: rename, args: { name: name } }
+          - save: product
+        scenarios:
+          - name: product_is_renamed
+            given:
+              aggregates:
+                - type: Product
+                  fields: { sku: ABC-1, name: Old }
+            when:
+              input: { sku: ABC-1, name: New }
+            then:
+              state:
+                - aggregate: Product
+                  id: ABC-1
+                  fields: { name: New }
+          - name: unknown_product
+            when:
+              input: { sku: NOPE, name: New }
+            then:
+              raises: ProductNotFound
+      - name: open_shelf
+        command: OpenShelf
+        transaction: none
+        input:
+          - { name: number, type: Integer }
+          - { name: label, type: String }
+        steps:
+          - create: { aggregate: Shelf, factory: open, as: shelf, args: { number: number, label: label } }
+          - save: shelf
+          - return: shelf.number
+        scenarios:
+          - name: shelf_is_opened
+            when:
+              input: { number: 7, label: Front }
+            then:
+              returns: 7
+              state:
+                - aggregate: Shelf
+                  id: 7
+                  fields: { label: Front }

@@ -4,7 +4,7 @@
  * the error mapping (status and domain error class) and that each mutation invalidates exactly what it changes.
  */
 import type { AggregateIR, Type, UseCaseIR, UseCaseScenarioIR } from "@ddd/core";
-import { contextKey, invalidations, keysName, mutationsName, queriesName, readPath, useCaseErrors, useCasePath } from "./api.ts";
+import { contextKey, idKind, idLiteral, invalidations, keysName, mutationsName, queriesName, readPath, useCaseErrors, useCasePath } from "./api.ts";
 import { repoName } from "./application.ts";
 import { Code, TsImports, tsString } from "./code.ts";
 import type { TsFile } from "./domain.ts";
@@ -34,6 +34,10 @@ function connectLine(c: Code, names: string, key: string, parts: string[]): void
 }
 /** An id no scenario uses: its cache entry must never be invalidated by a mutation of another aggregate. */
 const OTHER_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+
+function otherId(kind: "uuid" | "string" | "integer"): string {
+  return kind === "integer" ? "987654321" : kind === "string" ? '"no-such-id"' : tsString(OTHER_ID);
+}
 
 function hasEntity(t: Type): boolean {
   if (t.k === "optional") return hasEntity(t.inner);
@@ -132,10 +136,16 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
       const repo = repoName(ag.name);
       c.line(`const ${repo} = new InMemory${ag.name}Repository();`);
       c.line(`const served = connect({ ${key}: { repositories: { ${repo} } } });`);
-      const path = `${ORIGIN}${readPath(api, L, ag).replace(":id", "not-an-id")}`;
-      c.line(`const invalid = await served.handler(new Request(${tsString(path)}));`);
-      c.line("expect(invalid.status).toBe(400);");
-      c.line('expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });');
+      if (idKind(L, ag) !== "string") {
+        const path = `${ORIGIN}${readPath(api, L, ag).replace(":id", "not-an-id")}`;
+        c.line(`const invalid = await served.handler(new Request(${tsString(path)}));`);
+        c.line("expect(invalid.status).toBe(400);");
+        c.line('expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });');
+      }
+      c.comment("Malformed percent-encoding matches no endpoint (the handler never throws).");
+      const malformed = `${ORIGIN}${readPath(api, L, ag).replace(":id", "%E0%A4%A")}`;
+      c.line(`const malformed = await served.handler(new Request(${tsString(malformed)}));`);
+      c.line("expect(malformed.status).toBe(404);");
     }
   }, ");");
   if (!uc) return;
@@ -182,24 +192,29 @@ function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
     c.line(`const ${repo} = new InMemory${ag.name}Repository();`);
     connectLine(c, "api, queryClient, statuses", key, [`repositories: { ${repo} }`]);
     const id = sample?.[ag.identity];
-    if (sample && typeof id === "string") {
+    const kind = idKind(L, ag);
+    if (sample && (typeof id === "string" || typeof id === "number")) {
       imp.value(L.contextTesting, "jsonOf");
       c.line(`const stored = ${build(L, ag.name, "aggregate", sample, imp)};`);
       c.line(`${repo}.seed(stored);`);
-      c.line(`const options = ${Q}.detail(api, ${tsString(id.toUpperCase())});`);
+      c.line(`const options = ${Q}.detail(api, ${kind === "uuid" ? tsString(String(id).toUpperCase()) : idLiteral(kind, id)});`);
       imp.value(queries, K);
-      c.line(`expect([...options.queryKey]).toEqual([...${K}.details(), ${tsString(id.toLowerCase())}]);`);
+      c.line(`expect([...options.queryKey]).toEqual([...${K}.details(), ${idLiteral(kind, id, true)}]);`);
       c.line(`expect(${K}.details().slice(0, ${K}.all.length)).toEqual([...${K}.all]);`);
       c.line("const data = await queryClient.query(options);");
       c.line("expect(statuses).toEqual([200]);");
       c.line("expect(jsonOf(data)).toEqual(jsonOf(stored));");
       c.line('expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");');
     }
-    c.line(`const missing = ${Q}.detail(api, ${tsString(OTHER_ID)});`);
-    c.line("const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);");
-    c.line(`expect(error.details).toMatchObject({ aggregate: ${tsString(ag.name)} });`);
-    c.line("expect(statuses.at(-1)).toBe(404);");
-    c.line("expect(queryClient.getQueryState(missing.queryKey)?.error).toBe(error);");
+    // An unknown id that still passes the identity's schema (a constrained String / Integer id may reject any guess).
+    const constrained = Object.keys(ag.fields.find((f) => f.name === ag.identity)?.constraints ?? {}).length > 0;
+    if (kind === "uuid" || !constrained) {
+      c.line(`const missing = ${Q}.detail(api, ${otherId(kind)});`);
+      c.line("const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);");
+      c.line(`expect(error.details).toMatchObject({ aggregate: ${tsString(ag.name)} });`);
+      c.line("expect(statuses.at(-1)).toBe(404);");
+      c.line("expect(queryClient.getQueryState(missing.queryKey)?.error).toBe(error);");
+    }
   }, ");");
 }
 
@@ -235,30 +250,35 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
     for (const a of sc.given.aggregates) {
       const ag = L.aggregate(a.type)!;
       const id = a.fields[ag.identity];
-      if (typeof id !== "string" || fetched.has(`${ag.name}:${id.toLowerCase()}`)) continue;
-      fetched.add(`${ag.name}:${id.toLowerCase()}`);
+      if (typeof id !== "string" && typeof id !== "number") continue;
+      const canonical = idKind(L, ag) === "uuid" ? String(id).toLowerCase() : String(id);
+      if (fetched.has(`${ag.name}:${canonical}`)) continue;
+      fetched.add(`${ag.name}:${canonical}`);
       imp.value(queries, queriesName(ag.name));
-      c.line(`await queryClient.query(${queriesName(ag.name)}.detail(api, ${tsString(id)}));`);
+      c.line(`await queryClient.query(${queriesName(ag.name)}.detail(api, ${idLiteral(idKind(L, ag), id)}));`);
     }
     const touched = [...new Set([...keys.map((k) => k.split(".")[0]!), ...sc.given.aggregates.map((a) => keysName(a.type))])];
     for (const ag of L.ca.ir.aggregates) {
       const K = keysName(ag.name);
       if (!touched.includes(K)) continue;
+      const kind = idKind(L, ag);
       imp.value(queries, K);
       c.line(`queryClient.setQueryData([...${K}.lists(), "probe"], []);`);
-      c.line(`queryClient.setQueryData(${K}.detail(${tsString(OTHER_ID)}), null);`);
+      c.line(`queryClient.setQueryData(${K}.detail(${otherId(kind)}), null);`);
       const ok = !then.raises;
       const has = (k: string) => ok && keys.includes(`${K}.${k}`);
       probes.push({ expr: `[...${K}.lists(), "probe"]`, label: `${K}.lists()`, invalidated: has("lists()") });
-      probes.push({ expr: `${K}.detail(${tsString(OTHER_ID)})`, label: "other", invalidated: has("details()") });
+      probes.push({ expr: `${K}.detail(${otherId(kind)})`, label: "other", invalidated: has("details()") });
       for (const f of fetched) {
         const [name, id] = f.split(":") as [string, string];
         if (name !== ag.name) continue;
         const byInput = keys.find((k) => k.startsWith(`${K}.detail(input.`));
         const field = byInput ? /input\.(\w+)/.exec(byInput)![1]! : undefined;
         const inputField = field ? uc.input.find((x) => prop(x.name) === field) : undefined;
-        const hit = inputField && typeof input[inputField.name] === "string" && String(input[inputField.name]).toLowerCase() === id;
-        probes.push({ expr: `${K}.detail(${tsString(id)})`, label: id, invalidated: ok && (has("details()") || !!hit) });
+        const value = inputField ? input[inputField.name] : undefined;
+        const given = kind === "uuid" ? String(value).toLowerCase() : String(value);
+        const hit = value !== undefined && value !== null && given === id;
+        probes.push({ expr: `${K}.detail(${idLiteral(kind, id)})`, label: id, invalidated: ok && (has("details()") || hit) });
       }
     }
     const status = (code: string) => useCaseErrors(L, uc).get(code) ?? 422;
@@ -282,11 +302,11 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
       imp.value(L.contextTesting, "jsonOf", "expectPresent");
       then.state.forEach((s, i) => {
         const ag = L.aggregate(s.aggregate)!;
-        if (typeof s.id !== "string") return;
+        if (typeof s.id !== "string" && typeof s.id !== "number") return;
         imp.value(queries, queriesName(ag.name));
         if (!i) c.comment("A refetch shows the stored state.");
         const stored = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
-        c.line(`const after${i} = await queryClient.query(${queriesName(ag.name)}.detail(api, ${tsString(s.id)}));`);
+        c.line(`const after${i} = await queryClient.query(${queriesName(ag.name)}.detail(api, ${idLiteral(idKind(L, ag), s.id)}));`);
         c.line(`expect(jsonOf(after${i})).toEqual(jsonOf(expectPresent(${repoName(ag.name)}.get(${stored}))));`);
       });
     }

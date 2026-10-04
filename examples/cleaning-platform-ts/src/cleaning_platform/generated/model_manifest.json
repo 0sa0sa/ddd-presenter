@@ -11,7 +11,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/cleaning-staff/contract.ts",
-      "sha256": "d0cf87a62962fee7660e4ad69f562c58e770c6277f3e699eccadb0da75a7930a"
+      "sha256": "ded0a708d5fa5f6ead509e3f20dec2cdafb468204d12d0b1e0064aef7da69b8f"
     },
     {
       "path": "src/cleaning_platform/generated/api/cleaning-staff/hooks.ts",
@@ -39,7 +39,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/runtime.ts",
-      "sha256": "6f9a822a48451d9b2a626e42eedb3331d403d9d156c690f07ba50e50107666f1"
+      "sha256": "35a411a18b5c25dc61a4d8d1bdeee5ad0e676e2e17fc31866e79a2a802162821"
     },
     {
       "path": "src/cleaning_platform/generated/api/server.ts",
@@ -47,7 +47,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/staffing/contract.ts",
-      "sha256": "437d8826f375d5615aeb4efd5f59929b1a040e6c72f3d21453d72de7a69750c5"
+      "sha256": "bd4dd0344c55004ccb2df9becb1ca8c8266713a496875e3eea931d1e1455823e"
     },
     {
       "path": "src/cleaning_platform/generated/api/staffing/hooks.ts",
@@ -183,7 +183,7 @@
     },
     {
       "path": "tests/generated/cleaning-staff-api.test.ts",
-      "sha256": "f1086de950109ad56ef7b22f2bd2b3d054aa45c229a1a58a4272d4f7d29d3dc6"
+      "sha256": "4c56ad35fe1fbdf0b4d6329e97bfed78ef6f552ce166fd7073857a870a9fa500"
     },
     {
       "path": "tests/generated/cleaning-staff-cleaning-staff-invitation.test.ts",
@@ -203,7 +203,7 @@
     },
     {
       "path": "tests/generated/staffing-api.test.ts",
-      "sha256": "0ecab9e226bd9a133444e49ff08e3b88dc0009eb4d6e11b7e36ddf66270b43ff"
+      "sha256": "bd8855284f00dbb6c7686a1a5eb4927e9dd71266c6820cd6d0e3f72a7d02ae84"
     },
     {
       "path": "tests/generated/staffing-policies.test.ts",

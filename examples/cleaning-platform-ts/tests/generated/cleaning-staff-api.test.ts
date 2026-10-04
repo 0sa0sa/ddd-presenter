@@ -98,6 +98,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     );
     expect(invalid.status).toBe(400);
     expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });
+    // Malformed percent-encoding matches no endpoint (the handler never throws).
+    const malformed = await served.handler(
+      new Request("http://localhost/api/cleaning-staff/cleaning-staff-invitation/%E0%A4%A"),
+    );
+    expect(malformed.status).toBe(404);
   });
 
   /**

@@ -225,6 +225,7 @@ tests/generated/<context>-api.test.ts
 | Aggregate ごとに `GET <base>/<context>/<aggregate>/:id` | 識別子のスキーマ（`idSchema("X")`） | Aggregate の JSON 形（`XJson`） | `constraint_violation: 400`, `aggregate_not_found: 404` |
 
 - **JSON 形**: Aggregate を `JSON.stringify` したもの（公開フィールドだけ。Instant・LocalDate・ID は文字列、Decimal は文字列、Value Object はオブジェクト、Entity はフィールドのオブジェクト）。クライアントは `XJson`（Entity は `<Entity>Json`）で検証する。振る舞いを持たない読み取り用の形で、Invariant は評価しない（サーバーで保存できた状態だけが届く）。`z.object` なので未知のキーは捨てる（サーバーがフィールドを足しても古いクライアントが壊れない）。
+- **識別子**: Aggregate の識別子は UUID・String・Integer（core の検証）。GET の `id` は識別子のスキーマ（制約付き）で検証する。不正な percent-encoding のパスはどのエンドポイントにも一致しない（404。ハンドラは例外を投げない）。
 - **Use case の戻り値**: ドメインのスキーマで検証する（UUID は `uuidSchema`、Decimal は `decimalSchema()` で `Decimal` に戻る）。戻り値が Aggregate / Entity なら JSON 形。
 - **エラーの一覧**（`errors`）は生成器がモデルから求める: `constraint_violation` 400、load の `not_found`（なければ `aggregate_not_found`）404、invoke する操作・create するファクトリの `require` のガードのエラー 409、`fail` のエラー・変更する Aggregate（と Entity）の Invariant・入力の Value Object の Invariant 422。同じコードは先に決まったステータスを使う。一覧にないコードは 422。クライアントの復元は一覧に依存しない（コンテキストの全エラーを code で引く）。
 
@@ -256,7 +257,7 @@ tests/generated/<context>-api.test.ts
 
 #### TanStack Query（`<context>/queries.ts`・`hooks.ts`）
 
-- **クエリキー**: Aggregate ごとに `<aggregate>Keys = { all: ["<context>", "<aggregate>"], lists(), details(), detail(id) }`（kebab-case の文字列、汎用 → 具体の配列）。`detail(id)` は ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞。
+- **クエリキー**: Aggregate ごとに `<aggregate>Keys = { all: ["<context>", "<aggregate>"], lists(), details(), detail(id) }`（kebab-case の文字列、汎用 → 具体の配列）。`detail(id)` は UUID の ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。String の識別子はそのまま、Integer の識別子は `number`（キーも引数も数値。パスの `:id` は数字の並びだけ数値として読む。契約の `idType: "number"`）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞。
 - **query options**: `<aggregate>Queries.detail(api, id)`（`queryOptions`。`queryFn` は TanStack Query の `signal` を fetch に渡す。useQuery・useSuspenseQuery・`queryClient.query`・prefetch で使える）と `detailOrSkip(api, id | undefined)`（id が undefined の間は `skipToken` で無効。useSuspenseQuery には使わない）。`onSuccess` などのクエリのコールバックや `select`・`staleTime` は付けない（アプリの方針。`QueryClient` の `defaultOptions` か呼び出し側で `{ ...options, select }`）。
 - **mutation options**: `<context>Mutations.<useCase>(api)`（`mutationOptions`、`mutationKey: ["<context>", "<use-case>"]`、`mutationFn` は API クライアント）。成功時の `onSuccess` が無効化の Promise を返すので、ミューテーションは active なクエリの再取得が終わるまで pending のまま。
 - **無効化の規則**（モデルから決める。保存しない Aggregate は対象外）:

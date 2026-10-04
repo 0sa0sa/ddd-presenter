@@ -49,6 +49,27 @@ export function jsonName(name: string): string {
   return `${name}Json`;
 }
 
+/** Kind of an aggregate's identity (core allows UUID, String or Integer). */
+export type IdKind = "uuid" | "string" | "integer";
+
+export function idKind(L: TsLayout, ag: AggregateIR): IdKind {
+  const t = L.tsFieldType(ag.name, ag.identity);
+  if (t?.k === "primitive" && t.name === "Integer") return "integer";
+  if (t?.k === "primitive" && t.name === "String") return "string";
+  return "uuid";
+}
+
+/** TypeScript type of an id parameter of the key factory / query options. */
+export function idParam(kind: IdKind): string {
+  return kind === "integer" ? "number" : "string";
+}
+
+/** An id value of `kind` as a code literal (a UUID in the canonical lower case when `canonical`). */
+export function idLiteral(kind: IdKind, v: unknown, canonical = false): string {
+  if (kind === "integer") return String(Number(v));
+  return tsString(canonical && kind === "uuid" ? String(v).toLowerCase() : String(v));
+}
+
 export function useCasePath(api: ApiSettings, L: TsLayout, uc: UseCaseIR): string {
   return `${api.basePath}/${kebab(L.ca.ir.name)}/${kebab(uc.name)}`;
 }
@@ -281,7 +302,8 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
           c.line(`name: ${tsString(ag.name)},`);
           c.line('method: "GET",');
           c.line(`path: ${tsString(readPath(api, L, ag))},`);
-          c.line(`id: ${zodSchema(L.tsFieldType(ag.name, ag.identity)!, imp, L)},`);
+          c.line(`id: ${zodSchema(L.tsFieldType(ag.name, ag.identity)!, imp, L, ag.fields.find((f) => f.name === ag.identity)?.constraints ?? {})},`);
+          c.line(`idType: ${idKind(L, ag) === "integer" ? '"number"' : '"string"'},`);
           c.line(`output: ${jsonName(ag.name)},`);
           c.line("errors: { constraint_violation: 400, aggregate_not_found: 404 },");
         }, "),");
@@ -455,23 +477,25 @@ export function queriesFile(L: TsLayout): TsFile {
     imp.type(L.apiModule("client"), "ApiClient");
     const K = keysName(ag.name);
     const Q = queriesName(ag.name);
+    const kind = idKind(L, ag);
+    const T = idParam(kind);
     const call = `api.${key}.aggregates.${prop(toSnake(ag.name))}(id, { signal })`;
     c.line();
     c.doc(
-      `Query keys of ${ag.name}, from generic to specific: invalidate \`all\` for everything, \`lists()\` for every list, \`detail(id)\` for one. Ids are lower-cased like the schema stores them.`,
+      `Query keys of ${ag.name}, from generic to specific: invalidate \`all\` for everything, \`lists()\` for every list, \`detail(id)\` for one.${kind === "uuid" ? " Ids are lower-cased like the schema stores them." : ""}`,
     );
     c.block(`export const ${K} =`, () => {
       c.line(`all: [${tsString(ctxKebab)}, ${tsString(kebab(ag.name))}] as const,`);
       c.comment("Prefix of the list queries you add yourself (the model declares no queries yet).");
       c.line(`lists: () => [...${K}.all, "list"] as const,`);
       c.line(`details: () => [...${K}.all, "detail"] as const,`);
-      c.line(`detail: (id: string | undefined) => [...${K}.details(), id?.toLowerCase()] as const,`);
+      c.line(`detail: (id: ${T} | undefined) => [...${K}.details(), ${kind === "uuid" ? "id?.toLowerCase()" : "id"}] as const,`);
     }, ";");
     c.line();
     c.doc(`Query options of ${ag.name}: key and fetcher together, for useQuery, useSuspenseQuery, queryClient.query and prefetching.`);
     c.block(`export const ${Q} =`, () => {
       c.doc(`The ${ag.name} with this ${ag.identity}, validated with its JSON schema (\`GET ${readPath(L.model.generation.typescript.api!, L, ag)}\`).`);
-      c.line("detail: (api: ApiClient, id: string) =>");
+      c.line(`detail: (api: ApiClient, id: ${T}) =>`);
       c.indent(() => {
         c.block("queryOptions(", () => {
           c.line(`queryKey: ${K}.detail(id),`);
@@ -479,7 +503,7 @@ export function queriesFile(L: TsLayout): TsFile {
         }, "),");
       });
       c.doc("Like `detail`, but disabled (skipToken) while the id is undefined. Not for useSuspenseQuery.");
-      c.line("detailOrSkip: (api: ApiClient, id: string | undefined) =>");
+      c.line(`detailOrSkip: (api: ApiClient, id: ${T} | undefined) =>`);
       c.indent(() => {
         c.block("queryOptions(", () => {
           c.line(`queryKey: ${K}.detail(id),`);
@@ -540,7 +564,7 @@ export function hooksFile(L: TsLayout): TsFile {
     imp.value(queries, queriesName(ag.name));
     c.line();
     c.doc(`The ${ag.name} with this ${ag.identity} (\`useQuery\`); disabled while the id is undefined. Check \`data\` before \`error\`: a failed background refetch keeps the last data.`);
-    c.block(`export function use${ag.name}(id: string | undefined)`, () => {
+    c.block(`export function use${ag.name}(id: ${idParam(idKind(L, ag))} | undefined)`, () => {
       c.line(`return useQuery(${queriesName(ag.name)}.detailOrSkip(useApiClient(), id));`);
     });
   }

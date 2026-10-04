@@ -336,7 +336,7 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 | クエリキーは配列で、汎用 → 具体の階層にし、キーのファクトリを1か所にまとめる | [Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys) | `<aggregate>Keys = { all, lists(), details(), detail(id) }`（`as const`）。`all` はコンテキストと Aggregate の2段（`["cleaning-staff", "cleaning-staff-invitation"]`）なので、別のコンテキストに同名の Aggregate があっても衝突しない。どの接頭辞でも無効化できる |
 | キーはクエリ関数と同じ場所に置く（feature ごと） | [Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys) | キー・queryOptions・mutationOptions をコンテキストごとの `api/<context>/queries.ts` に置く |
 | キーとクエリ関数を `queryOptions` でひとまとめにし、それを主な抽象にする | [The Query Options API](https://tkdodo.eu/blog/the-query-options-api) | `<aggregate>Queries.detail(api, id)` が `queryOptions({ queryKey, queryFn })` を返す。useQuery・useSuspenseQuery・`queryClient.query`・prefetch・`getQueryData`（DataTag で型が付く）で同じものを使う |
-| queryFn が使う変数はすべてキーに入れる | [Practical React Query](https://tkdodo.eu/blog/practical-react-query) | キーとクエリ関数を同じ引数（id）から同じ式で作る。キーの id はスキーマと同じく小文字にする（大文字の id とミューテーションの入力が同じキャッシュを指す） |
+| queryFn が使う変数はすべてキーに入れる | [Practical React Query](https://tkdodo.eu/blog/practical-react-query) | キーとクエリ関数を同じ引数（id）から同じ式で作る。UUID の id はスキーマと同じく小文字にする（大文字の id とミューテーションの入力が同じキャッシュを指す）。String の識別子は大文字小文字を区別するのでそのまま、Integer は数値のまま |
 | QueryFunctionContext の `signal` を fetch に渡す | [Leveraging the Query Function Context](https://tkdodo.eu/blog/leveraging-the-query-function-context) | `queryFn: ({ signal }) => api.<ctx>.aggregates.<agg>(id, { signal })`。クライアントは中断をそのまま投げ直す（TanStack Query がキャンセルとして扱う） |
 | ジェネリクスを手で渡さず、fetcher の戻り値の型から推論させる | [React Query and TypeScript](https://tkdodo.eu/blog/react-query-and-type-script) | 生成コードに `useQuery<T>` はない。クライアントの戻り値は契約の出力スキーマの `z.output` |
 | 実行時に Zod で検証し、契約違反をクエリのエラーにする | [Type-safe React Query](https://tkdodo.eu/blog/type-safe-react-query) | クライアントはレスポンスを出力スキーマ（GET は Aggregate の JSON 形 `XJson`）で `safeParse` し、合わなければ `ApiError("invalid_response")` で reject する。入力も送る前にコマンドのスキーマで検証する |
@@ -376,6 +376,7 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 - **公開範囲**: ハンドラは渡された Use case / リポジトリだけを公開する（省略は 404）。ポリシーが動かすシステム用の Use case を誤って公開しないため。認証・認可は生成しない（ホストのミドルウェアの責務）。
 - **依存の版**: `@tanstack/react-query` は `^5.102.0`（`mutationOptions` 5.82、`context.client` 5.89、`queryClient.query` 5.102）。新しいプロジェクトの scaffold だけに入れ、既存の `package.json` は顧客所有なので手で足す（docs/05 §8 の移行メモ）。非公開のアプリのパッケージなので `react` も dependencies に入れた（ライブラリとして配布するなら peerDependencies に移す）。
 - **整形器（format.ts）**: アロー関数の引数の空白を保つようにした（`({ signal })`、`(id: string | undefined)` が `({signal})` / `string|undefined` に詰められていた）。既存の出力は変わらない（golden で確認）。長い `Pick<…>` と `connect({ … })` は Prettier の折り返しを生成側で書く。
+- **実行テストの落とし穴**: bun の `test.each` は、行の値より宣言した引数が多いと最後の引数を `done` コールバックとみなし、呼ばれるまで待つ（300秒でタイムアウト）。実行テストの表は全行に3つ目の値（API を有効にするか）を書く。
 - **生成テスト**（`tests/generated/<context>-api.test.ts`）: クライアントの `fetch` を生成したハンドラにつなぎ、インメモリのテストダブルで通しで動かす。キー、検証済みのデータ、404 / 409 / 422 の Domain Error のクラスとステータス、ミューテーションがちょうど規則どおりのキーを無効化し、ほかを無効化しないこと（`getQueryState(key)?.isInvalidated`。observer がないクエリは inactive なので、再取得せずに印だけ付く）を確かめる。vitest と bun test のどちらでも型が通るように、スパイや runner 固有の API を使わない。生成器の実行テストは sample・context-map・ordering のモデルで API を有効にし、tsc・テスト・Prettier・typescript-eslint（strict-type-checked）を通す。
 
 ### 制限
