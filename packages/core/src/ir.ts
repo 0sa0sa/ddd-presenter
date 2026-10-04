@@ -20,6 +20,16 @@ export const GENERATION_TARGETS = ["python", "typescript"] as const;
 export type GenerationTarget = (typeof GENERATION_TARGETS)[number];
 export const TEST_RUNNERS = ["vitest", "bun"] as const;
 export type TestRunner = (typeof TEST_RUNNERS)[number];
+export const API_CLIENTS = ["tanstack-query"] as const;
+export type ApiClientKind = (typeof API_CLIENTS)[number];
+
+/** HTTP API (contract, server handler, client) generated for the TypeScript target (`generation.typescript.api`). */
+export interface ApiSettings {
+  /** Path prefix of every endpoint, e.g. `/api` (starts with `/`, no trailing `/`; `""` for none). */
+  basePath: string;
+  /** Client library the generated client code targets. */
+  client: ApiClientKind;
+}
 
 export interface GenerationSettings {
   package: string;
@@ -28,7 +38,7 @@ export interface GenerationSettings {
   /** Language of the generated code (`generation.target`, default python). */
   target: GenerationTarget;
   /** Settings of the TypeScript target (`generation.typescript`). */
-  typescript: { testRunner: TestRunner };
+  typescript: { testRunner: TestRunner; api?: ApiSettings };
 }
 
 interface Located {

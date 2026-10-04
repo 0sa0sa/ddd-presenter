@@ -32,6 +32,17 @@ describe("published JSON Schema", () => {
     expect(validate(parse(ts.replace("test_runner: vitest", "test_runner: jest")))).toBe(false);
   });
 
+  test("generation.typescript.api: base_path and client are checked like the built-in parser", () => {
+    const ts = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform-ts/model.ddd.yaml"), "utf8");
+    const withApi = (api: string) => ts.replace(/^ {4}api:.*\n/m, "").replace(/^ {4}test_runner: vitest.*$/m, `    test_runner: vitest\n    api: ${api}`);
+    for (const ok of ["{ base_path: /api, client: tanstack-query }", "{ base_path: /api/v1 }", '{ base_path: "" }', "{}"]) {
+      expect(validate(parse(withApi(ok)))).toBe(true);
+    }
+    for (const bad of ["{ base_path: /api/ }", "{ base_path: api }", "{ client: swr }", "{ basepath: /api }"]) {
+      expect(validate(parse(withApi(bad)))).toBe(false);
+    }
+  });
+
   test("rejects unknown keys and bad names like the built-in parser", () => {
     expect(validate(parse(SAMPLE.replace("    enums:", "    enumz:")))).toBe(false);
     expect(validate(parse(SAMPLE.replace("name: CleaningStaffInvitation", "name: cleaning_staff_invitation")))).toBe(false);

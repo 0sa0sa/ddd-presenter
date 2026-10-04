@@ -26,7 +26,20 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "test_runner": { "description": "Runner the generated tests import from (default vitest).", "enum": ["vitest", "bun"] }
+            "test_runner": { "description": "Runner the generated tests import from (default vitest).", "enum": ["vitest", "bun"] },
+            "api": {
+              "description": "Generate an HTTP API: a contract, a Web-standard server handler and a typed client (opt-in).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "base_path": {
+                  "description": "Path prefix of every endpoint (default /api; \"\" for none).",
+                  "type": "string",
+                  "pattern": "^(/[A-Za-z0-9._~-]+)*$"
+                },
+                "client": { "description": "Client library of the generated client code (default tanstack-query).", "enum": ["tanstack-query"] }
+              }
+            }
           }
         }
       }

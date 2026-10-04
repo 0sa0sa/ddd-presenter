@@ -71,6 +71,7 @@ type Container =
   | "root"
   | "generation"
   | "generation:typescript"
+  | "generation:typescript:api"
   | "context"
   | "glossary"
   | "error"
@@ -128,6 +129,7 @@ type Container =
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   root: { generation: "generation", contexts: "context", relationships: "relationship" },
   generation: { typescript: "generation:typescript" },
+  "generation:typescript": { api: "generation:typescript:api" },
   context: {
     glossary: "glossary",
     errors: "error",
@@ -204,9 +206,16 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("src_dir", "ソースの出力先（既定 src）"),
     K("tests_dir", "テストの出力先（既定 tests）"),
     K("target", "生成する言語: python（既定, Pydantic v2）/ typescript（Zod v4）"),
-    K("typescript", "TypeScript の生成設定（test_runner）"),
+    K("typescript", "TypeScript の生成設定（test_runner・api）"),
   ],
-  "generation:typescript": [K("test_runner", "生成テストのランナー: vitest（既定）/ bun")],
+  "generation:typescript": [
+    K("test_runner", "生成テストのランナー: vitest（既定）/ bun"),
+    K("api", "HTTP API を生成する（オプトイン）: 契約・サーバーのハンドラ（Web 標準の Request → Response）・TanStack Query のクライアント"),
+  ],
+  "generation:typescript:api": [
+    K("base_path", "全エンドポイントのパスの接頭辞（既定 /api。/ で始め、末尾に / を付けない。なしは \"\"）"),
+    K("client", "クライアントのライブラリ: tanstack-query（既定・唯一。@tanstack/react-query v5）"),
+  ],
   context: [
     K("name", "コンテキスト名（PascalCase）"),
     K("description", "責務の説明"),
@@ -766,6 +775,8 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
       { label: "vitest", kind: "value" as const, detail: "既定。生成テストは vitest から import する", sortRank: 0 },
       { label: "bun", kind: "value" as const, detail: "生成テストは bun:test から import する", sortRank: 1 },
     ];
+  if (c === "generation:typescript:api" && key === "client")
+    return [{ label: "tanstack-query", kind: "value" as const, detail: "既定。@tanstack/react-query v5 の queryOptions / mutationOptions とフック", sortRank: 0 }];
   if (c === "context" && key === "subdomain")
     return [
       { label: "core", kind: "value" as const, detail: "コア: 競争力の源。いちばん力を入れて作り込む", sortRank: 0 },

@@ -28,7 +28,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
-import { GENERATION_TARGETS, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
+import { API_CLIENTS, GENERATION_TARGETS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -717,6 +717,26 @@ function readPolicy(r: Reader, value: unknown, path: Path): PolicyIR | undefined
   return { name, description: r.str(o, "description", path, false), when, run, args: r.exprMap(o, "args", path), path };
 }
 
+/** `generation.typescript.api`: `{ base_path, client }`; absent → no HTTP API is generated. */
+function readApiSettings(r: Reader, bag: DiagnosticBag, value: unknown): ApiSettings | undefined {
+  if (value === undefined || value === null) return undefined;
+  const path = ["generation", "typescript", "api"];
+  const o = r.obj(value, path, "generation.typescript.api");
+  if (!o) return undefined;
+  r.keys(o, ["base_path", "client"], path, "generation.typescript.api");
+  const basePath = r.str(o, "base_path", path, false) ?? "/api";
+  if (!/^(\/[A-Za-z0-9._~-]+)*$/.test(basePath)) {
+    bag.error("invalid-value", `Invalid API base path "${basePath}"`, [...path, "base_path"], {
+      hint: 'Write a path starting with "/" without a trailing "/" (e.g. /api or /api/v1), or "" for none',
+    });
+  }
+  const client = r.str(o, "client", path, false) ?? "tanstack-query";
+  if (!(API_CLIENTS as readonly string[]).includes(client)) {
+    bag.error("invalid-value", `Unknown API client "${client}"`, [...path, "client"], { hint: `Use one of ${API_CLIENTS.join(", ")} (default tanstack-query)` });
+  }
+  return { basePath, client: "tanstack-query" };
+}
+
 function readRelationship(r: Reader, value: unknown, path: Path): RelationshipIR | undefined {
   const o = r.obj(value, path, "relationship");
   if (!o) return undefined;
@@ -889,11 +909,12 @@ export function parseModel(text: string): ParseResult {
       bag.error("invalid-value", `Unknown generation target "${target}"`, ["generation", "target"], { hint: `Use one of ${GENERATION_TARGETS.join(", ")} (default python)` });
     }
     const ts = gen.typescript === undefined ? {} : r.obj(gen.typescript, ["generation", "typescript"], "generation.typescript") ?? {};
-    r.keys(ts, ["test_runner"], ["generation", "typescript"], "generation.typescript");
+    r.keys(ts, ["test_runner", "api"], ["generation", "typescript"], "generation.typescript");
     const testRunner = r.str(ts, "test_runner", ["generation", "typescript"], false) ?? "vitest";
     if (!(TEST_RUNNERS as readonly string[]).includes(testRunner)) {
       bag.error("invalid-value", `Unknown test runner "${testRunner}"`, ["generation", "typescript", "test_runner"], { hint: `Use one of ${TEST_RUNNERS.join(", ")} (default vitest)` });
     }
+    const api = readApiSettings(r, bag, ts.api);
     model = {
       schemaVersion: typeof version === "number" ? version : SCHEMA_VERSION,
       project,
@@ -903,7 +924,7 @@ export function parseModel(text: string): ParseResult {
         srcDir: r.str(gen, "src_dir", ["generation"], false) ?? "src",
         testsDir: r.str(gen, "tests_dir", ["generation"], false) ?? "tests",
         target: target === "typescript" ? "typescript" : "python",
-        typescript: { testRunner: testRunner === "bun" ? "bun" : "vitest" },
+        typescript: { testRunner: testRunner === "bun" ? "bun" : "vitest", ...(api ? { api } : {}) },
       },
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
       relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),
