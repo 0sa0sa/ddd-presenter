@@ -14,6 +14,7 @@ generation:
   target: python                    # python（既定）| typescript（§1.1）
   typescript:                       # target: typescript のときの設定
     test_runner: vitest             # vitest（既定）| bun
+    api: { base_path: /api }        # 任意。HTTP API と TanStack Query のクライアントを生成する（§1.2）
 contexts:
   - name: CleaningStaff             # Bounded context（PascalCase）
     description: ...
@@ -58,6 +59,31 @@ TypeScript のとき、生成物は `src/<package>/generated/` に、初回だ�
 フィールド・引数・操作の名前は camelCase になる（`accepted_at` → `acceptedAt`。`_` の後が数字なら `_` を残す）。Rule・エラーの `code`・`details.rule` はモデルの名前のまま。TypeScript のときだけ、生成コードが同じ名前で使う型名（`Map` `Promise` `Error` `Record` などの JavaScript の組み込み、`Id` `Instant` `LocalDate` `Entity` などのランタイム、`OrderInput` `EmailAddressSchema` `OrderingEvent` などの生成物）をモデルの型名にするとエラー `reserved-name` になる。フィールド名 `constructor` も使えない。`Omit` `ErrorOptions` と、イベントのスキーマ（`<Event>Schema`、`<Context>EventSchema`）と同じ名前の型、`type` という名前のイベントフィールド（イベントの種類 `"<Context>.<Event>"` を入れるため）も同じエラーになる。
 
 命名: 型（Context / Aggregate / Entity / Value Object / Enum / Error / Event / Command）は PascalCase、それ以外（フィールド・ルール・操作・Use case・シナリオ・ポリシー）は snake_case。Pythonの予約語、`model_` で始まる名前、生成器が使う名前（`identity`, `events` など）は使えない。イベントのフィールド名 `event_type`（生成するイベントが必ず持つタグ）と型名 `AnyEvent`（コンテキストのイベントの共用体）も予約されている。
+
+### 1.2 HTTP API と TanStack Query のクライアント（`generation.typescript.api`）
+
+TypeScript target だけのオプトイン。書かなければ何も変わらない（生成物はバイト単位で同じ）。Python target では無視する。
+
+```yaml
+generation:
+  target: typescript
+  typescript:
+    api:
+      base_path: /api               # 既定 /api。/ で始め、末尾に / を付けない（/api/v1 など）。接頭辞なしは ""
+      client: tanstack-query        # 既定・唯一の値（@tanstack/react-query v5.102 以上）
+```
+
+| キー | 値 | 検査 |
+|---|---|---|
+| `base_path` | `/` で始まり末尾に `/` のないパス（`/api`, `/api/v1`）か `""` | 形が違えば `invalid-value` |
+| `client` | `tanstack-query` | ほかの値は `invalid-value` |
+
+生成するもの（詳細と規約は docs/05 §8、設計の理由は docs/09 §18）:
+
+- `src/<package>/generated/api/`: `contract.ts`（全エンドポイント）、`server.ts`（`createApiHandler`、Web 標準の `Request` → `Response`）、`client.ts`（`createApiClient`）、`runtime.ts`（モデルに依存しない部分）、`react.ts`（`ApiClientContext` / `useApiClient`）、`register.ts`（TanStack Query の `Register` に error の型を登録）、コンテキストごとの `<context>/{contract,queries,hooks}.ts`。
+- エンドポイント: Use case ごとに `POST <base_path>/<context>/<use-case>`（入力はコマンドのスキーマ、出力は Use case の戻り値。戻り値がなければ 204）、Aggregate ごとに `GET <base_path>/<context>/<aggregate>/:id`（Aggregate の JSON 形）。パスの名前は kebab-case（`/api/cleaning-staff/accept-invitation`）。
+- テスト `tests/generated/<context>-api.test.ts`（ネットワークも DOM も使わず、クライアントの `fetch` を生成したハンドラにつなぐ）。
+- 依存: 新しく作る `package.json` には `@tanstack/react-query`・`react`（dependencies）と `@types/react`（devDependencies）が入る。既存のプロジェクトの `package.json` は顧客所有なので書き換えない。手で足す（docs/05 §8 の移行メモ）。
 
 ## 2. 型
 

@@ -322,3 +322,65 @@ export type Instant = z.output<typeof InstantSchema>;
 - **Date（DSL の `Date`）**: 以前から `LocalDate`（ISO の日付文字列のブランド型）。名前を揃えて `localDateSchema` → `LocalDateSchema`、`plusDays` / `minusDays` → `addDays` / `subtractDays` にした。範囲を超える計算は `ConstraintViolation`。
 - **生成テスト**: 期待値は正規化した文字列（`expect(String(stored0.expiresAt)).toBe("2026-01-08T10:00:00.000Z")`）。生成器が同じ規則で正規化できない値だけ実行時に `instant("…")` で作る。`FixedClock` は ISO 文字列を受け取る。Entity のフィールドを持たない Aggregate は、保存された状態が JSON から `X.from` で同じ JSON に戻ることを確かめる（`aggregateViaJson`）。Entity を持つ Aggregate は対象外（Entity のフィールドはインスタンスだけを受け付けるスキーマで、JSON から戻すには Entity のスキーマが入力のオブジェクトも受け付ける必要がある。今回は変えていない）。サンプルの `tests/custom/runtime-guarantees.test.ts` が正規化・範囲・順序・期間の計算・JSON 往復を確かめる。
 - **検証**: TypeScript target では `Instant`・`InstantSchema`・`LocalDateSchema` を型名に使えない（`reserved-name`。生成コードが runtime から import するため）。
+
+## 18. TanStack Query クライアントの生成（TkDodo のベストプラクティス, 2026-10-04）
+
+TypeScript target に、オプトインの HTTP API を足した（`generation.typescript.api: { base_path, client: tanstack-query }`。DSL は docs/10 §1.2、契約とエラーの対応・無効化の規則は docs/05 §8）。生成器はこれまで HTTP 層を出していなかったので、クライアントだけでは動かない。そこで、使える最小の一続きを生成する: フレームワーク非依存の契約（Zod）、Web 標準のサーバーハンドラ、型付きのクライアント、TanStack Query v5（`@tanstack/react-query`）の query / mutation options とフック、そしてそれらを DOM なしで通しで確かめるテスト。設定がなければ出力はバイト単位で以前と同じで、Python target は変えていない。
+
+クライアントの形は TanStack Query のメンテナー Dominik Dorfmeister（TkDodo）のブログと公式ドキュメント（v5.104.1 の型定義でも確認した）に合わせた。
+
+### 採用した規則
+
+| 規則 | 出典 | 生成コードでの適用 |
+|---|---|---|
+| クエリキーは配列で、汎用 → 具体の階層にし、キーのファクトリを1か所にまとめる | [Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys) | `<aggregate>Keys = { all, lists(), details(), detail(id) }`（`as const`）。`all` はコンテキストと Aggregate の2段（`["cleaning-staff", "cleaning-staff-invitation"]`）なので、別のコンテキストに同名の Aggregate があっても衝突しない。どの接頭辞でも無効化できる |
+| キーはクエリ関数と同じ場所に置く（feature ごと） | [Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys) | キー・queryOptions・mutationOptions をコンテキストごとの `api/<context>/queries.ts` に置く |
+| キーとクエリ関数を `queryOptions` でひとまとめにし、それを主な抽象にする | [The Query Options API](https://tkdodo.eu/blog/the-query-options-api) | `<aggregate>Queries.detail(api, id)` が `queryOptions({ queryKey, queryFn })` を返す。useQuery・useSuspenseQuery・`queryClient.query`・prefetch・`getQueryData`（DataTag で型が付く）で同じものを使う |
+| queryFn が使う変数はすべてキーに入れる | [Practical React Query](https://tkdodo.eu/blog/practical-react-query) | キーとクエリ関数を同じ引数（id）から同じ式で作る。キーの id はスキーマと同じく小文字にする（大文字の id とミューテーションの入力が同じキャッシュを指す） |
+| QueryFunctionContext の `signal` を fetch に渡す | [Leveraging the Query Function Context](https://tkdodo.eu/blog/leveraging-the-query-function-context) | `queryFn: ({ signal }) => api.<ctx>.aggregates.<agg>(id, { signal })`。クライアントは中断をそのまま投げ直す（TanStack Query がキャンセルとして扱う） |
+| ジェネリクスを手で渡さず、fetcher の戻り値の型から推論させる | [React Query and TypeScript](https://tkdodo.eu/blog/react-query-and-type-script) | 生成コードに `useQuery<T>` はない。クライアントの戻り値は契約の出力スキーマの `z.output` |
+| 実行時に Zod で検証し、契約違反をクエリのエラーにする | [Type-safe React Query](https://tkdodo.eu/blog/type-safe-react-query) | クライアントはレスポンスを出力スキーマ（GET は Aggregate の JSON 形 `XJson`）で `safeParse` し、合わなければ `ApiError("invalid_response")` で reject する。入力も送る前にコマンドのスキーマで検証する |
+| fetch は 4xx / 5xx で reject しないので、自分で投げる | [React Query Error Handling](https://tkdodo.eu/blog/react-query-error-handling) | エラーのレスポンスは `code` から生成した Domain Error のクラス（`InvitationNotFound` など）、それ以外は `ApiError(status, code)` にして reject する |
+| 既定のエラー型を `Register` で登録する | [TanStack Query: TypeScript（Registering a global Error）](https://tanstack.com/query/latest/docs/framework/react/typescript) | `api/register.ts` が `declare module "@tanstack/react-query" { interface Register { defaultError: DomainError \| ApiError } }`。import を持つモジュールなので、パッケージの型を置き換えずに拡張する |
+| `skipToken` で型安全に無効化する（`enabled` と `!` を使わない）。ただし useSuspenseQuery と `refetch()` では使えない | [TanStack Query: Disabling Queries](https://tanstack.com/query/latest/docs/framework/react/guides/disabling-queries) | `detail(api, id: string)`（suspense・loader 用、skipToken なし）と `detailOrSkip(api, id: string \| undefined)`（`id === undefined ? skipToken : …`）を分ける。フック `use<Aggregate>(id \| undefined)` は後者を使う |
+| 抽象化しすぎない。フックはロジックを足すときだけ価値があり、options を丸ごと転送する設定可能なフックを作らない | [Creating Query Abstractions](https://tkdodo.eu/blog/creating-query-abstractions)、[The Query Options API](https://tkdodo.eu/blog/the-query-options-api) | フックは1行（`useQuery(queries.detailOrSkip(useApiClient(), id))`）。調整は呼び出し側が `useQuery({ ...queries.detail(api, id), select })` と書く。TanStack の API を隠すラッパーは作らない |
+| ミューテーションの変数は1つのオブジェクト | [Mastering Mutations in React Query](https://tkdodo.eu/blog/mastering-mutations-in-react-query) | `mutationFn: (input: <Command>Input) => …`（フォームの値のままの入力型） |
+| `onSuccess` から無効化の Promise を返し、再取得が終わるまでミューテーションを pending にする | [Mastering Mutations in React Query](https://tkdodo.eu/blog/mastering-mutations-in-react-query)、[Invalidations from Mutations](https://tanstack.com/query/latest/docs/framework/react/guides/invalidations-from-mutations) | `onSuccess: (_data, input, _result, context) => context.client.invalidateQueries({ queryKey: … })`（複数なら `Promise.all`）。`context.client`（v5.89 以降）なので `useQueryClient` を引数に取らない |
+| 無効化は `useMutation`（options）のコールバックに、UI の反応は `mutate` のコールバックに書く（`mutate` 側はアンマウント後に呼ばれない） | [Mastering Mutations in React Query](https://tkdodo.eu/blog/mastering-mutations-in-react-query) | 無効化は `mutationOptions` の `onSuccess` に生成し、文書で `mutate(input, { onSuccess })` を案内する |
+| 何が変わったかに合わせて無効化する（取りこぼすより広めに） | [Automatic Query Invalidation after Mutations](https://tkdodo.eu/blog/automatic-query-invalidation-after-mutations) | モデルの手順から決める: load して save した Aggregate は `detail(input.<id>)` と `lists()`（`by` が計算値なら `details()`）、create して save した Aggregate は `lists()`。保存しない Use case は無効化しない |
+| `mutationKey` をファクトリで付ける | [TanStack Query: mutationOptions](https://tanstack.com/query/latest/docs/framework/react/reference/mutationOptions) | `mutationKey: ["<context>", "<use-case>"]`（`useMutationState` / `useIsMutating` で絞れる） |
+| v5 で消えたクエリのコールバック（`onSuccess` / `onError` / `onSettled`）を使わない | [Breaking React Query's API on purpose](https://tkdodo.eu/blog/breaking-react-querys-api-on-purpose) | queryOptions にはキーと queryFn だけ（生成器のテストで確かめる） |
+| サーバーの状態をローカルの状態に複製しない。`setQueryData` を状態管理に使わない | [Practical React Query](https://tkdodo.eu/blog/practical-react-query) | フックは結果をそのまま返す。ミューテーションの結果を `setQueryData` で書き込まない（Use case の戻り値は ID や真偽値で、検証済みの新しい状態ではない） |
+| 結果を rest 分割代入しない（追跡するプロパティが増えて再描画が増える） | [React Query Render Optimizations](https://tkdodo.eu/blog/react-query-render-optimizations) | フックは `useQuery(...)` / `useMutation(...)` の戻り値を加工せずに返す |
+| 状態の確認はデータを先に（`data` があれば表示し、背景の再取得の失敗で消さない） | [Status Checks in React Query](https://tkdodo.eu/blog/status-checks-in-react-query) | フックの JSDoc と README の例が `if (data) … if (error) …` の順。`isLoading` での分岐を勧めない |
+| loader・SSR・テストでも同じ options を使う | [Seeding the Query Cache](https://tkdodo.eu/blog/seeding-the-query-cache)、[TanStack Query: QueryClient](https://tanstack.com/query/latest/docs/reference/QueryClient) | 生成テストは `queryClient.query(<aggregate>Queries.detail(api, id))`。`fetchQuery` / `ensureQueryData` は 5.104 で非推奨（typescript-eslint の `no-deprecated` に当たる）なので使わない |
+| テストでは再試行を切る。コンポーネントなしで動かせる | [Testing React Query](https://tkdodo.eu/blog/testing-react-query) | 生成テストは `new QueryClient({ defaultOptions: { queries: { retry: false } } })` と `new MutationObserver(queryClient, options).mutate(input)` を使い、DOM を使わない |
+
+### 意図して採用しなかった規則
+
+| 規則 | 出典 | 理由 |
+|---|---|---|
+| 楽観的更新 | [Mastering Mutations in React Query](https://tkdodo.eu/blog/mastering-mutations-in-react-query)（多用しすぎと注意している） | 新しい状態はサーバーの Invariant とガードを通って初めて決まる。クライアントで推測すると、ドメインが拒否する状態を一瞬見せる。キーのファクトリがあるので、必要な画面だけ手で足せる |
+| `MutationCache` のグローバルな `onSuccess` で無効化する（`meta.invalidates` など） | [Automatic Query Invalidation after Mutations](https://tkdodo.eu/blog/automatic-query-invalidation-after-mutations) | 無効化するキーが変数に依存する（`detail(input.invitationId)`）ので、静的な `meta` では表せない。`QueryClient` はアプリのものなので、生成器がグローバルな方針を押し付けない。ミューテーションごとの `onSuccess` なら、モデルから求めた正確なキーを返して待てる。アプリが全体の無効化を足すのは自由（`mutationKey` で絞れる） |
+| 生成した options に `select`・`staleTime`・`gcTime`・`retry`・`throwOnError` を入れる | [Practical React Query](https://tkdodo.eu/blog/practical-react-query)、[React Query Error Handling](https://tkdodo.eu/blog/react-query-error-handling) | アプリの方針（`QueryClient` の `defaultOptions` か呼び出し側の spread）。`select` を焼き込むと DataTag と `getQueryData` の型が合わなくなる |
+| 一覧から詳細の `initialData` / `placeholderData` を作る | [Seeding the Query Cache](https://tkdodo.eu/blog/seeding-the-query-cache)、[Placeholder and Initial Data in React Query](https://tkdodo.eu/blog/placeholder-and-initial-data-in-react-query) | 一覧のクエリを生成しない（DSL にクエリがない）。作っても一覧の項目が詳細の JSON 形と同じとは限らない |
+| queryFn の中でキーを分割代入して変数を取り出す | [Leveraging the Query Function Context](https://tkdodo.eu/blog/leveraging-the-query-function-context) | キーと queryFn を同じ引数から生成するので、クロージャで取っても食い違わない。skipToken の分岐ではいずれにせよ id を閉じ込める |
+| React Query 以外（SWR など）や React 以外のアダプタ | — | `client` の値は `tanstack-query` だけ。クライアント（`client.ts`）と契約は React に依存しないので、ほかのアダプタは後から足せる |
+
+### 決定したこと
+
+- **ファイルの分け方**: 共有は `api/{runtime,contract,server,client,react,register}.ts`、コンテキストごとに `api/<context>/{contract,queries,hooks}.ts`。名前空間でコンテキストを分けるので、同名の Aggregate / Use case が別のコンテキストにあっても衝突しない。`queries.ts`（React なし）と `hooks.ts`（React）を分けたので、テストやローダーは React なしで options を使える。`generated/index.ts` は `api/` を再 export しない（ドメインだけを使うバックエンドに React を持ち込まない）。モデルに依存しない部分（ハンドラ・トランスポート・エラーの復元）は `templates/api-runtime.ts.txt` に手書きして Prettier で整形済みにし、モデルから作る部分は短い宣言（エンドポイントの表、キー、options）だけにした。
+- **API クライアントの渡し方**: `queryOptions` のファクトリは `api` を第1引数に取る（`<aggregate>Queries.detail(api, id)`）。モジュールの単一インスタンスにしないのは、SSR（リクエストごとの Cookie）とテスト（ハンドラにつなぐ `fetch`）で別のクライアントが要るため。フックは `ApiClientContext` から取る。`api` はキーに入れない（1つの QueryClient に1つの API クライアント、という前提を文書にした）。
+- **Aggregate の JSON 形**: クライアントのキャッシュに入れるのはクラスのインスタンスではなく、検証済みのただのオブジェクト（`XJson`）。Entity のスキーマはインスタンスしか受け付けない（§17）ので、Entity も `<Entity>Json` のオブジェクトにする。構造共有（`replaceEqualDeep`）と dehydrate が素直に働く。Invariant はサーバーの責務なので評価しない。Decimal は decimal.js のインスタンスに戻るので、dehydrate すると文字列になる（ハイドレーション後に再検証はしない）。
+- **エラーとステータス**: 400 制約違反、404 見つからない（load の `not_found` と GET）、409 状態のガード（`require`）、422 そのほかのルール、500 予期しない例外（内容を返さない）。409 と 422 を分けたのは、409 が「いまの状態では」（再読み込みすれば変わりうる）、422 が「この入力では」を表すため。4xx の本文は `{ code, message, details }`（`details` はルール名・識別子・宣言した詳細・制約違反の指摘）。runtime は `details` を内部の診断データとしているが、フォームの指摘や分岐に要るので 4xx では返し、500 では返さない。
+- **公開範囲**: ハンドラは渡された Use case / リポジトリだけを公開する（省略は 404）。ポリシーが動かすシステム用の Use case を誤って公開しないため。認証・認可は生成しない（ホストのミドルウェアの責務）。
+- **依存の版**: `@tanstack/react-query` は `^5.102.0`（`mutationOptions` 5.82、`context.client` 5.89、`queryClient.query` 5.102）。新しいプロジェクトの scaffold だけに入れ、既存の `package.json` は顧客所有なので手で足す（docs/05 §8 の移行メモ）。非公開のアプリのパッケージなので `react` も dependencies に入れた（ライブラリとして配布するなら peerDependencies に移す）。
+- **整形器（format.ts）**: アロー関数の引数の空白を保つようにした（`({ signal })`、`(id: string | undefined)` が `({signal})` / `string|undefined` に詰められていた）。既存の出力は変わらない（golden で確認）。長い `Pick<…>` と `connect({ … })` は Prettier の折り返しを生成側で書く。
+- **生成テスト**（`tests/generated/<context>-api.test.ts`）: クライアントの `fetch` を生成したハンドラにつなぎ、インメモリのテストダブルで通しで動かす。キー、検証済みのデータ、404 / 409 / 422 の Domain Error のクラスとステータス、ミューテーションがちょうど規則どおりのキーを無効化し、ほかを無効化しないこと（`getQueryState(key)?.isInvalidated`。observer がないクエリは inactive なので、再取得せずに印だけ付く）を確かめる。vitest と bun test のどちらでも型が通るように、スパイや runner 固有の API を使わない。生成器の実行テストは sample・context-map・ordering のモデルで API を有効にし、tsc・テスト・Prettier・typescript-eslint（strict-type-checked）を通す。
+
+### 制限
+
+- **一覧のクエリはない**: DSL にクエリ（Read model）がなく、生成できるのは ID による Aggregate の取得だけ。一覧・検索を生成するには、DSL に `queries:`（名前、パラメータのスキーマ、返す形 = Read model のフィールド、対象の Aggregate とフィルタの式、ページング）と、それを実装するポート（`<Query>Reader`）が要る。そうすれば `list(params)` のキー（`[...lists(), params]`）、`queryOptions` / `infiniteQueryOptions`、`GET <base>/<context>/<query>?…` の契約、作成・変更時の `lists()` の無効化がそのまま当てはまる。今は `<aggregate>Keys.lists()` を接頭辞に手で書けば、生成したミューテーションの無効化に乗る。
+- **ポリシー経由の変更は無効化しない**: コミット後に別のコンテキストで起きる変更は結果整合で、ミューテーションの完了時にはまだ起きていないことがある。
+- **Entity を入力に持つコマンド**: Entity のスキーマはインスタンスしか受け付けないので、JSON から組み立てられない（今のモデルには例がない）。
+- **認証・レート制限・本文の大きさの制限・CORS** はホストの責務。

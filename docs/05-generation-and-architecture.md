@@ -198,6 +198,95 @@ tests/generated/<context>-<name>.test.ts
 | 生成テスト | シナリオ、導出した違反値（`details.rule` まで確認）、冪等性、ポリシーの対応付けをテストにする。期待値の比較は `plain(...)`（Decimal は値、Entity は識別子で比べる）。日時は正規化した文字列（`expect(String(x)).toBe("2026-01-08T10:00:00.000Z")`）で比べる。イベントを確かめるシナリオは、発生したイベントが JSON を経由して `parse<Ctx>Event` で同じイベントに戻ることも確かめる（Entity を含むイベントを持つコンテキストを除く）。保存された Aggregate は、Entity のフィールドを持たなければ JSON から `X.from` で同じ状態に戻ることも確かめる（`aggregateViaJson`）。インメモリのテストダブルは同期なので `await` しない |
 | Extension point | モデルが宣言したときだけ `Extensions` インターフェース・`StubExtensions`・scaffold を出す。scaffold のメソッドは引数を取らない形で生成する（インターフェースに代入でき、使う引数だけ足す） |
 
+### HTTP API と TanStack Query のクライアント（`generation.typescript.api`, 2026-10-04）
+
+オプトイン（DSL は docs/10 §1.2、TkDodo のベストプラクティスとの対応は docs/09 §18）。設定がなければ生成物は以前とバイト単位で同じ。Python target には影響しない。
+
+```text
+src/<package>/generated/api/runtime.ts      # モデルに依存しない部分: エンドポイントの型、ハンドラ、fetch のトランスポート、エラーの対応（zod だけ）
+src/<package>/generated/api/contract.ts     # 全コンテキストのエンドポイントと API_BASE_PATH
+src/<package>/generated/api/server.ts       # createApiHandler(dependencies, options?) → (request: Request) => Promise<Response>
+src/<package>/generated/api/client.ts       # createApiClient({ baseUrl, fetch, headers }) と ApiClient 型（React も TanStack Query も使わない）
+src/<package>/generated/api/react.ts        # ApiClientContext / useApiClient
+src/<package>/generated/api/register.ts     # TanStack Query の Register に defaultError: DomainError | ApiError を登録
+src/<package>/generated/api/<context>/contract.ts  # Aggregate / Entity の JSON 形のスキーマ（XJson）と、そのコンテキストのエンドポイント
+src/<package>/generated/api/<context>/queries.ts   # クエリキーのファクトリ、queryOptions、mutationOptions（React なし）
+src/<package>/generated/api/<context>/hooks.ts     # useX(id) / useUseCase() の薄いフック
+tests/generated/<context>-api.test.ts
+```
+
+`generated/index.ts` とコンテキストの `index.ts` は `api/` を再 export しない（ドメインだけを使うバックエンドが React や TanStack Query を読み込まないように）。
+
+#### 契約（サーバーとクライアントで共有、フレームワーク非依存）
+
+| エンドポイント | 入力 | 出力 | エラー |
+|---|---|---|---|
+| Use case ごとに `POST <base>/<context>/<use-case>` | コマンドのスキーマ（`X.schema`）。JSON の本文 | Use case の戻り値のスキーマ（`200`、JSON）。戻り値がなければ `204`（本文なし、出力は `z.void()`） | その Use case が起こしうる Domain Error のコードと HTTP ステータス（`errors`） |
+| Aggregate ごとに `GET <base>/<context>/<aggregate>/:id` | 識別子のスキーマ（`idSchema("X")`） | Aggregate の JSON 形（`XJson`） | `constraint_violation: 400`, `aggregate_not_found: 404` |
+
+- **JSON 形**: Aggregate を `JSON.stringify` したもの（公開フィールドだけ。Instant・LocalDate・ID は文字列、Decimal は文字列、Value Object はオブジェクト、Entity はフィールドのオブジェクト）。クライアントは `XJson`（Entity は `<Entity>Json`）で検証する。振る舞いを持たない読み取り用の形で、Invariant は評価しない（サーバーで保存できた状態だけが届く）。`z.object` なので未知のキーは捨てる（サーバーがフィールドを足しても古いクライアントが壊れない）。
+- **Use case の戻り値**: ドメインのスキーマで検証する（UUID は `uuidSchema`、Decimal は `decimalSchema()` で `Decimal` に戻る）。戻り値が Aggregate / Entity なら JSON 形。
+- **エラーの一覧**（`errors`）は生成器がモデルから求める: `constraint_violation` 400、load の `not_found`（なければ `aggregate_not_found`）404、invoke する操作・create するファクトリの `require` のガードのエラー 409、`fail` のエラー・変更する Aggregate（と Entity）の Invariant・入力の Value Object の Invariant 422。同じコードは先に決まったステータスを使う。一覧にないコードは 422。クライアントの復元は一覧に依存しない（コンテキストの全エラーを code で引く）。
+
+#### サーバー（`createApiHandler`）
+
+- Web 標準の `Request` → `Response` なので、Bun.serve・Deno.serve・Hono（`c.req.raw`）・Next.js の route handler・Cloudflare Workers などでそのまま使える。`dependencies` はオブジェクトか、リクエストごとの関数（リクエストごとの UnitOfWork など）。
+- **渡したものだけを公開する**: `ApiDependencies` のコンテキスト・Use case・リポジトリはすべて省略可能で、渡していない Use case / リポジトリのパスは 404。ポリシーから動かすシステム用の Use case（例 `register_staff`）は渡さなければ公開されない。
+- **認証・認可はない**: ハンドラの前（ミドルウェア、ルーター）に置く。本文の大きさの制限もホスト側で行う。
+- 入力は `parseWith(コマンドのスキーマ)` で検証し、Use case を呼び、結果を `JSON.stringify` で返す（Instant・Decimal はそのまま JSON になる）。
+
+| 状況 | ステータス | 本文 |
+|---|---|---|
+| 本文が JSON でない・スキーマに合わない・ID の形が違う・実行中の制約違反（`ConstraintViolation`） | 400 | `{ code: "constraint_violation", message, details: { model, issues } }` |
+| load で見つからない（`not_found` のエラー / `AggregateNotFound`）、GET で見つからない | 404 | `{ code, message, details }` |
+| 現在の状態では操作できない（`require` のガードのエラー） | 409 | 同上 |
+| それ以外の Domain Error（`fail`、Invariant など） | 422 | 同上 |
+| パスがない・Use case / リポジトリを渡していない | 404 | `{ code: "route_not_found", message }` |
+| メソッドが違う | 405（`Allow` ヘッダー） | `{ code: "method_not_allowed", message }` |
+| それ以外の例外（DB の障害など） | 500 | `{ code: "internal_error", message: "Internal server error" }`。内容は返さず `options.onError`（既定 `console.error`）に渡す |
+
+`message` は利用者に見せてよい文（モデルの `message`）。`details` はルール名（`rule` / `guard`）・識別子・宣言した詳細フィールド・制約違反の `issues` だけで、スタックや内部の値は含まない。runtime は `details` を「内部の診断データ」としているが、4xx の Domain Error ではクライアントがフォームの指摘や分岐に使えるように返す（500 では返さない）。返したくない項目があるなら、ハンドラの前後で本文を加工する。
+
+#### クライアント（`createApiClient`）
+
+- `api.<context>.useCases.<useCase>(input, { signal })` と `api.<context>.aggregates.<aggregate>(id, { signal })`。入力はコマンドの入力型（`XInput`: フォームの値のまま）で、送る前にコマンドのスキーマで検証する（不正なら通信せずに `ConstraintViolation` で reject）。
+- レスポンスは契約の出力スキーマで検証する。合わなければ `ApiError`（`code: "invalid_response"`、`details.issues`）。
+- エラーのレスポンスは `code` からそのコンテキストの Domain Error のクラス（`InvitationNotFound` など、runtime の `ConstraintViolation` / `AggregateNotFound` を含む）を作って reject する。知らないコード・JSON でない本文・通信の失敗（`network_error`、status 0）は `ApiError`（`status`・`code`・`details`）。中断（`signal`）はそのまま投げ直すので、TanStack Query がキャンセルとして扱う。
+- `baseUrl`（既定 `""` = ページと同じオリジン。サーバー・SSR・テストでは絶対 URL）、`fetch`（`(request: Request) => Promise<Response>`。テストでは生成したハンドラをそのまま渡せる）、`headers`（オブジェクトか、リクエストごとの関数）。
+
+#### TanStack Query（`<context>/queries.ts`・`hooks.ts`）
+
+- **クエリキー**: Aggregate ごとに `<aggregate>Keys = { all: ["<context>", "<aggregate>"], lists(), details(), detail(id) }`（kebab-case の文字列、汎用 → 具体の配列）。`detail(id)` は ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞。
+- **query options**: `<aggregate>Queries.detail(api, id)`（`queryOptions`。`queryFn` は TanStack Query の `signal` を fetch に渡す。useQuery・useSuspenseQuery・`queryClient.query`・prefetch で使える）と `detailOrSkip(api, id | undefined)`（id が undefined の間は `skipToken` で無効。useSuspenseQuery には使わない）。`onSuccess` などのクエリのコールバックや `select`・`staleTime` は付けない（アプリの方針。`QueryClient` の `defaultOptions` か呼び出し側で `{ ...options, select }`）。
+- **mutation options**: `<context>Mutations.<useCase>(api)`（`mutationOptions`、`mutationKey: ["<context>", "<use-case>"]`、`mutationFn` は API クライアント）。成功時の `onSuccess` が無効化の Promise を返すので、ミューテーションは active なクエリの再取得が終わるまで pending のまま。
+- **無効化の規則**（モデルから決める。保存しない Aggregate は対象外）:
+
+| Use case の手順 | 無効化するキー |
+|---|---|
+| `load` した Aggregate を `save`（`by` が入力のフィールド） | `<aggregate>Keys.detail(input.<field>)` と `lists()` |
+| `load` した Aggregate を `save`（`by` が計算した値） | `<aggregate>Keys.details()` と `lists()` |
+| `create` した Aggregate を `save` | `<aggregate>Keys.lists()`（新しい ID の detail はまだキャッシュにない） |
+| 保存しない | なし（`onSuccess` を付けない） |
+
+  `setQueryData` で結果を書き込むことはしない（Use case の戻り値は多くが ID や真偽値で、Aggregate の新しい状態ではない）。楽観的更新も生成しない。ポリシーがコミット後に別のコンテキストを変える影響（例: 招待の受諾 → Staffing がスタッフを登録）は結果整合なので無効化しない。必要ならアプリが `mutate(input, { onSuccess })` で無効化する。
+- **フック**: `use<Aggregate>(id | undefined)` = `useQuery(<aggregate>Queries.detailOrSkip(useApiClient(), id))`、`use<UseCase>()` = `useMutation(<context>Mutations.<useCase>(useApiClient()))`。結果をそのまま返す（分割代入や独自の状態を挟まない）。UI の反応は `mutate(input, { onSuccess })` に書き、`useMutation` の `onSuccess` を上書きしない（無効化が消える）。
+- **QueryClient はアプリが作る**（`QueryClientProvider`）。API クライアントは `ApiClientContext` で渡す。`register.ts` をアプリのプログラムに含める（このパッケージの `tsconfig` の対象なら自動で、別のパッケージからは `import "<package>/generated/api/register.js"`）と、`error` の型が `DomainError | ApiError` になる。
+
+#### 生成テスト（`tests/generated/<context>-api.test.ts`）
+
+DOM もネットワークも使わない。クライアントの `fetch` を生成したハンドラにつなぎ（`connect()`）、`QueryClient`（再試行なし）と生成したインメモリのテストダブルで動かす。
+
+- ルーティング: 未知のパスと渡していない Use case は 404、メソッド違いは 405（`Allow`）、不正な ID は 400、JSON でない本文は 400、予期しない例外は 500（メッセージを返さず `onError` に渡る）。
+- Aggregate ごと: `queryClient.query(<aggregate>Queries.detail(api, id))` のキー（ID の小文字化を含む）、取得したデータが保存した Aggregate の JSON と同じこと、未知の ID が `AggregateNotFound`（404）で reject され、クエリの `error` がそのインスタンスであること。
+- Use case ごと（成功するシナリオと失敗するシナリオを1つずつ）: シナリオの前提をテストダブルに入れ、保存済みの Aggregate を `queryClient.query` で取得し、一覧とほかの ID の detail のプローブを置いてから `new MutationObserver(queryClient, <context>Mutations.<useCase>(api)).mutate(input)`。戻り値・ステータス（200 / 204、失敗はエラーの一覧のステータス）・`observer.getCurrentResult().error` が復元した Domain Error であること、無効化されたキーがちょうど上の規則どおりであること（失敗時は何も無効化しない）、再取得したデータが保存された状態と同じことを確かめる。
+
+#### 移行メモ（2026-10-04、HTTP API）
+
+- 既存の TypeScript プロジェクトは何も変わらない（`typescript.api` を書いたときだけ生成する）。
+- `typescript.api` を足したら、顧客所有の `package.json` は書き換えられないので手で依存を足す: dependencies に `"@tanstack/react-query": "^5.102.0"` と `"react": "^19.0.0"`、devDependencies に `"@types/react": "^19.0.0"`（`bun add @tanstack/react-query react && bun add -d @types/react`）。ライブラリとして配布するなら `react` は peerDependencies に移す。TanStack Query は 5.102 以上が必要（`mutationOptions` 5.82、ミューテーションのコールバックの `context.client` 5.89、`queryClient.query` 5.102）。
+- 生成した API のファイルは `tsconfig.json` の `include` の中にあるので、そのまま型検査とテストの対象になる。`lib` に DOM は要らない（`fetch` / `Request` / `Response` は `@types/node` か `bun-types` の型を使う）。
+- `ddd diff` は `api` を外したとき、生成した API のファイルを stale として表示する（`--prune` で消す）。フック（`use<UseCase>` など）は export なので、Use case の削除・改名は破壊的変更として表示される。
+
 ### 移行メモ（2026-10-03、ベストプラクティスの見直し）
 
 docs/09 §16 の見直しで生成 API が変わった。`ddd diff` は次の変更を「破壊的変更」として表示する（引数の追加のように互換性がある変更も、シグネチャの変化として表示される）。
