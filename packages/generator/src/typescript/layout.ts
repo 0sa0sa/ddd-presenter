@@ -30,6 +30,14 @@ export class TsPaths {
   extensions(context: string, file: "extensions" | "translators"): string {
     return join(this.root, "extensions", kebab(context), file);
   }
+  /** Shared module of the HTTP API (`generation.typescript.api`): `generated/api/<name>`. */
+  apiModule(name: string): string {
+    return `${this.generated}/api/${name}`;
+  }
+  /** Per-context module of the HTTP API: `generated/api/<context>/<name>`. */
+  apiContext(context: string, name: string): string {
+    return `${this.generated}/api/${kebab(context)}/${name}`;
+  }
   /** Module path → file path. */
   file(module: string): string {
     return `${module}.ts`;

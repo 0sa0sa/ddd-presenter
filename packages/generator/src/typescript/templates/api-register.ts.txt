@@ -1,0 +1,12 @@
+import type { DomainError } from "../runtime.js";
+import type { ApiError } from "./runtime.js";
+
+// The error type of every query and mutation: the generated client rejects with a domain error
+// (rebuilt from the response's code) or an ApiError. A program that compiles this file gets the
+// registration; an app that imports the generated code from another package opts in with
+// `import "<package>/generated/api/register.js"`.
+declare module "@tanstack/react-query" {
+  interface Register {
+    defaultError: DomainError | ApiError;
+  }
+}

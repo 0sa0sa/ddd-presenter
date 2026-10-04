@@ -8,6 +8,7 @@ generation:
   tests_dir: tests
   typescript:
     test_runner: vitest             # vitest（既定）| bun
+    api: { base_path: /api, client: tanstack-query }   # HTTP API（契約・サーバーのハンドラ・TanStack Query のクライアント）。省略で生成しない
 
 contexts:
   - name: CleaningStaff

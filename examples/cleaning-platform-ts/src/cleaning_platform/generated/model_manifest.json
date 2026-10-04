@@ -3,11 +3,59 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "5367b9e29f5181b5b3ea6d2c8b3e80364f3ac005a927582df1a5ac1b08588711",
+  "model_sha256": "4c2be0e86f5bc576522534146b895ba02f86e2f23de43d0ccd6c08c9083c79a7",
   "files": [
     {
       "path": "src/cleaning_platform/generated/adapters.ts",
       "sha256": "005ddffe00c1bcc6fbaa38ef9eed7cb26506f4915c153003b5b5981a0d1ac725"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/cleaning-staff/contract.ts",
+      "sha256": "d0cf87a62962fee7660e4ad69f562c58e770c6277f3e699eccadb0da75a7930a"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/cleaning-staff/hooks.ts",
+      "sha256": "b336481e3fb3d7ed4609314a2928d96d67d64c41dc632a1f823f4c42a03da1e3"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/cleaning-staff/queries.ts",
+      "sha256": "c53a8574b9e9e4e4e41371c2bf1a2ff89ad8162cf4ef949d88d0758c3e85e73a"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/client.ts",
+      "sha256": "d0b0c174823f1b121d27c8f7e6fdf2bcdda769de7f65e5b0537c5596509b7b5f"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/contract.ts",
+      "sha256": "295e07fb2a2c5921cde354ff9d5d407ca48bbc9180f6572ca0a5e3fe9f882e4c"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/react.ts",
+      "sha256": "4cba90e3c49685e2bec2abdf1405e22d70f63826587434d33673466aa2e6bfd3"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/register.ts",
+      "sha256": "2203e3bdee251d720de7b78b1dc5c639d408a1723d782acb306e3a3a6e9d7cd7"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/runtime.ts",
+      "sha256": "6f9a822a48451d9b2a626e42eedb3331d403d9d156c690f07ba50e50107666f1"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/server.ts",
+      "sha256": "f531b39d2dfd7b3a3ab97e42f5da427c952a52cdb85602453f190864ceac3b5f"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/staffing/contract.ts",
+      "sha256": "437d8826f375d5615aeb4efd5f59929b1a040e6c72f3d21453d72de7a69750c5"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/staffing/hooks.ts",
+      "sha256": "3d0991c8058cdac9971e639455969326c644ca454af2d21bbb9d4b666efd0e7a"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/staffing/queries.ts",
+      "sha256": "acbdd6215a2d86003480c438d52840482ca211a55be13542722512000d70eaae"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/ports.ts",
@@ -134,6 +182,10 @@
       "sha256": "c30952ff50e7c9ac2e960a901011379bc0fd89eb4203f163a34e156649704c1f"
     },
     {
+      "path": "tests/generated/cleaning-staff-api.test.ts",
+      "sha256": "f1086de950109ad56ef7b22f2bd2b3d054aa45c229a1a58a4272d4f7d29d3dc6"
+    },
+    {
       "path": "tests/generated/cleaning-staff-cleaning-staff-invitation.test.ts",
       "sha256": "0fb108d8b7373fcc0c121eb6f095b1be6b83a23e9a4165b67f7bbc9f427d22f9"
     },
@@ -148,6 +200,10 @@
     {
       "path": "tests/generated/cleaning-staff-revoke-invitation.test.ts",
       "sha256": "fc0fe1ec73e72396ca1b7fcc843cd3c001aa1cef34ffd009642c82372cffcbd5"
+    },
+    {
+      "path": "tests/generated/staffing-api.test.ts",
+      "sha256": "0ecab9e226bd9a133444e49ff08e3b88dc0009eb4d6e11b7e36ddf66270b43ff"
     },
     {
       "path": "tests/generated/staffing-policies.test.ts",

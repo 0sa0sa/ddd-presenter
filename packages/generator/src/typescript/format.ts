@@ -747,7 +747,8 @@ class Parser {
       this.next();
       while (this.i < close) {
         const t = this.next();
-        params += (t.sp && params && /[,:]$/.test(params) ? " " : "") + t.v;
+        // The emitters write parameters as Prettier prints them: keep their spacing (`{ signal }`, `A | B`).
+        params += (t.sp && params ? " " : "") + t.v;
       }
       this.next();
       params = `(${params})`;

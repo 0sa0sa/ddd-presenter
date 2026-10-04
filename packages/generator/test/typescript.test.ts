@@ -8,7 +8,7 @@ import { computePlan, generate, generatePython, generateTypeScript, renderManife
 import { TsImports, tsString } from "../src/typescript/code.ts";
 import { formatExpression, formatSource, strWidth } from "../src/typescript/format.ts";
 import { emitExpr, type ExprContext } from "../src/typescript/expr.ts";
-import { TS_DEPENDENCIES } from "../src/typescript/index.ts";
+import { TS_API_DEPENDENCIES, TS_DEPENDENCIES } from "../src/typescript/index.ts";
 import { TsLayout } from "../src/typescript/layout.ts";
 
 const ROOT = join(import.meta.dir, "../../..");
@@ -33,6 +33,20 @@ function asTypeScript(text: string, runner?: "bun"): string {
   return /^generation:\n/m.test(text) ? text.replace(/^generation:\n/m, `generation:\n${settings}`) : text.replace(/^contexts:/m, `generation:\n${settings}\ncontexts:`);
 }
 
+/** The TypeScript model with the HTTP API enabled (`generation.typescript.api`). */
+function withApi(text: string, api = "{ base_path: /api }"): string {
+  const ts = asTypeScript(text);
+  if (/^ {4}api:/m.test(ts)) return ts;
+  if (/^ {2}typescript:\n/m.test(ts)) return ts.replace(/^ {2}typescript:\n/m, `  typescript:\n    api: ${api}\n`);
+  if (/^ {2}typescript: \{ test_runner: bun \}\n/m.test(ts)) return ts.replace(/^ {2}typescript: \{ test_runner: bun \}\n/m, `  typescript:\n    test_runner: bun\n    api: ${api}\n`);
+  return ts.replace(/^ {2}target: typescript\n/m, `  target: typescript\n  typescript:\n    api: ${api}\n`);
+}
+
+/** The model without `generation.typescript.api` (the example enables it). */
+function withoutApi(text: string): string {
+  return text.replace(/^ {4}api:.*\n/m, "");
+}
+
 function analyze(text: string) {
   const r = validateModelText(text);
   if (!r.ok) throw new Error(JSON.stringify(r.diagnostics.filter((d) => d.severity === "error"), null, 2));
@@ -54,6 +68,23 @@ describe("TypeScript target: selection", () => {
     expect(generate(ts, MODEL, "python").files.some((f) => f.path.endsWith("aggregates.py"))).toBe(true);
     const py = analyze(PY_MODEL);
     expect(JSON.stringify(generate(py, PY_MODEL))).toBe(JSON.stringify(generatePython(py, PY_MODEL)));
+  });
+
+  test("generation.typescript.api is opt-in: base path (default /api) and client are read and checked", () => {
+    expect(analyze(withoutApi(MODEL)).model.generation.typescript.api).toBeUndefined();
+    expect(analyze(MODEL).model.generation.typescript.api).toEqual({ basePath: "/api", client: "tanstack-query" });
+    expect(analyze(withApi(withoutApi(MODEL), "{}")).model.generation.typescript.api).toEqual({ basePath: "/api", client: "tanstack-query" });
+    expect(analyze(withApi(withoutApi(MODEL), '{ base_path: "" }')).model.generation.typescript.api?.basePath).toBe("");
+    const bad = validateModelText(withApi(withoutApi(MODEL), "{ base_path: api/, client: swr, cache: true }"));
+    expect(bad.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.path.join(".")}`).sort()).toEqual([
+      "invalid-value generation.typescript.api.base_path",
+      "invalid-value generation.typescript.api.client",
+      "unknown-key generation.typescript.api.cache",
+    ]);
+    const apiAt = MODEL.indexOf("client: tanstack-query") + "client: ".length;
+    expect(complete(MODEL, apiAt).items.map((i) => i.label)).toEqual(["tanstack-query"]);
+    expect(hover(MODEL, MODEL.indexOf("base_path") + 2)?.markdown).toContain("/api");
+    expect(hover(MODEL, MODEL.indexOf("    api:") + 5)?.markdown).toContain("TanStack Query");
   });
 
   test("unknown targets and runners are diagnostics", () => {
@@ -102,6 +133,19 @@ describe("TypeScript target: golden output", () => {
     expect(renderManifest(out.manifest)).toBe(readFileSync(join(EXAMPLE, out.manifestPath), "utf8"));
   });
 
+  test("without generation.typescript.api the output is exactly the domain code (no api files, same bytes)", () => {
+    const text = withoutApi(MODEL);
+    const out = gen(text);
+    expect(out.files.some((f) => f.path.includes("/generated/api/") || f.path.endsWith("-api.test.ts"))).toBe(false);
+    for (const f of out.files) {
+      if (f.ownership !== "generated") continue;
+      expect({ path: f.path, content: f.content }).toEqual({ path: f.path, content: readFileSync(join(EXAMPLE, f.path), "utf8") });
+    }
+    const pkg = JSON.parse(out.files.find((f) => f.path === "package.json")!.content);
+    expect(pkg.dependencies).toEqual({ "decimal.js": TS_DEPENDENCIES["decimal.js"], zod: TS_DEPENDENCIES.zod });
+    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
+  });
+
   test("generation is deterministic", () => {
     expect(JSON.stringify(gen())).toBe(JSON.stringify(gen()));
   });
@@ -127,7 +171,8 @@ describe("TypeScript target: golden output", () => {
     expect(out.manifestPath).toBe("src/cleaning_platform/generated/model_manifest.json");
     expect(out.files.filter((f) => f.ownership === "generated").every((f) => f.path.endsWith(".md") || f.content.startsWith("// Generated by DDD Presenter"))).toBe(true);
     const pkg = JSON.parse(out.files.find((f) => f.path === "package.json")!.content);
-    expect(pkg.dependencies).toEqual({ "decimal.js": TS_DEPENDENCIES["decimal.js"], zod: TS_DEPENDENCIES.zod });
+    expect(pkg.dependencies).toEqual({ "@tanstack/react-query": TS_API_DEPENDENCIES["@tanstack/react-query"], "decimal.js": TS_DEPENDENCIES["decimal.js"], react: TS_API_DEPENDENCIES.react, zod: TS_DEPENDENCIES.zod });
+    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], "@types/react": TS_API_DEPENDENCIES["@types/react"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
     expect(pkg.scripts).toEqual({ test: "vitest run", typecheck: "tsc --noEmit" });
     const tsconfig = JSON.parse(out.files.find((f) => f.path === "tsconfig.json")!.content);
     expect(tsconfig.compilerOptions).toMatchObject({ strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, verbatimModuleSyntax: true, erasableSyntaxOnly: true, noUnusedParameters: true, module: "NodeNext" });
@@ -158,7 +203,7 @@ describe("TypeScript target: plan", () => {
     const plan = computePlan(next, out.manifest, (p) => disk().get(p));
     expect(plan.stale.map((s) => [s.path, s.autoPrune])).toEqual([["tests/generated/cleaning-staff-revoke-invitation.test.ts", true]]);
     // Removed exports are reported as breaking changes to the generated API (tests are not API).
-    expect(plan.breaking.map((b) => b.symbol).sort()).toEqual(["RevokeInvitation", "RevokeInvitationInput", "RevokeInvitationUseCase", "RevokeInvitationUseCase.constructor", "RevokeInvitationUseCase.execute"]);
+    expect(plan.breaking.map((b) => b.symbol).sort()).toEqual(["RevokeInvitation", "RevokeInvitationInput", "RevokeInvitationUseCase", "RevokeInvitationUseCase.constructor", "RevokeInvitationUseCase.execute", "useRevokeInvitation"]);
   });
 
   test("a changed operation signature is a breaking change", () => {
@@ -447,6 +492,90 @@ describe("TypeScript target: policies, context map and idempotency", () => {
   });
 });
 
+describe("TypeScript target: HTTP API and TanStack Query client", () => {
+  const out = gen();
+  const file = (p: string) => out.files.find((f) => f.path === `src/cleaning_platform/generated/${p}`)?.content ?? "";
+
+  test("layout: shared api modules, one directory per context, tests per context; the domain index does not load them", () => {
+    const api = out.files.filter((f) => f.path.includes("/generated/api/")).map((f) => f.path.replace("src/cleaning_platform/generated/api/", ""));
+    expect(api.sort()).toEqual([
+      "cleaning-staff/contract.ts",
+      "cleaning-staff/hooks.ts",
+      "cleaning-staff/queries.ts",
+      "client.ts",
+      "contract.ts",
+      "react.ts",
+      "register.ts",
+      "runtime.ts",
+      "server.ts",
+      "staffing/contract.ts",
+      "staffing/hooks.ts",
+      "staffing/queries.ts",
+    ]);
+    expect(out.files.filter((f) => f.path.endsWith("-api.test.ts")).map((f) => f.path)).toEqual(["tests/generated/cleaning-staff-api.test.ts", "tests/generated/staffing-api.test.ts"]);
+    expect(file("index.ts")).not.toContain("api");
+    expect(file("cleaning-staff/index.ts")).not.toContain("api");
+    expect(file("api/contract.ts") + file("api/client.ts") + file("api/server.ts") + file("api/runtime.ts")).not.toMatch(/react/);
+  });
+
+  test("contract: a POST per use case (command schema in, result out, error statuses), a GET per aggregate", () => {
+    const contract = file("api/cleaning-staff/contract.ts");
+    expect(contract).toContain('path: "/api/cleaning-staff/accept-invitation",\n      input: AcceptInvitation.schema,\n      output: z.void(),');
+    expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n      },");
+    expect(contract).toContain("output: uuidSchema,");
+    expect(contract).toContain("errors: { constraint_violation: 400, email_blocked: 422, invalid_invitation_window: 422 },");
+    expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      output: CleaningStaffInvitationJson,');
+    expect(contract).toContain("acceptedAt: InstantSchema.nullable(),");
+    expect(file("api/contract.ts")).toContain('export const API_BASE_PATH = "/api";');
+    const root = gen(withApi(withoutApi(MODEL), '{ base_path: "" }')).files.find((f) => f.path.endsWith("api/cleaning-staff/contract.ts"))!.content;
+    expect(root).toContain('path: "/cleaning-staff/issue-invitation",');
+  });
+
+  test("entities inside an aggregate's JSON form are plain objects (their own JSON schema)", () => {
+    const sales = gen(withApi(ORDERING)).files.find((f) => f.path.endsWith("api/sales/contract.ts"))!.content;
+    expect(sales.indexOf("export const OrderLineJson = z.object({")).toBeLessThan(sales.indexOf("export const OrderJson = z.object({"));
+    expect(sales).toContain("lines: z.array(OrderLineJson)");
+  });
+
+  test("queries: hierarchical key factory, queryOptions with the AbortSignal, skipToken only in detailOrSkip; no query callbacks", () => {
+    const q = file("api/cleaning-staff/queries.ts");
+    expect(q).toContain('all: ["cleaning-staff", "cleaning-staff-invitation"] as const,');
+    expect(q).toContain('lists: () => [...cleaningStaffInvitationKeys.all, "list"] as const,');
+    expect(q).toContain("[...cleaningStaffInvitationKeys.details(), id?.toLowerCase()] as const,");
+    expect(q).toContain("queryFn: ({ signal }) => api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),");
+    expect(q.slice(q.indexOf("detail: (api"), q.indexOf("Like `detail`"))).not.toContain("skipToken");
+    expect(q).toMatch(/id === undefined\s+\? skipToken/);
+    expect(q.slice(0, q.indexOf("Mutation options of"))).not.toMatch(/onSuccess|onError|onSettled/);
+  });
+
+  test("mutations: invalidate what the use case saves (detail by input id + lists, lists for created) and return the promise", () => {
+    const q = file("api/cleaning-staff/queries.ts");
+    const issue = q.slice(q.indexOf("issueInvitation: (api"), q.indexOf("acceptInvitation: (api"));
+    expect(issue).toContain('mutationKey: ["cleaning-staff", "issue-invitation"],');
+    expect(issue).toMatch(/onSuccess: \(_data, _input, _result, context\) =>\s+context\.client\.invalidateQueries\(\{ queryKey: cleaningStaffInvitationKeys\.lists\(\) \}\),/);
+    const accept = q.slice(q.indexOf("acceptInvitation: (api"), q.indexOf("revokeInvitation: (api"));
+    expect(accept).toMatch(/onSuccess: \(_data, input, _result, context\) =>\s+Promise\.all\(\[/);
+    expect(accept).toContain("queryKey: cleaningStaffInvitationKeys.detail(input.invitationId),");
+    expect(accept).not.toContain("setQueryData");
+    const hooks = file("api/cleaning-staff/hooks.ts");
+    expect(hooks).toContain("return useQuery(cleaningStaffInvitationQueries.detailOrSkip(useApiClient(), id));");
+    expect(hooks).toContain("return useMutation(cleaningStaffMutations.acceptInvitation(useApiClient()));");
+  });
+
+  test("register.ts augments TanStack Query's Register (a module, so it augments instead of replacing)", () => {
+    const reg = file("api/register.ts");
+    expect(reg).toContain('import type { ApiError } from "./runtime.js";');
+    expect(reg).toContain('declare module "@tanstack/react-query" {\n  interface Register {\n    defaultError: DomainError | ApiError;');
+  });
+
+  test("server: dependencies are optional per use case / repository; routes are typed against the contract", () => {
+    const server = file("api/server.ts");
+    expect(server).toContain('readonly acceptInvitation?: Pick<cleaningStaff.AcceptInvitationUseCase, "execute">;');
+    expect(server).toMatch(/useCaseRoute\(\s+contract\.cleaningStaff\.useCases\.acceptInvitation,\s+\(d\) => d\.cleaningStaff\?\.useCases\?\.acceptInvitation,\s+\),/);
+    expect(server).toContain('import * as cleaningStaff from "../cleaning-staff/index.js";');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Generated TypeScript actually runs
 // ---------------------------------------------------------------------------
@@ -474,8 +603,8 @@ function installDependencies(deps: Record<string, string> = { ...TS_DEPENDENCIES
   return { dir };
 }
 
-const DEPS = process.env.DDD_SKIP_TS_RUN ? { reason: "DDD_SKIP_TS_RUN is set" } : installDependencies();
-if (!DEPS.dir) console.warn(`skipping "generated TypeScript actually runs": ${DEPS.reason} (needs network once to install zod, decimal.js, typescript and vitest)`);
+const DEPS = process.env.DDD_SKIP_TS_RUN ? { reason: "DDD_SKIP_TS_RUN is set" } : installDependencies({ ...TS_DEPENDENCIES, ...TS_API_DEPENDENCIES });
+if (!DEPS.dir) console.warn(`skipping "generated TypeScript actually runs": ${DEPS.reason} (needs network once to install zod, decimal.js, typescript, vitest, react and @tanstack/react-query)`);
 
 /**
  * Prettier and typescript-eslint, installed once like DEPS. typescript-eslint needs the TypeScript 6 compiler API
@@ -487,6 +616,7 @@ const LINT_DEPENDENCIES = {
   typescript: "~6.0.0",
   vitest: TS_DEPENDENCIES.vitest,
   "@types/node": TS_DEPENDENCIES["@types/node"],
+  ...TS_API_DEPENDENCIES,
   prettier: "^3.9.0",
   eslint: "^10.0.0",
   "typescript-eslint": "^8.71.0",
@@ -537,7 +667,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+16 passed/);
+      expect(vitest.out).toMatch(/Tests\s+28 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -545,15 +675,16 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
   }, 300_000);
 
   test.each([
-    ["the sample model", MODEL],
-    ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK],
-    ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
-    ["the ordering model (arithmetic, durations, collection functions, constructors, with, let)", ORDERING],
-    ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES],
-    ["a model reflected from the discovery board", FROM_BOARD],
-    ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
-  ])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source) => {
-    const text = asTypeScript(source, "bun");
+    ["the sample model", MODEL, false],
+    ["the kitchen-sink model (lists, decimals, dates, refs, entities, conditional events, no-transaction use cases)", KITCHEN_SINK, false],
+    ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions; HTTP API)", CONTEXT_MAP, true],
+    ["the ordering model (arithmetic, durations, collection functions, constructors, with, let; HTTP API with entities)", ORDERING, true],
+    ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES, false],
+    ["a model reflected from the discovery board", FROM_BOARD, false],
+    ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml, false],
+  ] as [string, string, boolean][])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source, api) => {
+    // Every row has all three values: bun treats an extra declared parameter as a `done` callback.
+    const text = api ? withApi(asTypeScript(source, "bun")) : asTypeScript(source, "bun");
     const dir = writeProject(text);
     try {
       const tsc = run(["node_modules/.bin/tsc", "-p", "tsconfig.json"], dir);
@@ -591,8 +722,8 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
     const models: [string, string][] = [
       ["sample", MODEL],
       ["kitchen-sink", asTypeScript(KITCHEN_SINK)],
-      ["context-map", asTypeScript(CONTEXT_MAP)],
-      ["ordering", asTypeScript(ORDERING)],
+      ["context-map", withApi(CONTEXT_MAP)],
+      ["ordering", withApi(ORDERING)],
       ["long-rules", asTypeScript(LONG_RULES)],
       ["from-board", asTypeScript(FROM_BOARD)],
       ["proposed", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],

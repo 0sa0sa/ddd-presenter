@@ -208,7 +208,7 @@ export class TsImports {
 }
 
 /** Packages the generated code imports; every other module is a project-relative path. */
-const EXTERNAL = new Set(["zod", "decimal.js", "vitest", "bun:test", "node:crypto"]);
+const EXTERNAL = new Set(["zod", "decimal.js", "vitest", "bun:test", "node:crypto", "@tanstack/react-query", "react"]);
 
 function isExternal(m: string): boolean {
   return EXTERNAL.has(m);

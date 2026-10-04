@@ -106,7 +106,7 @@ function scenarioDoc(sc: { description?: string }, lines: string[]): string {
   return [sc.description ?? "Scenario generated from the model.", "", ...lines].join("\n");
 }
 
-function importError(L: TsLayout, imp: TsImports, name: string): void {
+export function importError(L: TsLayout, imp: TsImports, name: string): void {
   if (name === "ConstraintViolation" || name === "AggregateNotFound") imp.value(L.runtime, name);
   else imp.value(L.mod("errors"), name);
 }
@@ -174,7 +174,7 @@ function recordAsserts(L: TsLayout, c: Code, target: string, owner: string, rec:
   }
 }
 
-function build(L: TsLayout, owner: string, kind: "vo" | "entity" | "aggregate", rec: Record<string, unknown>, imp: TsImports): string {
+export function build(L: TsLayout, owner: string, kind: "vo" | "entity" | "aggregate", rec: Record<string, unknown>, imp: TsImports): string {
   imp.value(L.typeModule(kind), owner);
   return `${owner}.${kind === "vo" ? "create" : "from"}(${record(owner, rec, imp, L)})`;
 }
@@ -288,6 +288,56 @@ export function useCaseTestFile(L: TsLayout, uc: UseCaseIR): TsFile | undefined 
   return testFile(L, module, `Scenarios of use case ${uc.name} (${L.ca.ir.name}).`, imp, c.toString());
 }
 
+/**
+ * Test doubles of one scenario (unit of work, repositories with the given aggregates, clock, ids, extensions,
+ * publisher, idempotency store) and `const useCase = new XUseCase({...})`. Returns the repository variables.
+ */
+export function useCaseSetup(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: TsImports): string[] {
+  const deps = useCaseDeps(L, uc);
+  const then = sc.then;
+  const cls = useCaseClass(uc);
+  imp.value(L.useCases, cls);
+  const g = sc.given;
+  const T = (p: string) => imp.value(L.contextTesting, p);
+  if (deps.uow) {
+    T("FakeUnitOfWork");
+    c.line("const unitOfWork = new FakeUnitOfWork();");
+  }
+  const repos = new Set([...deps.repos, ...g.aggregates.map((a) => a.type), ...(Array.isArray(then.state) ? then.state.map((s) => s.aggregate) : [])]);
+  for (const r of [...repos].sort()) {
+    T(`InMemory${r}Repository`);
+    c.line(`const ${repoName(r)} = new InMemory${r}Repository(${deps.uow ? "unitOfWork" : ""});`);
+  }
+  for (const a of g.aggregates) c.line(`${repoName(a.type)}.seed(${build(L, a.type, "aggregate", a.fields, imp)});`);
+  if (deps.clock) {
+    T("FixedClock");
+    c.line(`const clock = new FixedClock(${tsString(g.clock ?? "1970-01-01T00:00:00+00:00")});`);
+  }
+  if (deps.ids) {
+    T("SequentialIds");
+    c.line(`const ids = new SequentialIds([${g.ids.map((id) => tsString(id)).join(", ")}]);`);
+  }
+  if (deps.extensions) {
+    T("StubExtensions");
+    const stubs = Object.entries(g.extensions).map(([k, v]) => {
+      const x = L.ca.ir.extensionPoints.find((e) => e.name === k)!;
+      return `${prop(k)}: ${typedValue(v, L.resolve(x.returns), imp, L)}`;
+    });
+    c.line(`const extensions = new StubExtensions(${stubs.length ? `{ ${stubs.join(", ")} }` : ""});`);
+  }
+  if (deps.publisher) {
+    T("CapturingEventPublisher");
+    c.line("const eventPublisher = new CapturingEventPublisher();");
+  }
+  if (deps.idempotency) {
+    T("InMemoryIdempotencyStore");
+    c.line(`const idempotencyStore = new InMemoryIdempotencyStore(${deps.uow ? "unitOfWork" : ""});`);
+  }
+  const params = depParams(deps);
+  c.line(`const useCase = new ${cls}(${params.length ? `{ ${params.map((p) => p.name).join(", ")} }` : ""});`);
+  return [...repos].sort();
+}
+
 function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: TsImports): void {
   const deps = useCaseDeps(L, uc);
   const info = L.ca.useCases.get(uc.name)!;
@@ -304,42 +354,7 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
   const T = (p: string) => imp.value(L.contextTesting, p);
   c.doc(scenarioDoc(sc, [`Given: ${givenText.join("; ") || "nothing"}`, `When: ${uc.name}`, `Then: ${describeThen(then).join("; ")}`]));
   c.block(`test(${tsString(sc.name)}, async () =>`, () => {
-    if (deps.uow) {
-      T("FakeUnitOfWork");
-      c.line("const unitOfWork = new FakeUnitOfWork();");
-    }
-    const repos = new Set([...deps.repos, ...g.aggregates.map((a) => a.type), ...(Array.isArray(then.state) ? then.state.map((s) => s.aggregate) : [])]);
-    for (const r of [...repos].sort()) {
-      T(`InMemory${r}Repository`);
-      c.line(`const ${repoName(r)} = new InMemory${r}Repository(${deps.uow ? "unitOfWork" : ""});`);
-    }
-    for (const a of g.aggregates) c.line(`${repoName(a.type)}.seed(${build(L, a.type, "aggregate", a.fields, imp)});`);
-    if (deps.clock) {
-      T("FixedClock");
-      c.line(`const clock = new FixedClock(${tsString(g.clock ?? "1970-01-01T00:00:00+00:00")});`);
-    }
-    if (deps.ids) {
-      T("SequentialIds");
-      c.line(`const ids = new SequentialIds([${g.ids.map((id) => tsString(id)).join(", ")}]);`);
-    }
-    if (deps.extensions) {
-      T("StubExtensions");
-      const stubs = Object.entries(g.extensions).map(([k, v]) => {
-        const x = L.ca.ir.extensionPoints.find((e) => e.name === k)!;
-        return `${prop(k)}: ${typedValue(v, L.resolve(x.returns), imp, L)}`;
-      });
-      c.line(`const extensions = new StubExtensions(${stubs.length ? `{ ${stubs.join(", ")} }` : ""});`);
-    }
-    if (deps.publisher) {
-      T("CapturingEventPublisher");
-      c.line("const eventPublisher = new CapturingEventPublisher();");
-    }
-    if (deps.idempotency) {
-      T("InMemoryIdempotencyStore");
-      c.line(`const idempotencyStore = new InMemoryIdempotencyStore(${deps.uow ? "unitOfWork" : ""});`);
-    }
-    const params = depParams(deps);
-    c.line(`const useCase = new ${cls}(${params.length ? `{ ${params.map((p) => p.name).join(", ")} }` : ""});`);
+    useCaseSetup(L, c, uc, sc, imp);
     c.line(`const command = ${uc.command}.create(${record(uc.command, sc.when.input, imp, L)});`);
     const needsResult = !!info.returnType && (then.hasReturns || (!!uc.idempotencyKey && !then.raises));
     if (then.raises) {

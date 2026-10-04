@@ -1,0 +1,429 @@
+import { z } from "zod";
+
+import {
+  AggregateNotFound,
+  type Awaitable,
+  ConstraintViolation,
+  DomainError,
+  type ErrorDetails,
+  parseWith,
+} from "../runtime.js";
+
+// ---------------------------------------------------------------------------
+// Contract
+// ---------------------------------------------------------------------------
+
+/** HTTP status of a domain error: 400 invalid values, 404 not found, 409 conflict, 422 rule. */
+export type ErrorStatus = 400 | 404 | 409 | 422;
+
+/** Domain error code → HTTP status of one endpoint (codes not listed answer 422). */
+export type ErrorStatuses = Readonly<Record<string, ErrorStatus>>;
+
+/** A use case exposed as `POST path`: the command's schema in, the use case's result out. */
+export interface UseCaseEndpoint<I extends z.ZodType, O extends z.ZodType> {
+  /** Name of the use case in the model. */
+  readonly name: string;
+  readonly method: "POST";
+  readonly path: string;
+  readonly input: I;
+  readonly output: O;
+  /** The domain errors the use case can raise, with their HTTP status. */
+  readonly errors: ErrorStatuses;
+}
+
+/** Loading one aggregate by its identity: `GET path` (the path ends with `/:id`). */
+export interface ReadEndpoint<K extends z.ZodType, O extends z.ZodType> {
+  /** Name of the aggregate in the model. */
+  readonly name: string;
+  readonly method: "GET";
+  readonly path: string;
+  readonly id: K;
+  readonly output: O;
+  readonly errors: ErrorStatuses;
+}
+
+export function useCaseEndpoint<I extends z.ZodType, O extends z.ZodType>(
+  endpoint: UseCaseEndpoint<I, O>,
+): UseCaseEndpoint<I, O> {
+  return Object.freeze(endpoint);
+}
+
+export function readEndpoint<K extends z.ZodType, O extends z.ZodType>(
+  endpoint: ReadEndpoint<K, O>,
+): ReadEndpoint<K, O> {
+  return Object.freeze(endpoint);
+}
+
+/** JSON body of every error response. `message` is safe to show to end users. */
+export const ErrorBodySchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  details: z.record(z.string(), z.unknown()).optional(),
+});
+export type ErrorBody = z.output<typeof ErrorBodySchema>;
+
+/** Codes of errors that come from the HTTP layer, not from the domain. */
+export const HTTP_ERROR_CODES = {
+  /** 404: no endpoint has this path. */
+  routeNotFound: "route_not_found",
+  /** 405: the path exists, the method does not (see the Allow header). */
+  methodNotAllowed: "method_not_allowed",
+  /** 500: an unexpected error; the server logs it and never sends its details. */
+  internalError: "internal_error",
+  /** Client only: the server could not be reached. */
+  networkError: "network_error",
+  /** Client only: the response did not match the contract (status, JSON or schema). */
+  invalidResponse: "invalid_response",
+  /** Client only: an error response without a JSON error body. */
+  httpError: "http_error",
+} as const;
+
+/**
+ * An error response that is not a domain error (unknown route, server failure, network failure,
+ * a response that does not match the contract). Domain errors arrive as their own classes.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details: ErrorDetails;
+
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details: ErrorDetails = {},
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** A generated domain error class (`static code`, constructed from details and a message). */
+export interface DomainErrorClass {
+  readonly code: string;
+  new (details: never, message?: string): DomainError;
+}
+
+/** Error code → class: the runtime's errors plus the errors a context declares. */
+export type ErrorRegistry = ReadonlyMap<string, DomainErrorClass>;
+
+export function errorRegistry(errors: ReadonlyArray<DomainErrorClass>): ErrorRegistry {
+  return new Map(
+    [ConstraintViolation, AggregateNotFound, ...errors].map((error) => [error.code, error]),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+/** Anything with the use case's `execute` (the generated use case classes). */
+export interface Executes<C> {
+  execute(command: C): Promise<unknown>;
+}
+
+/** Anything with the repository's `get` (the generated repository ports). */
+export interface Loads<K> {
+  get(id: K): Awaitable<unknown>;
+}
+
+/** One endpoint of the handler; `dependency` is undefined when the app did not wire it (404). */
+export interface Route<D> {
+  readonly method: "GET" | "POST";
+  readonly path: string;
+  readonly errors: ErrorStatuses;
+  handle(request: Request, dependencies: D, id: string): Promise<Response | undefined>;
+}
+
+export interface ApiHandlerOptions {
+  /** Called with every unexpected error (answered 500 without details). Default: console.error. */
+  readonly onError?: (error: unknown, request: Request) => void;
+}
+
+export function useCaseRoute<D, I extends z.ZodType, O extends z.ZodType>(
+  endpoint: UseCaseEndpoint<I, O>,
+  dependency: (dependencies: D) => Executes<z.output<I>> | undefined,
+): Route<D> {
+  return {
+    method: endpoint.method,
+    path: endpoint.path,
+    errors: endpoint.errors,
+    async handle(request, dependencies) {
+      const useCase = dependency(dependencies);
+      if (useCase === undefined) return undefined;
+      const command = parseWith(endpoint.input, await readJson(request), endpoint.name);
+      const result = await useCase.execute(command);
+      return result === undefined ? new Response(null, { status: 204 }) : json(200, result);
+    },
+  };
+}
+
+export function readRoute<D, K extends z.ZodType, O extends z.ZodType>(
+  endpoint: ReadEndpoint<K, O>,
+  dependency: (dependencies: D) => Loads<z.output<K>> | undefined,
+): Route<D> {
+  return {
+    method: endpoint.method,
+    path: endpoint.path,
+    errors: endpoint.errors,
+    async handle(_request, dependencies, id) {
+      const repository = dependency(dependencies);
+      if (repository === undefined) return undefined;
+      const aggregate = await repository.get(parseWith(endpoint.id, id, endpoint.name + " id"));
+      if (aggregate === null || aggregate === undefined) {
+        throw new AggregateNotFound({ aggregate: endpoint.name, id });
+      }
+      return json(200, aggregate);
+    },
+  };
+}
+
+/**
+ * A Web-standard handler (`Request` → `Response`) over `routes`. `dependencies` is an object, or a
+ * function of the request (e.g. a unit of work per request).
+ */
+export function apiHandler<D>(
+  routes: ReadonlyArray<Route<D>>,
+  dependencies: D | ((request: Request) => Awaitable<D>),
+  options: ApiHandlerOptions = {},
+): (request: Request) => Promise<Response> {
+  const onError =
+    options.onError ??
+    ((error: unknown) => {
+      console.error(error);
+    });
+  return async (request) => {
+    const segments = new URL(request.url).pathname.split("/");
+    const allowed: string[] = [];
+    for (const route of routes) {
+      const id = matchPath(route.path.split("/"), segments);
+      if (id === undefined) continue;
+      if (route.method !== request.method) {
+        allowed.push(route.method);
+        continue;
+      }
+      try {
+        const resolved = isResolver(dependencies) ? await dependencies(request) : dependencies;
+        const response = await route.handle(request, resolved, id);
+        return response ?? notFound(request);
+      } catch (error) {
+        if (isDomainError(error)) {
+          const status = route.errors[error.code] ?? 422;
+          return json(status, { code: error.code, message: error.message, details: error.details });
+        }
+        onError(error, request);
+        const body = { code: HTTP_ERROR_CODES.internalError, message: "Internal server error" };
+        return json(500, body);
+      }
+    }
+    if (allowed.length) {
+      const body = {
+        code: HTTP_ERROR_CODES.methodNotAllowed,
+        message: "Method " + request.method + " is not allowed here",
+      };
+      return json(405, body, { allow: allowed.join(", ") });
+    }
+    return notFound(request);
+  };
+}
+
+/** `instanceof DomainError`, typed with the default details (instanceof alone gives `any`). */
+function isDomainError(error: unknown): error is DomainError {
+  return error instanceof DomainError;
+}
+
+function isResolver<D>(
+  value: D | ((request: Request) => Awaitable<D>),
+): value is (request: Request) => Awaitable<D> {
+  return typeof value === "function";
+}
+
+/** The `:id` segment of `path` (`""` if it has none) when `segments` match it, else undefined. */
+function matchPath(
+  path: ReadonlyArray<string>,
+  segments: ReadonlyArray<string>,
+): string | undefined {
+  if (path.length !== segments.length) return undefined;
+  let id = "";
+  for (const [i, part] of path.entries()) {
+    const segment = segments[i] ?? "";
+    if (part === ":id") {
+      if (!segment) return undefined;
+      id = decodeURIComponent(segment);
+    } else if (part !== segment) {
+      return undefined;
+    }
+  }
+  return id;
+}
+
+function notFound(request: Request): Response {
+  const path = new URL(request.url).pathname;
+  return json(404, { code: HTTP_ERROR_CODES.routeNotFound, message: "No endpoint at " + path });
+}
+
+/** The request body as JSON; anything else is a ConstraintViolation (400). */
+async function readJson(request: Request): Promise<unknown> {
+  const text = await request.text();
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new ConstraintViolation({}, "The request body must be JSON");
+  }
+}
+
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+export interface ApiClientOptions {
+  /**
+   * Prepended to the contract's paths, e.g. `https://example.com`. The default `""` sends requests
+   * to the page's own origin (browsers only: servers, SSR and tests need an absolute URL).
+   */
+  readonly baseUrl?: string;
+  /**
+   * Sends a request (default: the global `fetch`). Pass the generated server handler in tests, or
+   * a function that forwards cookies during server-side rendering.
+   */
+  readonly fetch?: (request: Request) => Promise<Response>;
+  /** Headers of every request (e.g. authorization), or a function returning them per request. */
+  readonly headers?:
+    Readonly<Record<string, string>> | (() => Awaitable<Readonly<Record<string, string>>>);
+}
+
+/** Per-request options: TanStack Query passes its AbortSignal so cancelled queries abort. */
+export interface RequestOptions {
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface Transport {
+  readonly baseUrl: string;
+  readonly fetch: (request: Request) => Promise<Response>;
+  readonly headers: () => Awaitable<Readonly<Record<string, string>>>;
+}
+
+export function createTransport(options: ApiClientOptions = {}): Transport {
+  const headers = options.headers ?? {};
+  return {
+    baseUrl: (options.baseUrl ?? "").replace(/\/+$/, ""),
+    fetch: options.fetch ?? ((request) => fetch(request)),
+    headers: typeof headers === "function" ? headers : () => headers,
+  };
+}
+
+/**
+ * Calls a use case: the input is validated with the command's schema first (an invalid input
+ * rejects with ConstraintViolation without a request), the result with the output schema.
+ */
+export function useCaseCaller<I extends z.ZodType, O extends z.ZodType>(
+  transport: Transport,
+  endpoint: UseCaseEndpoint<I, O>,
+  errors: ErrorRegistry,
+): (input: z.input<I>, options?: RequestOptions) => Promise<z.output<O>> {
+  return async (input, options = {}) => {
+    const command = parseWith(endpoint.input, input, endpoint.name);
+    const body = JSON.stringify(command);
+    return await send(transport, "POST", endpoint.path, body, endpoint.output, errors, options);
+  };
+}
+
+/** Loads an aggregate by its identity; the JSON is validated with the aggregate's JSON schema. */
+export function readCaller<K extends z.ZodType, O extends z.ZodType>(
+  transport: Transport,
+  endpoint: ReadEndpoint<K, O>,
+  errors: ErrorRegistry,
+): (id: z.input<K>, options?: RequestOptions) => Promise<z.output<O>> {
+  return async (id, options = {}) => {
+    const value = String(parseWith(endpoint.id, id, endpoint.name + " id"));
+    const path = endpoint.path.replace(":id", encodeURIComponent(value));
+    return await send(transport, "GET", path, null, endpoint.output, errors, options);
+  };
+}
+
+async function send<O extends z.ZodType>(
+  transport: Transport,
+  method: "GET" | "POST",
+  path: string,
+  body: string | null,
+  output: O,
+  errors: ErrorRegistry,
+  options: RequestOptions,
+): Promise<z.output<O>> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (body !== null) headers["content-type"] = "application/json";
+  Object.assign(headers, await transport.headers());
+  const request = new Request(transport.baseUrl + path, {
+    method,
+    headers,
+    body,
+    signal: options.signal ?? null,
+  });
+  let response: Response;
+  try {
+    response = await transport.fetch(request);
+  } catch (error) {
+    // A cancelled query aborts its request: let TanStack Query see the abort itself.
+    if (options.signal?.aborted) throw error;
+    const message = "The server could not be reached";
+    throw new ApiError(0, HTTP_ERROR_CODES.networkError, message, {}, { cause: error });
+  }
+  if (!response.ok) throw await responseError(response, errors);
+  const text = response.status === 204 ? "" : await response.text();
+  let data: unknown;
+  try {
+    if (text) data = JSON.parse(text) as unknown;
+  } catch (error) {
+    const message = "The response is not JSON";
+    throw invalidResponse(response, message, {}, error);
+  }
+  const result = output.safeParse(data);
+  if (!result.success) {
+    const issues = result.error.issues.map((issue) => ({
+      path: issue.path.map(String).join("."),
+      message: issue.message,
+    }));
+    throw invalidResponse(response, "The response does not match the contract", { issues });
+  }
+  return result.data;
+}
+
+function invalidResponse(
+  response: Response,
+  message: string,
+  details: ErrorDetails,
+  cause?: unknown,
+): ApiError {
+  const code = HTTP_ERROR_CODES.invalidResponse;
+  return new ApiError(response.status, code, message, details, { cause });
+}
+
+/** The domain error (by code) or ApiError an error response stands for. */
+async function responseError(response: Response, errors: ErrorRegistry): Promise<Error> {
+  let data: unknown;
+  try {
+    data = JSON.parse(await response.text()) as unknown;
+  } catch {
+    data = undefined;
+  }
+  const body = ErrorBodySchema.safeParse(data);
+  if (!body.success) {
+    const message = "HTTP " + String(response.status);
+    return new ApiError(response.status, HTTP_ERROR_CODES.httpError, message);
+  }
+  const { code, message, details = {} } = body.data;
+  const DomainErrorType = errors.get(code);
+  if (DomainErrorType !== undefined) return new DomainErrorType(details as never, message);
+  return new ApiError(response.status, code, message, details);
+}

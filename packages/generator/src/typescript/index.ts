@@ -1,6 +1,8 @@
 import type { Analysis, ModelIR } from "@ddd/core";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "../output.ts";
 import { GENERATOR_NAME, GENERATOR_VERSION } from "../python/support.ts";
+import { apiContexts, clientFile, contextContractFile, contractFile, hooksFile, queriesFile, serverFile } from "./api.ts";
+import { apiTestFile } from "./api-tests.ts";
 import { extensionSignature, portsFile, useCasesFile } from "./application.ts";
 import { assemble, Code, docLines, header, relativeSpecifier, SCAFFOLD_HEADER, TsImports, tsString } from "./code.ts";
 import { contextReadme } from "./docs.ts";
@@ -10,6 +12,9 @@ import { TsLayout, TsPaths } from "./layout.ts";
 import { ident, prop, toSnake } from "./names.ts";
 import { policiesFile, policyTestFile, translatorScaffold } from "./policies.ts";
 import ADAPTERS_TS from "./templates/adapters.ts.txt" with { type: "text" };
+import API_REACT_TS from "./templates/api-react.ts.txt" with { type: "text" };
+import API_REGISTER_TS from "./templates/api-register.ts.txt" with { type: "text" };
+import API_RUNTIME_TS from "./templates/api-runtime.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
@@ -23,6 +28,17 @@ export const TS_DEPENDENCIES = {
   vitest: "^5.0.3",
   "@types/node": "^26.0.0",
   "@types/bun": "^1.2.0",
+} as const;
+
+/**
+ * Added to the scaffolded package.json when `generation.typescript.api` is set. TanStack Query 5.102 is the first
+ * release with every API the generated code uses (`mutationOptions` 5.82, the mutation callbacks' `context.client`
+ * 5.89, `queryClient.query` 5.102).
+ */
+export const TS_API_DEPENDENCIES = {
+  "@tanstack/react-query": "^5.102.0",
+  react: "^19.0.0",
+  "@types/react": "^19.0.0",
 } as const;
 
 /** Deterministic TypeScript (Zod v4) generation. The analysis must come from a model without errors. */
@@ -47,8 +63,10 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
   gen(P.file(`${P.generated}/index`), rootIndex(model, P, contexts.map((c) => c.ir.name)));
   scaffold(P.file(`${P.root}/index`), `${SCAFFOLD_HEADER}\n\n${docLines(`${model.project}${model.description ? ` — ${model.description.trim()}` : ""}`, "").join("\n")}\n\nexport * from "./generated/index.js";\n`);
 
+  const layouts: TsLayout[] = [];
   for (const ca of contexts) {
     const L = new TsLayout(model, ca);
+    layouts.push(L);
     const policies = policiesFile(L);
     for (const f of [
       errorsFile(L),
@@ -85,6 +103,20 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     if (ca.ir.extensionPoints.length) {
       const ext = extensionsScaffold(L);
       scaffold(ext.path, ext.content);
+    }
+  }
+  const api = model.generation.typescript.api;
+  if (api) {
+    // Not re-exported from generated/index.ts: a backend importing the domain never loads React or TanStack Query.
+    gen(P.file(P.apiModule("runtime")), template("Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch transport and the error mapping (zod only).", API_RUNTIME_TS));
+    gen(P.file(P.apiModule("react")), template("React context that hands the API client to the generated hooks.", API_REACT_TS));
+    gen(P.file(P.apiModule("register")), template("Registers the client's error type as TanStack Query's default error (module augmentation).", API_REGISTER_TS));
+    const served = apiContexts(layouts);
+    for (const f of [contractFile(P, served, api), serverFile(P, served), clientFile(P, served)]) gen(f.path, f.content);
+    for (const L of served) {
+      for (const f of [contextContractFile(L, api), queriesFile(L), hooksFile(L)]) gen(f.path, f.content);
+      const t = apiTestFile(L);
+      if (t) gen(t.path, t.content);
     }
   }
   scaffold("package.json", packageJson(model));
@@ -156,6 +188,7 @@ function extensionsScaffold(L: TsLayout): { path: string; content: string } {
 
 function packageJson(model: ModelIR): string {
   const bun = model.generation.typescript.testRunner === "bun";
+  const api = !!model.generation.typescript.api;
   const name = model.project.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "") || "domain";
   const pkg = {
     name,
@@ -164,10 +197,18 @@ function packageJson(model: ModelIR): string {
     type: "module",
     ...(model.description ? { description: model.description.trim() } : {}),
     scripts: { test: bun ? "bun test" : "vitest run", typecheck: "tsc --noEmit" },
-    dependencies: { "decimal.js": TS_DEPENDENCIES["decimal.js"], zod: TS_DEPENDENCIES.zod },
-    devDependencies: bun
-      ? { "@types/bun": TS_DEPENDENCIES["@types/bun"], typescript: TS_DEPENDENCIES.typescript }
-      : { "@types/node": TS_DEPENDENCIES["@types/node"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest },
+    dependencies: {
+      ...(api ? { "@tanstack/react-query": TS_API_DEPENDENCIES["@tanstack/react-query"] } : {}),
+      "decimal.js": TS_DEPENDENCIES["decimal.js"],
+      ...(api ? { react: TS_API_DEPENDENCIES.react } : {}),
+      zod: TS_DEPENDENCIES.zod,
+    },
+    devDependencies: {
+      ...(bun ? { "@types/bun": TS_DEPENDENCIES["@types/bun"] } : { "@types/node": TS_DEPENDENCIES["@types/node"] }),
+      ...(api ? { "@types/react": TS_API_DEPENDENCIES["@types/react"] } : {}),
+      typescript: TS_DEPENDENCIES.typescript,
+      ...(bun ? {} : { vitest: TS_DEPENDENCIES.vitest }),
+    },
   };
   return JSON.stringify(pkg, null, 2) + "\n";
 }
