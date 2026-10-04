@@ -95,10 +95,12 @@ describe("board ghosts", () => {
     const items = Array.from({ length: 3000 }, (_, i) => item(`c${i}`, "command", i * 200, 0));
     const board: Board = { version: 1, frames: [], connectors: [], items };
     boardGhosts(board); // warm up
-    const [ghosts, ms] = timed(() => boardGhosts(board));
+    // Fastest of several runs: guards against the old quadratic search (> 10 s) without failing on a busy machine.
+    const runs = Array.from({ length: 5 }, () => timed(() => boardGhosts(board)));
+    const [ghosts] = runs[0]!;
     expect(ghosts).toHaveLength(12);
     expect(ghosts[0]!.x).toBe(2999 * 200 + 120); // just past the last sticky of the row
-    expect(ms).toBeLessThan(100);
+    expect(Math.min(...runs.map(([, ms]) => ms))).toBeLessThan(100);
   });
 
   test("a fully connected row (no ghosts, aggregate grouping only) stays fast", () => {
