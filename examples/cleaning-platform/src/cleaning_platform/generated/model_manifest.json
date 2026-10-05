@@ -87,7 +87,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/rate_limit.py",
-      "sha256": "34ac9fe2f2e008fbe7d269f19e9838e894ed40fef5c0cc3a97918fc1803bc0ba"
+      "sha256": "29dff9a329b7eb36711174d276fba7d0b3239e2d8eb628d422de38f659e35239"
     },
     {
       "path": "src/cleaning_platform/generated/security.py",

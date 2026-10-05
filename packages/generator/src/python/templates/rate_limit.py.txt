@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 __all__ = [
     "BucketState",
@@ -14,6 +14,7 @@ __all__ = [
     "RateLimitDecision",
     "RateLimitStore",
     "RateLimiter",
+    "TokenStep",
     "rate_limit_headers",
     "take_token",
 ]
@@ -55,9 +56,14 @@ class RateLimitDecision:
     """Seconds until the bucket is full again."""
 
 
-def take_token(
-    state: BucketState | None, limit: RateLimit, now: float
-) -> tuple[BucketState, RateLimitDecision]:
+class TokenStep(NamedTuple):
+    """The bucket after a request and the answer for it."""
+
+    state: BucketState
+    decision: RateLimitDecision
+
+
+def take_token(state: BucketState | None, limit: RateLimit, now: float) -> TokenStep:
     """One token-bucket step, pure: refill `state` for the time since saved, then take a token.
 
     Store implementations (Redis, a database row) run exactly this on the stored state, atomically
@@ -77,7 +83,7 @@ def take_token(
         retry_after=0 if allowed else math.ceil((1 - tokens) / per_second),
         reset=math.ceil((capacity - tokens) / per_second),
     )
-    return BucketState(tokens=tokens, updated_at=now), decision
+    return TokenStep(BucketState(tokens=tokens, updated_at=now), decision)
 
 
 class RateLimitStore(Protocol):

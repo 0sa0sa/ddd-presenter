@@ -173,7 +173,7 @@ describe("issue_invitation", () => {
   });
 
   /** Without a principal issue_invitation raises Unauthenticated before it touches a repository. */
-  test("authorization: an anonymous caller is unauthenticated before anything is loaded", async () => {
+  test("authorization: an anonymous caller is refused before any load", async () => {
     // Repositories that fail the test when the use case touches them: authorization comes first.
     const untouched = {
       get: (): never => {
@@ -207,7 +207,7 @@ describe("issue_invitation", () => {
    * A principal with only the other roles (candidate) lacks admin: issue_invitation raises
    * NotAuthorized naming the required roles, before it touches a repository.
    */
-  test("authorization: a principal without a required role is refused before anything is loaded", async () => {
+  test("authorization: a missing role is refused before any load", async () => {
     // Repositories that fail the test when the use case touches them: authorization comes first.
     const untouched = {
       get: (): never => {

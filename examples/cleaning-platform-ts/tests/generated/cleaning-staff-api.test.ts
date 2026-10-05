@@ -269,7 +269,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
    * 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint
    * is not wired, so allowed requests answer 404 after taking their token.
    */
-  test("rate limit: issue_invitation answers 429 with Retry-After and RateLimit headers, then refills", async () => {
+  test("rate limit: issue_invitation answers 429 when used up, then refills", async () => {
     let now = Date.parse("2026-01-01T00:00:00Z");
     const handler = createApiHandler(
       {},

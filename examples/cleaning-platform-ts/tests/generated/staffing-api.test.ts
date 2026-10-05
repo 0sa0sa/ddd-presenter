@@ -102,7 +102,7 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
    * has refilled. The endpoint is not wired, so allowed requests answer 404 after taking their
    * token.
    */
-  test("rate limit: read_staff_member answers 429 with Retry-After and RateLimit headers, then refills", async () => {
+  test("rate limit: read_staff_member answers 429 when used up, then refills", async () => {
     let now = Date.parse("2026-01-01T00:00:00Z");
     const handler = createApiHandler(
       {},

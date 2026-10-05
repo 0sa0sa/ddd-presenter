@@ -27,7 +27,7 @@ export type BearerJwtOptions = JwtKey & {
   readonly issuer?: string;
   /** Expected `aud`; default `security.authentication.audience`. */
   readonly audience?: string;
-  /** Allowed clock skew in seconds for `exp` / `nbf`; default `security.authentication.clock_tolerance`. */
+  /** Allowed clock skew in seconds for `exp` / `nbf`; default `authentication.clock_tolerance`. */
   readonly clockTolerance?: number;
 };
 
@@ -64,7 +64,7 @@ function invalidToken(message: string): Unauthenticated {
  * server error (500), not the caller's fault.
  *
  * ```ts
- * const authenticate = createBearerJwtAuthenticator({ jwksUrl: "https://issuer/.well-known/jwks.json" });
+ * const authenticate = createBearerJwtAuthenticator({ jwksUrl: process.env.JWKS_URL });
  * const handler = createApiHandler(dependencies, { authenticate });
  * ```
  */

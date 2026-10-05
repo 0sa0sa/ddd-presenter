@@ -528,7 +528,7 @@ function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): v
     c.doc(
       `\`${limited.method} ${limited.path}\` allows ${limit.requests} request(s) per ${w} s (by ${limit.by}): then 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint is not wired, so allowed requests answer 404 after taking their token.`,
     );
-    c.block(`test(${tsString(`rate limit: ${name} answers 429 with Retry-After and RateLimit headers, then refills`)}, async () =>`, () => {
+    c.block(`test(${tsString(`rate limit: ${name} answers 429 when used up, then refills`)}, async () =>`, () => {
       c.line('let now = Date.parse("2026-01-01T00:00:00Z");');
       c.line("const handler = createApiHandler(");
       c.indent(() => {

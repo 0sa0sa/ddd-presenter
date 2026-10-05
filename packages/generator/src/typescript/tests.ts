@@ -490,13 +490,13 @@ function authorizationTests(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports)
   imp.value(L.contextTesting, "expectRejects");
   const cases: { name: string; doc: string; principal: string; error: string; details: string }[] = [];
   if (!uc.scenarios.some((s) => s.given.principal?.anonymous)) {
-    cases.push({ name: "authorization: an anonymous caller is unauthenticated before anything is loaded", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "null", error: "Unauthenticated", details: `{ action: ${tsString(uc.name)} }` });
+    cases.push({ name: "authorization: an anonymous caller is refused before any load", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "null", error: "Unauthenticated", details: `{ action: ${tsString(uc.name)} }` });
   }
   if (auth.roles.length) {
     const roles = otherRoles(sec, uc.authorize!);
     const p = makePrincipal(sec, { roles, claims: {} });
     cases.push({
-      name: "authorization: a principal without a required role is refused before anything is loaded",
+      name: "authorization: a missing role is refused before any load",
       doc: `A principal with ${roles.length ? `only the other roles (${roles.join(", ")})` : "no role"} lacks ${auth.roles.join(" / ")}: ${uc.name} raises NotAuthorized naming the required roles, before it touches a repository.`,
       principal: principalLiteral(L, p, imp),
       error: "NotAuthorized",

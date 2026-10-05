@@ -210,6 +210,8 @@ const KITCHEN_SINK = readFileSync(join(import.meta.dir, "fixtures/kitchen-sink.d
 const CONTEXT_MAP = readFileSync(join(import.meta.dir, "fixtures/context-map.ddd.yaml"), "utf8");
 const ORDERING = readFileSync(join(import.meta.dir, "fixtures/ordering.ddd.yaml"), "utf8");
 const LONG_RULES = readFileSync(join(import.meta.dir, "fixtures/long-rules.ddd.yaml"), "utf8");
+/** Roles, a typed principal with claims, bearer JWT, rate limits; public, internal and role / rule protected use cases. */
+const SECURITY = readFileSync(join(import.meta.dir, "fixtures/security.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -223,6 +225,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the context-map model (policies within and across contexts, anticorruption layer, subscriptions)", CONTEXT_MAP],
     ["the ordering model (arithmetic, durations, collection functions, constructors, let)", ORDERING],
     ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES],
+    ["the security model (roles, allow_if, public / internal use cases, PyJWT authenticator, rate limiter)", SECURITY],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -277,6 +280,7 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
     ["the context-map model", CONTEXT_MAP],
     ["the ordering model", ORDERING],
     ["the long-rules model", LONG_RULES],
+    ["the security model", SECURITY],
     ["a model reflected from the discovery board", FROM_BOARD],
   ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));
@@ -570,5 +574,57 @@ describe("idempotency_key", () => {
     expect(t).toContain('assert idempotency_store.get("register_customer", str(command.request_id)) is None');
     const sample = generate();
     expect(sample.files.some((f) => f.content.includes("IdempotencyStore"))).toBe(false);
+  });
+});
+
+describe("authentication, authorization and rate limiting (Python)", () => {
+  const out = generate(SECURITY);
+  const file = (p: string) => out.files.find((f) => f.path === `src/secure_hiring/generated/${p}`)?.content ?? "";
+  const useCases = file("hiring/application/use_cases.py");
+  const cls = (name: string) => useCases.slice(useCases.indexOf(`class ${name}`), useCases.indexOf("\n\n\nclass ", useCases.indexOf(`class ${name}`) + 1));
+
+  test("files: security.py, rate_limit.py, the PyJWT authenticator, read access and the security tests", () => {
+    const paths = out.files.map((f) => f.path);
+    expect(paths).toEqual(expect.arrayContaining([
+      "src/secure_hiring/generated/security.py",
+      "src/secure_hiring/generated/rate_limit.py",
+      "src/secure_hiring/generated/authentication.py",
+      "src/secure_hiring/generated/hiring/application/read_access.py",
+      "tests/generated/test_security.py",
+    ]));
+    expect(file("security.py")).toContain('Role = Literal["admin", "staff", "candidate"]');
+    expect(file("security.py")).toContain("company_id: UUID | None = None");
+    expect(file("security.py")).toContain('"company_id": claims.get("https://example.com/company_id"),');
+    expect(file("security.py")).toContain('"post_job": RateLimit("post_job", 5, 60, "principal"),');
+    expect(file("security.py")).not.toContain('"record_audit"');
+    expect(file("authentication.py")).toContain('options={"require": ["exp", "sub", "iss", "aud"]},');
+    expect(file("authentication.py")).toContain("from secure_hiring.generated.security import (");
+    // Without security nothing of this is generated.
+    expect(generate(CONTEXT_MAP).files.filter((f) => /security|rate_limit|authentication|read_access/.test(f.path))).toEqual([]);
+  });
+
+  test("execute(command, principal): the role check comes first, allow_if after the leading loads it reads", () => {
+    const post = cls("PostJobUseCase");
+    expect(post).toContain("def execute(self, command: PostJob, principal: Principal | None) -> UUID:");
+    const body = post.slice(post.indexOf("def execute("));
+    expect(body.indexOf('principal = authorize(principal, "post_job", ("admin", "staff"))')).toBeLessThan(body.indexOf("self._idempotency_store.get("));
+    expect(body.indexOf("allow_if(")).toBeLessThan(body.indexOf("self._idempotency_store.get("));
+    expect(body).toContain('key = f"{principal.id}:{command.request_id}"');
+    const close = cls("CloseJobUseCase");
+    expect(close.indexOf("self._job_repository.get(")).toBeLessThan(close.indexOf("allow_if("));
+    expect(close.indexOf("allow_if(")).toBeLessThan(close.indexOf("= job.close("));
+    expect(close).toContain('"admin" in principal.roles');
+    expect(cls("CheckJobOpenUseCase")).toContain("def execute(self, command: CheckJobOpen) -> bool:");
+    expect(cls("RecordAuditUseCase")).toContain("def execute(self, command: RecordAudit) -> UUID:");
+  });
+
+  test("generated tests: scenario principals and derived authorization tests with untouched repositories", () => {
+    const t = out.files.find((f) => f.path === "tests/generated/test_hiring_close_job.py")!.content;
+    expect(t).toContain("class _UntouchedJobRepository:");
+    expect(t).toContain("def test_authorization_missing_role_is_refused() -> None:");
+    expect(t).toContain('assert raised.value.details == {"action": "close_job", "required_roles": ["admin", "staff"]}');
+    const sec = out.files.find((f) => f.path === "tests/generated/test_security.py")!.content;
+    expect(sec).toContain("def test_alg_none_and_hmac_signed_with_the_public_key_are_rejected() -> None:");
+    expect(sec).toContain("def test_the_bucket_empties_refuses_and_refills() -> None:");
   });
 });
