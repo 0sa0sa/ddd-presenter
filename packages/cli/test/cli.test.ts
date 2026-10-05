@@ -240,3 +240,24 @@ describe("ddd CLI", () => {
     expect(cli(["migrate", model]).out).toContain("nothing to migrate");
   });
 });
+
+describe("pruning removes directories it leaves empty", () => {
+  test("empty parents go, directories that still hold files and the root stay", async () => {
+    const { atomicApply } = await import("../src/fsops.ts");
+    const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const root = mkdtempSync(join(tmpdir(), "ddd-prune-"));
+    try {
+      mkdirSync(join(root, "src/gen/api/ordering"), { recursive: true });
+      writeFileSync(join(root, "src/gen/api/ordering/hooks.ts"), "x");
+      writeFileSync(join(root, "src/gen/api/client.ts"), "x");
+      atomicApply(root, [{ path: "src/gen/api/ordering/hooks.ts", remove: true }]);
+      expect(existsSync(join(root, "src/gen/api/ordering"))).toBe(false);
+      expect(existsSync(join(root, "src/gen/api/client.ts"))).toBe(true);
+      expect(existsSync(root)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
