@@ -16,6 +16,7 @@ import {
   aggregateViaJson,
   CapturingEventPublisher,
   expectPresent,
+  expectRejects,
   FakeUnitOfWork,
   InMemoryCleaningStaffInvitationRepository,
   jsonOf,
@@ -23,6 +24,11 @@ import {
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { id } from "../../src/cleaning_platform/generated/runtime.js";
+import {
+  NotAuthorized,
+  Principal,
+  Unauthenticated,
+} from "../../src/cleaning_platform/generated/security.js";
 
 describe("revoke_invitation", () => {
   /**
@@ -57,7 +63,8 @@ describe("revoke_invitation", () => {
     const command = RevokeInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const result = await useCase.execute(command);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const result = await useCase.execute(command, principal);
     expect(result).toBe(true);
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
@@ -113,9 +120,70 @@ describe("revoke_invitation", () => {
     const command = RevokeInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const result = await useCase.execute(command);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const result = await useCase.execute(command, principal);
     expect(result).toBe(false);
     expect(unitOfWork.committed).toBe(true);
     expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
+  });
+
+  /**
+   * Without a principal revoke_invitation raises Unauthenticated before it touches a repository.
+   */
+  test("authorization: an anonymous caller is unauthenticated before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new RevokeInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = RevokeInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const error = await expectRejects(() => useCase.execute(command, null), Unauthenticated);
+    expect(error.details).toEqual({ action: "revoke_invitation" });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * A principal with only the other roles (candidate) lacks admin: revoke_invitation raises
+   * NotAuthorized naming the required roles, before it touches a repository.
+   */
+  test("authorization: a principal without a required role is refused before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new RevokeInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = RevokeInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const error = await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
+    expect(error.details).toEqual({ action: "revoke_invitation", requiredRoles: ["admin"] });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
   });
 });

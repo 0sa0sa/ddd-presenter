@@ -19,6 +19,10 @@ from cleaning_platform.generated.cleaning_staff.testing import (
     InMemoryCleaningStaffInvitationRepository,
     SequentialIds,
 )
+from cleaning_platform.generated.security import Principal
+
+# issue_invitation needs an admin (authorize: { roles: [admin] }).
+ADMIN = Principal(id="admin-1", roles=("admin",))
 
 
 def make_use_case(blocked: frozenset[str]) -> IssueInvitationUseCase:
@@ -40,7 +44,7 @@ def test_blocked_domain_is_rejected() -> None:
         valid_until=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
     )
     with pytest.raises(EmailBlocked):
-        use_case.execute(command)
+        use_case.execute(command, ADMIN)
 
 
 def test_other_domains_are_accepted() -> None:
@@ -49,4 +53,4 @@ def test_other_domains_are_accepted() -> None:
         email=EmailAddress(value="someone@example.com"),
         valid_until=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
     )
-    assert use_case.execute(command) == UUID(int=1)
+    assert use_case.execute(command, ADMIN) == UUID(int=1)

@@ -337,7 +337,8 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
   c.line();
   c.doc(`Endpoints of the ${L.ca.ir.name} context: a POST per use case, a GET per aggregate (load by identity).`);
   c.block("export const contract =", () => {
-    c.block("useCases:", () => {
+    if (!servedUseCases(L).length) c.line("useCases: {},");
+    else c.block("useCases:", () => {
       for (const uc of servedUseCases(L)) {
         imp.value(L.apiModule("runtime"), "useCaseEndpoint");
         imp.value(L.mod("commands"), uc.command);

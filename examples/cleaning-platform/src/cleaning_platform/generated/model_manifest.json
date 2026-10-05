@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "b7e59156aee6d862ee8b1d63db1d28687aa657aa576595a6c80652eee5f12120",
+  "model_sha256": "efc031a6043d2b0706c7fea6a945881c4712ac714dca7b8edcd7f279fa703a6f",
   "files": [
     {
       "path": "src/cleaning_platform/generated/__init__.py",
@@ -18,6 +18,10 @@
       "sha256": "1b0757365ca27fd439e9e01c5c0837fdc19832747aeac50927c78908f9b6525f"
     },
     {
+      "path": "src/cleaning_platform/generated/authentication.py",
+      "sha256": "8ae0c5c4fdff7d38b0af153d3b5b900a7081e4494638f52641ec8e0bcf1b706a"
+    },
+    {
       "path": "src/cleaning_platform/generated/cleaning_staff/__init__.py",
       "sha256": "1d244a2a525502efa3c67b6ad4503de67346d66477e523427dd73c722e28e19c"
     },
@@ -30,8 +34,12 @@
       "sha256": "ed875b4fe744fbdff395e6582350500b1d472534f8d9dc90c28f7bb8fb89a5df"
     },
     {
+      "path": "src/cleaning_platform/generated/cleaning_staff/application/read_access.py",
+      "sha256": "0cde78975b717061e1628e24c59736093bd1c53b4c5e62a1d55bfd88c115401c"
+    },
+    {
       "path": "src/cleaning_platform/generated/cleaning_staff/application/use_cases.py",
-      "sha256": "52a2e727ce40e6488affcc9b92f9e06227f8e62b7530cb327a958a83ebe8f0cc"
+      "sha256": "9ad471383746ae27f4af42209d085f64ae7d57156b2b633c3a20568a4ba31a5b"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/domain/__init__.py",
@@ -71,11 +79,19 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/README.md",
-      "sha256": "afd273899dde6e65f69954c93a6276f6561dafffd171db03fba352ac49f13346"
+      "sha256": "06bceeb94f9911dc340830fbe9c1f1176b83bc115ecd2c86c55cebd20aa296e2"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
       "sha256": "6c4128a46e05e6f13305a48e963ad7d53e76f9a2ac5f580ea328b1e396e50f08"
+    },
+    {
+      "path": "src/cleaning_platform/generated/rate_limit.py",
+      "sha256": "34ac9fe2f2e008fbe7d269f19e9838e894ed40fef5c0cc3a97918fc1803bc0ba"
+    },
+    {
+      "path": "src/cleaning_platform/generated/security.py",
+      "sha256": "c8ddce3f850f520696d69e3428a884607736b22596abf01757dfc6ca2b808b73"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/__init__.py",
@@ -94,8 +110,12 @@
       "sha256": "4da882f0228483159b231a047d4bc32370e8533a92e7008e30f86cda5a57f47d"
     },
     {
+      "path": "src/cleaning_platform/generated/staffing/application/read_access.py",
+      "sha256": "cb0f2184102aed9b3017df912aa97af54ee60ebdedda2eea6541240eec03d462"
+    },
+    {
       "path": "src/cleaning_platform/generated/staffing/application/use_cases.py",
-      "sha256": "0baddb0a60f6a870091b55209b699bc5b60531262f131544fce5f25eb537f7e1"
+      "sha256": "a1a2c7be59970dea85f903231d1d3bf8257b715f396e64bb72aab04572aecb96"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/__init__.py",
@@ -143,7 +163,7 @@
     },
     {
       "path": "tests/generated/test_cleaning_staff_accept_invitation.py",
-      "sha256": "758821e70063e70b04810c7b4d5d928f114820222af46c9ee43008cb53a8cb2c"
+      "sha256": "3b91e3fdbeb47fce655983ba7b40e9f1d502ef617d350d2a354ae11997158cb0"
     },
     {
       "path": "tests/generated/test_cleaning_staff_cleaning_staff_invitation.py",
@@ -155,11 +175,15 @@
     },
     {
       "path": "tests/generated/test_cleaning_staff_issue_invitation.py",
-      "sha256": "876209e66e08ce09780e640ef4887d2f7e837ecc62172d77af8c651cee3fe697"
+      "sha256": "39ec7dba7a3453c555cfd82a899cb459044b64aeba8084cc6e02abbd38e85826"
     },
     {
       "path": "tests/generated/test_cleaning_staff_revoke_invitation.py",
-      "sha256": "4da962ca4df0965b37faf2045c8168be5e15aa74db4c5a1abcce6217471748de"
+      "sha256": "42ca9f7542c062bff699e83674017fc6075eee4b1e9606078e556fc1329cb19c"
+    },
+    {
+      "path": "tests/generated/test_security.py",
+      "sha256": "da9dc575596755b24951b66f5b7cb7430e5b34bec82923ad065a912390fcde95"
     },
     {
       "path": "tests/generated/test_staffing_policies.py",

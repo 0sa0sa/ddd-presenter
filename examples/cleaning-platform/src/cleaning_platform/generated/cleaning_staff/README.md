@@ -46,7 +46,7 @@
 - Class: `AcceptInvitationUseCase`, command: `AcceptInvitation`
 - Actor: スタッフ候補
 - Transaction: required
-- Scenarios: `pending_invitation_is_accepted`, `expired_invitation_is_rejected`, `unknown_invitation_is_not_found`
+- Scenarios: `pending_invitation_is_accepted`, `expired_invitation_is_rejected`, `unknown_invitation_is_not_found`, `another_candidate_cannot_accept`
 
 ## Use case revoke_invitation
 

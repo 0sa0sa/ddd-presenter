@@ -7,9 +7,8 @@
 
 import { z } from "zod";
 
-import { readEndpoint, useCaseEndpoint } from "../../api/runtime.js";
+import { readEndpoint } from "../../api/runtime.js";
 import { idSchema, InstantSchema, uuidSchema } from "../../runtime.js";
-import { RegisterStaff } from "../domain/commands.js";
 
 /**
  * JSON form of StaffMember (what `GET /api/staffing/staff-member/:id` returns): its fields,
@@ -26,17 +25,7 @@ export type StaffMemberJson = z.output<typeof StaffMemberJson>;
  * Endpoints of the Staffing context: a POST per use case, a GET per aggregate (load by identity).
  */
 export const contract = {
-  useCases: {
-    /** 招待を受諾した人をスタッフとして登録する (actor: システム（ポリシー）). */
-    registerStaff: useCaseEndpoint({
-      name: "register_staff",
-      method: "POST",
-      path: "/api/staffing/register-staff",
-      input: RegisterStaff.schema,
-      output: uuidSchema,
-      errors: { constraint_violation: 400 },
-    }),
-  },
+  useCases: {},
   aggregates: {
     /** Loads StaffMember by id. */
     staffMember: readEndpoint({
@@ -46,7 +35,14 @@ export const contract = {
       id: idSchema("StaffMember"),
       idType: "string",
       output: StaffMemberJson,
-      errors: { constraint_violation: 400, aggregate_not_found: 404 },
+      errors: {
+        constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
+        aggregate_not_found: 404,
+      },
+      auth: { kind: "principal", roles: ["admin"] },
+      rateLimit: { name: "read_staff_member", requests: 60, windowSeconds: 60, by: "principal" },
     }),
   },
 } as const;

@@ -3,7 +3,8 @@
 
 /**
  * Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch
- * transport and the error mapping (zod only).
+ * transport and the error mapping, authentication and rate limiting hooks, typed client errors and
+ * the retry policy (zod only).
  */
 
 import { z } from "zod";
@@ -16,16 +17,30 @@ import {
   type ErrorDetails,
   parseWith,
 } from "../runtime.js";
+import { RateLimiter, type RateLimitPolicy, rateLimitHeaders } from "./rate-limit.js";
+
+export type { RateLimitPolicy } from "./rate-limit.js";
 
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
 
-/** HTTP status of a domain error: 400 invalid values, 404 not found, 409 conflict, 422 rule. */
-export type ErrorStatus = 400 | 404 | 409 | 422;
+/**
+ * HTTP status of a domain error: 400 invalid values, 401 unauthenticated, 403 not authorized, 404
+ * not found, 409 conflict, 422 rule.
+ */
+export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 422;
 
 /** Domain error code → HTTP status of one endpoint (codes not listed answer 422). */
 export type ErrorStatuses = Readonly<Record<string, ErrorStatus>>;
+
+/**
+ * Who may call an endpoint: anyone (`public`), or an authenticated principal holding one of `roles`
+ * (any principal when empty). The use case checks it again; the handler answers 401 early.
+ */
+export type EndpointAuth =
+  | { readonly kind: "public" }
+  | { readonly kind: "principal"; readonly roles: ReadonlyArray<string> };
 
 /** A use case exposed as `POST path`: the command's schema in, the use case's result out. */
 export interface UseCaseEndpoint<I extends z.ZodType, O extends z.ZodType> {
@@ -37,6 +52,9 @@ export interface UseCaseEndpoint<I extends z.ZodType, O extends z.ZodType> {
   readonly output: O;
   /** The domain errors the use case can raise, with their HTTP status. */
   readonly errors: ErrorStatuses;
+  readonly auth: EndpointAuth;
+  /** Token bucket of the endpoint (`rate_limit`), or null for none. */
+  readonly rateLimit: RateLimitPolicy | null;
 }
 
 /** Loading one aggregate by its identity: `GET path` (the path ends with `/:id`). */
@@ -50,6 +68,8 @@ export interface ReadEndpoint<K extends z.ZodType, O extends z.ZodType> {
   readonly idType: "string" | "number";
   readonly output: O;
   readonly errors: ErrorStatuses;
+  readonly auth: EndpointAuth;
+  readonly rateLimit: RateLimitPolicy | null;
 }
 
 export function useCaseEndpoint<I extends z.ZodType, O extends z.ZodType>(
@@ -86,6 +106,10 @@ export const HTTP_ERROR_CODES = {
   invalidResponse: "invalid_response",
   /** Client only: an error response without a JSON error body. */
   httpError: "http_error",
+  /** 401: no or invalid credentials (see the WWW-Authenticate header). */
+  unauthenticated: "unauthenticated",
+  /** 429: the endpoint's rate limit is used up (see Retry-After and RateLimit). */
+  rateLimited: "rate_limited",
 } as const;
 
 /**
@@ -131,9 +155,12 @@ export function errorRegistry(errors: ReadonlyArray<DomainErrorClass>): ErrorReg
 // Server
 // ---------------------------------------------------------------------------
 
-/** Anything with the use case's `execute` (the generated use case classes). */
-export interface Executes<C> {
-  execute(command: C): Promise<unknown>;
+/**
+ * Anything with the use case's `execute` (the generated use case classes): a use case that needs a
+ * principal takes it as the second argument, a public one ignores it.
+ */
+export interface Executes<C, P> {
+  execute(command: C, principal: P | null): Promise<unknown>;
 }
 
 /** Anything with the repository's `get` (the generated repository ports). */
@@ -142,49 +169,92 @@ export interface Loads<K> {
 }
 
 /** One endpoint of the handler; `dependency` is undefined when the app did not wire it (404). */
-export interface Route<D> {
+export interface Route<D, P> {
   readonly method: "GET" | "POST";
   readonly path: string;
   readonly errors: ErrorStatuses;
-  handle(request: Request, dependencies: D, id: string): Promise<Response | undefined>;
+  readonly auth: EndpointAuth;
+  readonly rateLimit: RateLimitPolicy | null;
+  handle(
+    request: Request,
+    dependencies: D,
+    id: string,
+    principal: P | null,
+  ): Promise<Response | undefined>;
 }
 
-export interface ApiHandlerOptions {
+/**
+ * Finds the principal of a request: null when it carries no credentials; throws a domain error with
+ * code `unauthenticated` (details `{ error: "invalid_token" }`) when they are invalid.
+ */
+export type Authenticator<P> = (request: Request) => Promise<P | null>;
+
+export interface ApiHandlerOptions<P = unknown> {
   /** Called with every unexpected error (answered 500 without details). Default: console.error. */
   readonly onError?: (error: unknown, request: Request) => void;
+  /**
+   * Authenticates requests to endpoints that need a principal (e.g. the generated
+   * `createBearerJwtAuthenticator`). Without it those endpoints always answer 401.
+   */
+  readonly authenticate?: Authenticator<P>;
+  /** Token buckets of the endpoints' rate limits. Default: in memory, per handler. */
+  readonly rateLimiter?: RateLimiter;
+  /**
+   * The client's IP address for rate limits `by: ip`, e.g. `(r) => server.requestIP(r)?.address`
+   * with Bun.serve. Default: unknown, so every such request shares one bucket. Read
+   * X-Forwarded-For only behind a proxy you control that overwrites it.
+   */
+  readonly clientIp?: (request: Request) => string | undefined;
 }
 
-export function useCaseRoute<D, I extends z.ZodType, O extends z.ZodType>(
+export function useCaseRoute<D, P, I extends z.ZodType, O extends z.ZodType>(
   endpoint: UseCaseEndpoint<I, O>,
-  dependency: (dependencies: D) => Executes<z.output<I>> | undefined,
-): Route<D> {
+  dependency: (dependencies: D) => Executes<z.output<I>, P> | undefined,
+): Route<D, P> {
   return {
     method: endpoint.method,
     path: endpoint.path,
     errors: endpoint.errors,
-    async handle(request, dependencies) {
+    auth: endpoint.auth,
+    rateLimit: endpoint.rateLimit,
+    async handle(request, dependencies, _id, principal) {
       const useCase = dependency(dependencies);
       if (useCase === undefined) return undefined;
       const command = parseWith(endpoint.input, await readJson(request), endpoint.name);
-      const result = await useCase.execute(command);
+      const result = await useCase.execute(command, principal);
       return result === undefined ? new Response(null, { status: 204 }) : json(200, result);
     },
   };
 }
 
-export function readRoute<D, K extends z.ZodType, O extends z.ZodType>(
+/**
+ * Loading by identity. `read` is the aggregate's generated read access (roles before loading,
+ * allow_if on the loaded aggregate); without it the repository is read directly (public).
+ */
+export function readRoute<
+  D,
+  P,
+  K extends z.ZodType,
+  O extends z.ZodType,
+  R extends Loads<z.output<K>>,
+>(
   endpoint: ReadEndpoint<K, O>,
-  dependency: (dependencies: D) => Loads<z.output<K>> | undefined,
-): Route<D> {
+  dependency: (dependencies: D) => R | undefined,
+  read?: (repository: R, id: z.output<K>, principal: P | null) => Promise<unknown>,
+): Route<D, P> {
   return {
     method: endpoint.method,
     path: endpoint.path,
     errors: endpoint.errors,
-    async handle(_request, dependencies, id) {
+    auth: endpoint.auth,
+    rateLimit: endpoint.rateLimit,
+    async handle(_request, dependencies, id, principal) {
       const repository = dependency(dependencies);
       if (repository === undefined) return undefined;
       const raw = endpoint.idType === "number" && /^-?\d+$/.test(id) ? Number(id) : id;
-      const aggregate = await repository.get(parseWith(endpoint.id, raw, endpoint.name + " id"));
+      const key = parseWith(endpoint.id, raw, endpoint.name + " id");
+      const aggregate =
+        read === undefined ? await repository.get(key) : await read(repository, key, principal);
       if (aggregate === null || aggregate === undefined) {
         throw new AggregateNotFound({ aggregate: endpoint.name, id });
       }
@@ -196,17 +266,40 @@ export function readRoute<D, K extends z.ZodType, O extends z.ZodType>(
 /**
  * A Web-standard handler (`Request` → `Response`) over `routes`. `dependencies` is an object, or a
  * function of the request (e.g. a unit of work per request).
+ *
+ * Per request: rate limits `by: ip` / `global` (before authentication, so they also shield the
+ * authenticator), authentication of endpoints that need a principal (401 with
+ * `WWW-Authenticate: Bearer`), rate limits `by: principal`, then the use case or read access,
+ * which authorizes (403). Limited endpoints answer the RateLimit headers; a used-up limit answers
+ * 429 with Retry-After.
  */
-export function apiHandler<D>(
-  routes: ReadonlyArray<Route<D>>,
+export function apiHandler<D, P extends { readonly id: string }>(
+  routes: ReadonlyArray<Route<D, P>>,
   dependencies: D | ((request: Request) => Awaitable<D>),
-  options: ApiHandlerOptions = {},
+  options: ApiHandlerOptions<P> = {},
 ): (request: Request) => Promise<Response> {
   const onError =
     options.onError ??
     ((error: unknown) => {
       console.error(error);
     });
+  const limiter = options.rateLimiter ?? new RateLimiter();
+  /** Takes a token; returns the 429 response when there is none. Adds the RateLimit headers. */
+  const take = async (
+    limit: RateLimitPolicy,
+    subject: string,
+    headers: Record<string, string>,
+  ): Promise<Response | undefined> => {
+    const decision = await limiter.consume(limit, subject);
+    Object.assign(headers, rateLimitHeaders(limit, decision));
+    if (decision.allowed) return undefined;
+    const body = {
+      code: HTTP_ERROR_CODES.rateLimited,
+      message: "Too many requests",
+      details: { retryAfter: decision.retryAfter },
+    };
+    return json(429, body, headers);
+  };
   return async (request) => {
     const segments = new URL(request.url).pathname.split("/");
     const allowed: string[] = [];
@@ -217,14 +310,38 @@ export function apiHandler<D>(
         allowed.push(route.method);
         continue;
       }
+      const headers: Record<string, string> = {};
       try {
+        const limit = route.rateLimit;
+        const early = limit !== null && (limit.by !== "principal" || route.auth.kind === "public");
+        if (early) {
+          // A public endpoint has no principal: its limit counts per client IP.
+          const subject = limit.by === "global" ? "*" : (options.clientIp?.(request) ?? "unknown");
+          const refused = await take(limit, subject, headers);
+          if (refused) return refused;
+        }
+        let principal: P | null = null;
+        if (route.auth.kind === "principal") {
+          principal = (await options.authenticate?.(request)) ?? null;
+          if (principal === null) return unauthenticated(undefined, headers);
+          if (limit !== null && !early) {
+            const refused = await take(limit, principal.id, headers);
+            if (refused) return refused;
+          }
+        }
         const resolved = isResolver(dependencies) ? await dependencies(request) : dependencies;
-        const response = await route.handle(request, resolved, id);
-        return response ?? notFound(request);
+        const response =
+          (await route.handle(request, resolved, id, principal)) ?? notFound(request);
+        for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
+        return response;
       } catch (error) {
+        if (isDomainError(error) && error.code === HTTP_ERROR_CODES.unauthenticated) {
+          return unauthenticated(error, headers);
+        }
         if (isDomainError(error)) {
           const status = route.errors[error.code] ?? 422;
-          return json(status, { code: error.code, message: error.message, details: error.details });
+          const body = { code: error.code, message: error.message, details: error.details };
+          return json(status, body, headers);
         }
         onError(error, request);
         const body = { code: HTTP_ERROR_CODES.internalError, message: "Internal server error" };
@@ -240,6 +357,24 @@ export function apiHandler<D>(
     }
     return notFound(request);
   };
+}
+
+/**
+ * 401 with the RFC 6750 challenge: `WWW-Authenticate: Bearer` without credentials, plus
+ * `error="invalid_token"` when the authenticator rejected them.
+ */
+function unauthenticated(
+  error: DomainError | undefined,
+  headers: Record<string, string>,
+): Response {
+  const invalid = error?.details["error"] === "invalid_token";
+  const challenge = invalid ? 'Bearer error="invalid_token"' : "Bearer";
+  const body = {
+    code: HTTP_ERROR_CODES.unauthenticated,
+    message: error?.message ?? "Authentication is required",
+    ...(invalid ? { details: { error: "invalid_token" } } : {}),
+  };
+  return json(401, body, { ...headers, "www-authenticate": challenge });
 }
 
 /** `instanceof DomainError`, typed with the default details (instanceof alone gives `any`). */
@@ -316,6 +451,11 @@ export interface ApiClientOptions {
   /** Headers of every request (e.g. authorization), or a function returning them per request. */
   readonly headers?:
     Readonly<Record<string, string>> | (() => Awaitable<Readonly<Record<string, string>>>);
+  /**
+   * The bearer token of a request (`Authorization: Bearer <token>`), asked for before every request
+   * so a refreshed token is used at once; null or undefined sends none.
+   */
+  readonly getToken?: () => Awaitable<string | null | undefined>;
 }
 
 /** Per-request options: TanStack Query passes its AbortSignal so cancelled queries abort. */
@@ -327,6 +467,7 @@ export interface Transport {
   readonly baseUrl: string;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly headers: () => Awaitable<Readonly<Record<string, string>>>;
+  readonly token: () => Awaitable<string | null | undefined>;
 }
 
 export function createTransport(options: ApiClientOptions = {}): Transport {
@@ -335,6 +476,7 @@ export function createTransport(options: ApiClientOptions = {}): Transport {
     baseUrl: (options.baseUrl ?? "").replace(/\/+$/, ""),
     fetch: options.fetch ?? ((request) => fetch(request)),
     headers: typeof headers === "function" ? headers : () => headers,
+    token: options.getToken ?? (() => undefined),
   };
 }
 
@@ -379,6 +521,8 @@ async function send<O extends z.ZodType>(
   const headers: Record<string, string> = { accept: "application/json" };
   if (body !== null) headers["content-type"] = "application/json";
   Object.assign(headers, await transport.headers());
+  const token = await transport.token();
+  if (token) headers["authorization"] = "Bearer " + token;
   const request = new Request(transport.baseUrl + path, {
     method,
     headers,
@@ -426,6 +570,7 @@ function invalidResponse(
 
 /** The domain error (by code) or ApiError an error response stands for. */
 async function responseError(response: Response, errors: ErrorRegistry): Promise<Error> {
+  if (response.status === 429) return new RateLimitedError(retryAfterSeconds(response));
   let data: unknown;
   try {
     data = JSON.parse(await response.text()) as unknown;
@@ -441,4 +586,58 @@ async function responseError(response: Response, errors: ErrorRegistry): Promise
   const DomainErrorType = errors.get(code);
   if (DomainErrorType !== undefined) return new DomainErrorType(details as never, message);
   return new ApiError(response.status, code, message, details);
+}
+
+/**
+ * 429: the endpoint's rate limit is used up. `retryAfter` is the server's Retry-After in seconds
+ * (undefined when it sent none).
+ */
+export class RateLimitedError extends ApiError {
+  readonly retryAfter: number | undefined;
+
+  constructor(retryAfter: number | undefined) {
+    super(429, HTTP_ERROR_CODES.rateLimited, "Too many requests", { retryAfter });
+    this.name = "RateLimitedError";
+    this.retryAfter = retryAfter;
+  }
+}
+
+/** Retry-After (RFC 9110 §10.2.3) as seconds from now: delay-seconds or an HTTP date. */
+function retryAfterSeconds(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (value === null) return undefined;
+  if (/^\d+$/.test(value.trim())) return Number(value.trim());
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, Math.ceil((date - Date.now()) / 1000));
+}
+
+/**
+ * Recommended `retry` for the app's QueryClient defaults (queries only; leave mutations at TanStack
+ * Query's default of no retries):
+ *
+ * ```ts
+ * new QueryClient({ defaultOptions: { queries: { retry: apiRetry, retryDelay: apiRetryDelay } } });
+ * ```
+ *
+ * Up to 3 retries for network failures, 5xx and 429; never for other 4xx answers (domain errors,
+ * 401, 403, 404: asking again gives the same answer).
+ */
+export function apiRetry(failureCount: number, error: unknown): boolean {
+  if (failureCount >= 3) return false;
+  if (error instanceof DomainError) return false;
+  if (error instanceof ApiError) {
+    return error.status === 0 || error.status === 429 || error.status >= 500;
+  }
+  return true;
+}
+
+/**
+ * Recommended `retryDelay`: the server's Retry-After for a 429 (at most a minute), else TanStack
+ * Query's exponential backoff (1 s, 2 s, 4 s, … up to 30 s).
+ */
+export function apiRetryDelay(failureCount: number, error: unknown): number {
+  if (error instanceof RateLimitedError && error.retryAfter !== undefined) {
+    return Math.min(error.retryAfter, 60) * 1000;
+  }
+  return Math.min(1000 * 2 ** failureCount, 30_000);
 }

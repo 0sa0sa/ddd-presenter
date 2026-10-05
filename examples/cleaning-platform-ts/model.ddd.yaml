@@ -10,6 +10,21 @@ generation:
     test_runner: vitest             # vitest（既定）| bun
     api: { base_path: /api, client: tanstack-query }   # HTTP API（契約・サーバーのハンドラ・TanStack Query のクライアント）。省略で生成しない
 
+# 認証・認可・レート制限（docs/09 §20）。宣言すると、すべての Use case と Aggregate に authorize が必要（既定は拒否）
+security:
+  roles: [admin, candidate]                     # 清掃会社の管理者 / スタッフ候補
+  principal:
+    id: String                                  # JWT の sub
+    claims:
+      - { name: email, type: String, required: false }   # allow_if で principal.email として読める
+  authentication:
+    scheme: bearer_jwt                          # Authorization: Bearer <JWT> を検証する認証器を生成する
+    issuer: https://auth.example.com/
+    audience: cleaning-platform
+    algorithms: [RS256]
+  rate_limits:
+    default: { requests: 60, per: minute, by: principal }   # rate_limit を書かないエンドポイントの制限
+
 contexts:
   - name: CleaningStaff
     description: 清掃スタッフの招待・受諾・取り消しを扱う
@@ -62,6 +77,10 @@ contexts:
       - name: CleaningStaffInvitation
         description: スタッフ候補への招待
         identity: id
+        # 識別子で読める相手: 管理者、または招待されたメールアドレスの候補者
+        authorize:
+          roles: [admin, candidate]
+          allow_if: has_role(principal, admin) or (principal.email != null and principal.email == email.value)
         fields:
           - { name: id, type: UUID }
           - { name: email, type: EmailAddress }
@@ -170,6 +189,8 @@ contexts:
         actor: 清掃会社の管理者
         description: スタッフ候補へ招待を発行する
         command: IssueInvitation
+        authorize: { roles: [admin] }
+        rate_limit: { requests: 10, per: minute, by: principal }
         transaction: required
         input:
           - { name: email, type: EmailAddress }
@@ -233,6 +254,11 @@ contexts:
         actor: スタッフ候補
         description: 招待を受諾する
         command: AcceptInvitation
+        # ロールは読み込む前に、allow_if は招待を読み込んだ後・受諾する前に確かめる
+        authorize:
+          roles: [candidate]
+          allow_if: principal.email != null and principal.email == invitation.email.value
+        rate_limit: { requests: 5, per: minute, by: principal }
         transaction: required
         input:
           - { name: invitation_id, type: UUID }
@@ -252,6 +278,7 @@ contexts:
           - name: pending_invitation_is_accepted
             given:
               clock: "2026-01-02T10:00:00+00:00"
+              principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com } }
               aggregates:
                 - type: CleaningStaffInvitation
                   fields:
@@ -273,6 +300,7 @@ contexts:
           - name: expired_invitation_is_rejected
             given:
               clock: "2026-01-08T10:00:00+00:00"
+              principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com } }
               aggregates:
                 - type: CleaningStaffInvitation
                   fields:
@@ -293,15 +321,39 @@ contexts:
           - name: unknown_invitation_is_not_found
             given:
               clock: "2026-01-02T10:00:00+00:00"
+              principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com } }
             when:
               input: { invitation_id: "00000000-0000-0000-0000-000000000099" }
             then:
               raises: InvitationNotFound
               emits: []
+          - name: another_candidate_cannot_accept
+            description: 招待されたメールアドレスではない候補者は受諾できない（招待は変わらない）
+            given:
+              clock: "2026-01-02T10:00:00+00:00"
+              principal: { id: candidate-2, roles: [candidate], claims: { email: someone-else@example.com } }
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              input: { invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              raises: NotAuthorized
+              emits: []
+              state:
+                - aggregate: CleaningStaffInvitation
+                  id: "00000000-0000-0000-0000-000000000001"
+                  fields: { status: pending }
 
       - name: revoke_invitation
         actor: 清掃会社の管理者
         command: RevokeInvitation
+        authorize: { roles: [admin] }
         transaction: required
         input:
           - { name: invitation_id, type: UUID }
@@ -366,6 +418,7 @@ contexts:
       - name: StaffMember
         description: 登録済みのスタッフ
         identity: id
+        authorize: { roles: [admin] }
         fields:
           - { name: id, type: UUID }
           - { name: invitation_id, type: UUID }
@@ -390,6 +443,7 @@ contexts:
         actor: システム（ポリシー）
         description: 招待を受諾した人をスタッフとして登録する
         command: RegisterStaff
+        authorize: internal                     # ポリシーだけが実行する（HTTP には出さない）
         transaction: required
         input:
           - { name: invitation_id, type: UUID }

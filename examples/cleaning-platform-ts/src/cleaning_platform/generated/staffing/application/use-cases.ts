@@ -14,6 +14,7 @@ import type { EventPublisher, IdGenerator, StaffMemberRepository, UnitOfWork } f
  *
  * Actor: システム（ポリシー）
  * Transaction: required
+ * Authorize: internal (run in-process, e.g. by a policy; never served over HTTP)
  *
  * Steps:
  *   1. create StaffMember via register(id=ids.new, invitation_id=invitation_id,

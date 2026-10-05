@@ -14,6 +14,7 @@ import {
   createApiMutations,
   createApiQueries,
 } from "../../src/cleaning_platform/generated/api/queries.js";
+import { RateLimiter } from "../../src/cleaning_platform/generated/api/rate-limit.js";
 import {
   type ApiDependencies,
   createApiHandler,
@@ -40,17 +41,39 @@ import {
   StubExtensions,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/runtime.js";
+import {
+  NotAuthorized,
+  Principal,
+  Unauthenticated,
+} from "../../src/cleaning_platform/generated/security.js";
 
 /**
  * The client wired to the generated server handler (its `fetch`): requests never leave the process.
  * The query and mutation factories are built from it once, as an app does. Retries are off, as in
  * any test of TanStack Query.
  */
-function connect(dependencies: ApiDependencies) {
-  const handler = createApiHandler(dependencies);
+/**
+ * A principal holding every role: the requests of these tests authenticate as it unless a test says
+ * otherwise.
+ */
+const everyone = Principal.create({ id: "test-principal", roles: ["admin", "candidate"] });
+
+/** What the client sends (`getToken`) and the test authenticator accepts. */
+const AUTHORIZATION = { authorization: "Bearer test-token" };
+
+function connect(dependencies: ApiDependencies, principal: Principal | null = everyone) {
+  const handler = createApiHandler(dependencies, {
+    // The bearer token the client sends stands for `principal` (the JWT authenticator is tested on
+    // its own).
+    authenticate: (request) =>
+      Promise.resolve(
+        request.headers.get("authorization") === AUTHORIZATION.authorization ? principal : null,
+      ),
+  });
   const statuses: number[] = [];
   const api = createApiClient({
     baseUrl: "http://localhost",
+    getToken: () => "test-token",
     fetch: async (request) => {
       const response = await handler(request);
       statuses.push(response.status);
@@ -88,6 +111,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       new Request("http://localhost/api/cleaning-staff/issue-invitation", {
         method: "POST",
         body: "{}",
+        headers: AUTHORIZATION,
       }),
     );
     expect(unwired.status).toBe(404);
@@ -96,7 +120,9 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       cleaningStaff: { repositories: { cleaningStaffInvitationRepository } },
     });
     const invalid = await served.handler(
-      new Request("http://localhost/api/cleaning-staff/cleaning-staff-invitation/not-an-id"),
+      new Request("http://localhost/api/cleaning-staff/cleaning-staff-invitation/not-an-id", {
+        headers: AUTHORIZATION,
+      }),
     );
     expect(invalid.status).toBe(400);
     expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });
@@ -125,6 +151,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
         onError: (error) => {
           failures.push(error);
         },
+        authenticate: () => Promise.resolve(everyone),
       },
     );
     const invalid = await handler(
@@ -148,6 +175,135 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       message: "Internal server error",
     });
     expect(failures).toHaveLength(1);
+  });
+
+  /**
+   * `POST /api/cleaning-staff/issue-invitation` needs a principal: without credentials it answers
+   * 401 with `WWW-Authenticate: Bearer`, with an invalid token 401 with `error="invalid_token"`
+   * (RFC 6750 §3.1); the client rejects with Unauthenticated.
+   */
+  test("authentication: 401 with a Bearer challenge without or with an invalid token", async () => {
+    const badToken = new Unauthenticated({ error: "invalid_token" }, "The token is invalid");
+    const handler = createApiHandler(
+      {},
+      {
+        authenticate: (request) =>
+          request.headers.get("authorization") === "Bearer bad"
+            ? Promise.reject(badToken)
+            : Promise.resolve(null),
+      },
+    );
+    const missing = await handler(
+      new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+        method: "POST",
+        body: "{}",
+      }),
+    );
+    expect(missing.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toBe("Bearer");
+    expect(await responseJson(missing)).toMatchObject({ code: "unauthenticated" });
+    const headers = { authorization: "Bearer bad" };
+    const invalid = await handler(
+      new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+        method: "POST",
+        body: "{}",
+        headers,
+      }),
+    );
+    expect(invalid.status).toBe(401);
+    expect(invalid.headers.get("www-authenticate")).toBe('Bearer error="invalid_token"');
+    const { mutations, queryClient, statuses } = connect({}, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.issueInvitation);
+    await expectRejects(
+      () =>
+        observer.mutate({
+          email: { value: "new@example.com" },
+          validUntil: "2026-01-08T10:00:00+00:00",
+        }),
+      Unauthenticated,
+    );
+    expect(statuses).toEqual([401]);
+  });
+
+  /**
+   * A principal without admin is refused by issue_invitation: 403, and the client rejects with
+   * NotAuthorized.
+   */
+  test("authorization: issue_invitation without a required role is 403", async () => {
+    const unitOfWork = new FakeUnitOfWork();
+    const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
+      unitOfWork,
+    );
+    const clock = new FixedClock("2026-01-01T10:00:00+00:00");
+    const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000aa"]);
+    const extensions = new StubExtensions();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new IssueInvitationUseCase({
+      cleaningStaffInvitationRepository,
+      clock,
+      ids,
+      extensions,
+      eventPublisher,
+      unitOfWork,
+    });
+    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const { mutations, queryClient, statuses } = connect(
+      { cleaningStaff: { useCases: { issueInvitation: useCase } } },
+      principal,
+    );
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.issueInvitation);
+    const error = await expectRejects(
+      () =>
+        observer.mutate({
+          email: { value: "new@example.com" },
+          validUntil: "2026-01-08T10:00:00+00:00",
+        }),
+      NotAuthorized,
+    );
+    expect(error.details).toMatchObject({ requiredRoles: ["admin"] });
+    expect(statuses).toEqual([403]);
+  });
+
+  /**
+   * `POST /api/cleaning-staff/issue-invitation` allows 10 request(s) per 60 s (by principal): then
+   * 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint
+   * is not wired, so allowed requests answer 404 after taking their token.
+   */
+  test("rate limit: issue_invitation answers 429 with Retry-After and RateLimit headers, then refills", async () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const handler = createApiHandler(
+      {},
+      {
+        authenticate: () => Promise.resolve(everyone),
+        rateLimiter: new RateLimiter({ now: () => now }),
+        clientIp: () => "203.0.113.7",
+      },
+    );
+    const send = () =>
+      handler(
+        new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+          method: "POST",
+          body: "{}",
+        }),
+      );
+    const first = await send();
+    expect(first.status).toBe(404);
+    expect(first.headers.get("ratelimit-policy")).toBe('"issue_invitation";q=10;w=60');
+    expect(first.headers.get("ratelimit")).toMatch(/^"issue_invitation";r=9;t=\d+$/);
+    for (let i = 1; i < 10; i++) {
+      expect((await send()).status).toBe(404);
+    }
+    const refused = await send();
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("6");
+    expect(refused.headers.get("ratelimit")).toBe('"issue_invitation";r=0;t=6');
+    expect(await responseJson(refused)).toMatchObject({
+      code: "rate_limited",
+      details: { retryAfter: 6 },
+    });
+    now += 6000;
+    expect((await send()).status).toBe(404);
+    expect((await send()).status).toBe(429);
   });
 
   /**
@@ -256,12 +412,16 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { queries, mutations, queryClient, statuses } = connect({
-      cleaningStaff: {
-        useCases: { issueInvitation: useCase },
-        repositories: { cleaningStaffInvitationRepository },
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { issueInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
       },
-    });
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
@@ -320,12 +480,16 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { queries, mutations, queryClient, statuses } = connect({
-      cleaningStaff: {
-        useCases: { issueInvitation: useCase },
-        repositories: { cleaningStaffInvitationRepository },
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { issueInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
       },
-    });
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
@@ -379,12 +543,20 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { queries, mutations, queryClient, statuses } = connect({
-      cleaningStaff: {
-        useCases: { acceptInvitation: useCase },
-        repositories: { cleaningStaffInvitationRepository },
-      },
+    const principal = Principal.create({
+      id: "candidate-1",
+      roles: ["candidate"],
+      email: "staff@example.com",
     });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { acceptInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
+      },
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
@@ -455,12 +627,20 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { queries, mutations, queryClient, statuses } = connect({
-      cleaningStaff: {
-        useCases: { acceptInvitation: useCase },
-        repositories: { cleaningStaffInvitationRepository },
-      },
+    const principal = Principal.create({
+      id: "candidate-1",
+      roles: ["candidate"],
+      email: "staff@example.com",
     });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { acceptInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
+      },
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
@@ -517,12 +697,16 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { queries, mutations, queryClient, statuses } = connect({
-      cleaningStaff: {
-        useCases: { revokeInvitation: useCase },
-        repositories: { cleaningStaffInvitationRepository },
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { revokeInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
       },
-    });
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.

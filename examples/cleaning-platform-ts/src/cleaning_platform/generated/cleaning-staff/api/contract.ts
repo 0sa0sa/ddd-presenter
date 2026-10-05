@@ -42,7 +42,15 @@ export const contract = {
       path: "/api/cleaning-staff/issue-invitation",
       input: IssueInvitation.schema,
       output: uuidSchema,
-      errors: { constraint_violation: 400, email_blocked: 422, invalid_invitation_window: 422 },
+      errors: {
+        constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
+        email_blocked: 422,
+        invalid_invitation_window: 422,
+      },
+      auth: { kind: "principal", roles: ["admin"] },
+      rateLimit: { name: "issue_invitation", requests: 10, windowSeconds: 60, by: "principal" },
     }),
     /** 招待を受諾する (actor: スタッフ候補). */
     acceptInvitation: useCaseEndpoint({
@@ -53,10 +61,14 @@ export const contract = {
       output: z.void(),
       errors: {
         constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
         invitation_not_found: 404,
         invitation_not_deliverable: 409,
         invalid_invitation_window: 422,
       },
+      auth: { kind: "principal", roles: ["candidate"] },
+      rateLimit: { name: "accept_invitation", requests: 5, windowSeconds: 60, by: "principal" },
     }),
     /** Use case revoke_invitation (actor: 清掃会社の管理者). */
     revokeInvitation: useCaseEndpoint({
@@ -67,10 +79,14 @@ export const contract = {
       output: z.boolean(),
       errors: {
         constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
         invitation_not_found: 404,
         invitation_already_closed: 409,
         invalid_invitation_window: 422,
       },
+      auth: { kind: "principal", roles: ["admin"] },
+      rateLimit: { name: "revoke_invitation", requests: 60, windowSeconds: 60, by: "principal" },
     }),
   },
   aggregates: {
@@ -82,7 +98,19 @@ export const contract = {
       id: idSchema("CleaningStaffInvitation"),
       idType: "string",
       output: CleaningStaffInvitationJson,
-      errors: { constraint_violation: 400, aggregate_not_found: 404 },
+      errors: {
+        constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
+        aggregate_not_found: 404,
+      },
+      auth: { kind: "principal", roles: ["admin", "candidate"] },
+      rateLimit: {
+        name: "read_cleaning_staff_invitation",
+        requests: 60,
+        windowSeconds: 60,
+        by: "principal",
+      },
     }),
   },
 } as const;

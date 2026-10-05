@@ -10,7 +10,7 @@ import {
   createCleaningStaffMutations,
   createCleaningStaffQueries,
 } from "../cleaning-staff/api/queries.js";
-import { createStaffingMutations, createStaffingQueries } from "../staffing/api/queries.js";
+import { createStaffingQueries } from "../staffing/api/queries.js";
 import type { ApiClient } from "./client.js";
 
 /**
@@ -39,7 +39,6 @@ export function createApiQueries(api: ApiClient) {
 export function createApiMutations(api: ApiClient) {
   return {
     cleaningStaff: createCleaningStaffMutations(api),
-    staffing: createStaffingMutations(api),
   };
 }
 

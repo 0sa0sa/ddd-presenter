@@ -3,15 +3,19 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "4c2be0e86f5bc576522534146b895ba02f86e2f23de43d0ccd6c08c9083c79a7",
+  "model_sha256": "087c3e743630021663e9f343aa224d8d9b65586e7b89d7d1bf4d71aa386b527e",
   "files": [
     {
       "path": "src/cleaning_platform/generated/adapters.ts",
       "sha256": "005ddffe00c1bcc6fbaa38ef9eed7cb26506f4915c153003b5b5981a0d1ac725"
     },
     {
+      "path": "src/cleaning_platform/generated/api/authentication.ts",
+      "sha256": "02926c3225343edcc57d1ab153e5f733abe3f2cfb5e21ada6800cbc19535c135"
+    },
+    {
       "path": "src/cleaning_platform/generated/api/client.ts",
-      "sha256": "d0b0c174823f1b121d27c8f7e6fdf2bcdda769de7f65e5b0537c5596509b7b5f"
+      "sha256": "69edf44b9f6b211a819523bc3e7cb31e5f6754149f65964ccc393d2aff44ba67"
     },
     {
       "path": "src/cleaning_platform/generated/api/contract.ts",
@@ -19,7 +23,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/queries.ts",
-      "sha256": "2ca1d68065bbf19c1c6692bcf507174ea34b46be710e44a683e9a447496b6f7d"
+      "sha256": "33fba964656131d56c912f0f0df2a473d3168a8b1bb13c5951b368cd5f204de4"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/rate-limit.ts",
+      "sha256": "0e7a43299bd8dccb5434f8cfe8ad656707591b04f26dfeb1df2d09d77870f15a"
     },
     {
       "path": "src/cleaning_platform/generated/api/register.ts",
@@ -27,15 +35,15 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/runtime.ts",
-      "sha256": "35a411a18b5c25dc61a4d8d1bdeee5ad0e676e2e17fc31866e79a2a802162821"
+      "sha256": "a1da54480f2e4643661a5a3ea24a0b5e2828d9ac556d5d87a3b9f9125b65f7f1"
     },
     {
       "path": "src/cleaning_platform/generated/api/server.ts",
-      "sha256": "f531b39d2dfd7b3a3ab97e42f5da427c952a52cdb85602453f190864ceac3b5f"
+      "sha256": "2bc17bca70cfc595b5448a7246200d77359202c3e700d31cff5a2bb1b40a3a9a"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/contract.ts",
-      "sha256": "e6a616d310f5ffb62e257b9932b280dcb0066811f9f68df15f1e9909db26de58"
+      "sha256": "024d1fc27c10d0a44b0aae615f7f8a1b38a93a1fcb45eb66a451c45882735753"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/queries.ts",
@@ -46,8 +54,12 @@
       "sha256": "3770f0e0d3a1b322890ecdc153b47014bd8ddb43fd06f128d6fae4cde1bb24a7"
     },
     {
+      "path": "src/cleaning_platform/generated/cleaning-staff/application/read-access.ts",
+      "sha256": "9ae875f2dec252a3bd8401628a03760b6d7088ec7db560bebb0630236c3735d7"
+    },
+    {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/use-cases.ts",
-      "sha256": "6b4547c5158dfa480271cadf737bc736d1fd78933f712464279ec22fd7d1bd7b"
+      "sha256": "ee8a06917a127022d47b09bf82a79c216735b76e9e7c24e55f98e2c3885b305a"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/domain/aggregates.ts",
@@ -83,11 +95,11 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/index.ts",
-      "sha256": "d2ca89b3ddc6fd776fd0b400fbce2cfcc38ce557f6fa1d5bcc3c67c9f0bd1e2c"
+      "sha256": "a65938a5970b6644465bb6ed36628b9d906333362fac448e4854bc1938c9e463"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/README.md",
-      "sha256": "88af45fef65848438c42c320030571fdfa2a47c8a875e1175f32d58e2cd4cba8"
+      "sha256": "7f8db272dfd0d06e1184e9e2b225d5dc265ffa66b0b0b85bb2ad7711359966e5"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/testing.ts",
@@ -95,19 +107,23 @@
     },
     {
       "path": "src/cleaning_platform/generated/index.ts",
-      "sha256": "35989d638e890e3ebb12413c4d02d2fe0e50c8550be1a9ebb29969928c435307"
+      "sha256": "d9f82e21192ec7ef76cf3b06a744bbe8a5aa7003f2137e80dcabdbb6b6056312"
     },
     {
       "path": "src/cleaning_platform/generated/runtime.ts",
       "sha256": "4708b10c54e1e7f3ccfaf050ebeeb74b6b09dcecbed45cbf9389d71513b87179"
     },
     {
+      "path": "src/cleaning_platform/generated/security.ts",
+      "sha256": "a65d5c9895d2132850636c168c47b5787b0b036e0854fa4ef9f6460be29c6e9e"
+    },
+    {
       "path": "src/cleaning_platform/generated/staffing/api/contract.ts",
-      "sha256": "17992e7f2137b7a10c2c658185389bf9a79342b8c0d09f09f2ed8b7a66079602"
+      "sha256": "ca64060a6a0c10db6ac60ee4f607bf56928903386c41f1eea78efa73d2e87e09"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/api/queries.ts",
-      "sha256": "fc16176c22bcbac6a8beceb218cb5e55569eb6e75b36181bc74075b90ca8cc94"
+      "sha256": "1b5a42d99fbf75b4258ed072eabc68c73557fceabba883b21f477352391e8a33"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/policies.ts",
@@ -118,8 +134,12 @@
       "sha256": "74bbce33aa93d214b2218197cc8abe9ddb644586c622214e8e37a1ad6a09caba"
     },
     {
+      "path": "src/cleaning_platform/generated/staffing/application/read-access.ts",
+      "sha256": "d50080e82ac9c434a36e0ccd1dec8f9da7f5b7861a9acf9f2041c522cfaeddde"
+    },
+    {
       "path": "src/cleaning_platform/generated/staffing/application/use-cases.ts",
-      "sha256": "598fc985cf913596f821482e30257229b1c86210219ad2e03c075522d2cbb364"
+      "sha256": "f4532ef4b20dee7e7f6495d820882b86e0276bc8a13f970d611df411600921ed"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/domain/aggregates.ts",
@@ -155,7 +175,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/index.ts",
-      "sha256": "0d8196427adc949bbf3aaf76772ea6d91136bd07c037183af82275954d7951f0"
+      "sha256": "3f730c5392e3df46c7f87747d50f2823854b7a83c2d1abfa5b332d3ce9792980"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/README.md",
@@ -171,11 +191,11 @@
     },
     {
       "path": "tests/generated/cleaning-staff-accept-invitation.test.ts",
-      "sha256": "c30952ff50e7c9ac2e960a901011379bc0fd89eb4203f163a34e156649704c1f"
+      "sha256": "f4a901b209a4272534d4140cf16bd68fa513fc7539ef8de79164ca8765ae6899"
     },
     {
       "path": "tests/generated/cleaning-staff-api.test.ts",
-      "sha256": "c7c200e607131fe518d95be28ee8b3eb95f805ee7ba56ef4f9eec9c900620256"
+      "sha256": "a1b796017c3028b297e56aa3381478cd37cc6d3040469ca9b46cdc18e5a42b62"
     },
     {
       "path": "tests/generated/cleaning-staff-cleaning-staff-invitation.test.ts",
@@ -187,15 +207,19 @@
     },
     {
       "path": "tests/generated/cleaning-staff-issue-invitation.test.ts",
-      "sha256": "e3b183d8efabe288d1e036d098926077b90109b6602d33b8016d597fc4975f32"
+      "sha256": "46fe19174f5a77fe2b1c51eabfe0ac4947ca2849992eca330cc02de2bdb83ef2"
     },
     {
       "path": "tests/generated/cleaning-staff-revoke-invitation.test.ts",
-      "sha256": "fc0fe1ec73e72396ca1b7fcc843cd3c001aa1cef34ffd009642c82372cffcbd5"
+      "sha256": "d0cfc6c74ca0e37c7a9e0da846c97f6f1cceb629fcaff099d5b2bc24653c0cd6"
+    },
+    {
+      "path": "tests/generated/security.test.ts",
+      "sha256": "834ac170db652c2184fcf023fda397f3afdab6d90a00f41557190afe947113eb"
     },
     {
       "path": "tests/generated/staffing-api.test.ts",
-      "sha256": "3167f0579930ceaac626accd1919726151d9dd5e64b743f2f80c8d24f8d7e93e"
+      "sha256": "0d0112f73ac80c14f297376288c04d8dc78faa034a8e30cc55fbf61562515de1"
     },
     {
       "path": "tests/generated/staffing-policies.test.ts",

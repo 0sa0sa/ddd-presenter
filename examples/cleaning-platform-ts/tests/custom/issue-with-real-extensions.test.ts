@@ -6,6 +6,7 @@ import { CleaningStaffExtensions } from "../../src/cleaning_platform/extensions/
 import { IssueInvitationUseCase } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
 import { IssueInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
 import { EmailBlocked } from "../../src/cleaning_platform/generated/cleaning-staff/domain/errors.js";
+import { Principal } from "../../src/cleaning_platform/generated/security.js";
 import {
   CapturingEventPublisher,
   expectRejects,
@@ -14,6 +15,9 @@ import {
   InMemoryCleaningStaffInvitationRepository,
   SequentialIds,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
+
+// issue_invitation needs an admin (authorize: { roles: [admin] }).
+const admin = Principal.create({ id: "admin-1", roles: ["admin"] });
 
 function makeUseCase(blocked: string[]) {
   const unitOfWork = new FakeUnitOfWork();
@@ -33,7 +37,7 @@ describe("issue_invitation with the real extensions", () => {
   test("a blocked domain is rejected and nothing is published", async () => {
     const { useCase, eventPublisher, unitOfWork } = makeUseCase(["spam.example"]);
     const command = IssueInvitation.create({ email: { value: "someone@spam.example" }, validUntil: "2026-01-08T10:00:00+00:00" });
-    await expectRejects(() => useCase.execute(command), EmailBlocked);
+    await expectRejects(() => useCase.execute(command, admin), EmailBlocked);
     expect(unitOfWork.rolledBack).toBe(true);
     expect(eventPublisher.published).toEqual([]);
   });
@@ -41,7 +45,7 @@ describe("issue_invitation with the real extensions", () => {
   test("other domains are accepted", async () => {
     const { useCase, eventPublisher } = makeUseCase(["spam.example"]);
     const command = IssueInvitation.create({ email: { value: " Someone@Example.com " }, validUntil: "2026-01-08T10:00:00+00:00" });
-    expect(await useCase.execute(command)).toBe("00000000-0000-0000-0000-000000000001");
+    expect(await useCase.execute(command, admin)).toBe("00000000-0000-0000-0000-000000000001");
     expect(eventPublisher.published.map((event) => event.type)).toEqual(["CleaningStaff.InvitationIssued"]);
   });
 });

@@ -33,6 +33,11 @@ import {
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { id } from "../../src/cleaning_platform/generated/runtime.js";
+import {
+  NotAuthorized,
+  Principal,
+  Unauthenticated,
+} from "../../src/cleaning_platform/generated/security.js";
 
 describe("accept_invitation", () => {
   /**
@@ -69,7 +74,12 @@ describe("accept_invitation", () => {
     const command = AcceptInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    await useCase.execute(command);
+    const principal = Principal.create({
+      id: "candidate-1",
+      roles: ["candidate"],
+      email: "staff@example.com",
+    });
+    await useCase.execute(command, principal);
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
       cleaningStaffInvitationRepository.get(
@@ -130,7 +140,12 @@ describe("accept_invitation", () => {
     const command = AcceptInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    await expectRejects(() => useCase.execute(command), InvitationNotDeliverable);
+    const principal = Principal.create({
+      id: "candidate-1",
+      roles: ["candidate"],
+      email: "staff@example.com",
+    });
+    await expectRejects(() => useCase.execute(command, principal), InvitationNotDeliverable);
     expect(unitOfWork.committed).toBe(false);
     expect(unitOfWork.rolledBack).toBe(true);
     const stored0 = expectPresent(
@@ -172,9 +187,132 @@ describe("accept_invitation", () => {
     const command = AcceptInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000099",
     });
-    await expectRejects(() => useCase.execute(command), InvitationNotFound);
+    const principal = Principal.create({
+      id: "candidate-1",
+      roles: ["candidate"],
+      email: "staff@example.com",
+    });
+    await expectRejects(() => useCase.execute(command, principal), InvitationNotFound);
     expect(unitOfWork.committed).toBe(false);
     expect(unitOfWork.rolledBack).toBe(true);
     expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
+  });
+
+  /**
+   * 招待されたメールアドレスではない候補者は受諾できない（招待は変わらない）
+   *
+   * Given: now is 2026-01-02T10:00:00+00:00; a stored CleaningStaffInvitation
+   * When: accept_invitation
+   * Then: raises NotAuthorized; state [{"aggregate": "CleaningStaffInvitation", "id":
+   * "00000000-0000-0000-0000-000000000001", "fields": {"status": "pending"}}]; emits nothing
+   */
+  test("another_candidate_cannot_accept", async () => {
+    const unitOfWork = new FakeUnitOfWork();
+    const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
+      unitOfWork,
+    );
+    cleaningStaffInvitationRepository.seed(
+      CleaningStaffInvitation.from({
+        id: "00000000-0000-0000-0000-000000000001",
+        email: { value: "staff@example.com" },
+        status: "pending",
+        createdAt: "2026-01-01T10:00:00+00:00",
+        expiresAt: "2026-01-08T10:00:00+00:00",
+      }),
+    );
+    const clock = new FixedClock("2026-01-02T10:00:00+00:00");
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new AcceptInvitationUseCase({
+      cleaningStaffInvitationRepository,
+      clock,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = AcceptInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({
+      id: "candidate-2",
+      roles: ["candidate"],
+      email: "someone-else@example.com",
+    });
+    await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
+    expect(unitOfWork.committed).toBe(false);
+    const stored0 = expectPresent(
+      cleaningStaffInvitationRepository.get(
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
+      ),
+      "stored CleaningStaffInvitation",
+    );
+    expect(stored0.status).toBe("pending");
+    // The aggregate survives JSON (e.g. a document store): rebuilt from its JSON, it is the same.
+    expect(
+      aggregateViaJson(stored0, (input: CleaningStaffInvitationInput) =>
+        CleaningStaffInvitation.from(input),
+      ),
+    ).toEqual(jsonOf(stored0));
+    expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
+  });
+
+  /**
+   * Without a principal accept_invitation raises Unauthenticated before it touches a repository.
+   */
+  test("authorization: an anonymous caller is unauthenticated before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new AcceptInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      clock: new FixedClock("1970-01-01T00:00:00+00:00"),
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = AcceptInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const error = await expectRejects(() => useCase.execute(command, null), Unauthenticated);
+    expect(error.details).toEqual({ action: "accept_invitation" });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * A principal with only the other roles (admin) lacks candidate: accept_invitation raises
+   * NotAuthorized naming the required roles, before it touches a repository.
+   */
+  test("authorization: a principal without a required role is refused before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new AcceptInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      clock: new FixedClock("1970-01-01T00:00:00+00:00"),
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = AcceptInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const error = await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
+    expect(error.details).toEqual({ action: "accept_invitation", requiredRoles: ["candidate"] });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
   });
 });

@@ -36,6 +36,11 @@ import {
   viaJson,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 import { id } from "../../src/cleaning_platform/generated/runtime.js";
+import {
+  NotAuthorized,
+  Principal,
+  Unauthenticated,
+} from "../../src/cleaning_platform/generated/security.js";
 
 describe("issue_invitation", () => {
   /**
@@ -68,7 +73,8 @@ describe("issue_invitation", () => {
       email: { value: "new@example.com" },
       validUntil: "2026-01-08T10:00:00+00:00",
     });
-    const result = await useCase.execute(command);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const result = await useCase.execute(command, principal);
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000aa");
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
@@ -124,7 +130,8 @@ describe("issue_invitation", () => {
       email: { value: "blocked@example.com" },
       validUntil: "2026-01-08T10:00:00+00:00",
     });
-    await expectRejects(() => useCase.execute(command), EmailBlocked);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    await expectRejects(() => useCase.execute(command, principal), EmailBlocked);
     expect(unitOfWork.committed).toBe(false);
     expect(unitOfWork.rolledBack).toBe(true);
     expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
@@ -158,9 +165,76 @@ describe("issue_invitation", () => {
       email: { value: "new@example.com" },
       validUntil: "2026-01-01T09:00:00+00:00",
     });
-    await expectRejects(() => useCase.execute(command), InvalidInvitationWindow);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    await expectRejects(() => useCase.execute(command, principal), InvalidInvitationWindow);
     expect(unitOfWork.committed).toBe(false);
     expect(unitOfWork.rolledBack).toBe(true);
     expect(eventPublisher.published.map((event) => event.type)).toEqual([]);
+  });
+
+  /** Without a principal issue_invitation raises Unauthenticated before it touches a repository. */
+  test("authorization: an anonymous caller is unauthenticated before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new IssueInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      clock: new FixedClock("1970-01-01T00:00:00+00:00"),
+      ids: new SequentialIds([]),
+      extensions: new StubExtensions(),
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = IssueInvitation.create({
+      email: { value: "new@example.com" },
+      validUntil: "2026-01-08T10:00:00+00:00",
+    });
+    const error = await expectRejects(() => useCase.execute(command, null), Unauthenticated);
+    expect(error.details).toEqual({ action: "issue_invitation" });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * A principal with only the other roles (candidate) lacks admin: issue_invitation raises
+   * NotAuthorized naming the required roles, before it touches a repository.
+   */
+  test("authorization: a principal without a required role is refused before anything is loaded", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new IssueInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      clock: new FixedClock("1970-01-01T00:00:00+00:00"),
+      ids: new SequentialIds([]),
+      extensions: new StubExtensions(),
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = IssueInvitation.create({
+      email: { value: "new@example.com" },
+      validUntil: "2026-01-08T10:00:00+00:00",
+    });
+    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const error = await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
+    expect(error.details).toEqual({ action: "issue_invitation", requiredRoles: ["admin"] });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
   });
 });

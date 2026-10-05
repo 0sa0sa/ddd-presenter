@@ -8,6 +8,7 @@
 
 import * as cleaningStaff from "../cleaning-staff/index.js";
 import type { Awaitable } from "../runtime.js";
+import type { Principal } from "../security.js";
 import * as staffing from "../staffing/index.js";
 import { contract } from "./contract.js";
 import { apiHandler, type ApiHandlerOptions, readRoute, useCaseRoute } from "./runtime.js";
@@ -32,9 +33,6 @@ export interface ApiDependencies {
     };
   };
   readonly staffing?: {
-    readonly useCases?: {
-      readonly registerStaff?: Pick<staffing.RegisterStaffUseCase, "execute">;
-    };
     readonly repositories?: {
       readonly staffMemberRepository?: Pick<staffing.StaffMemberRepository, "get">;
     };
@@ -46,19 +44,22 @@ export interface ApiDependencies {
  * Hono (`app.all("/api/*", (c) => handler(c.req.raw))`), a Next.js route handler or any fetch-style
  * server.
  *
- * Inputs are parsed with the command schemas (400 with the issues). Domain errors answer `{ code,
- * message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other
- * rules); unexpected errors answer 500 without details and go to `options.onError`. There is no
- * authentication or authorization: put that in front of the handler.
+ * Inputs are parsed with the command schemas (400 with the issues). Endpoints that need a principal
+ * authenticate the request with `options.authenticate` (401 with `WWW-Authenticate: Bearer` without
+ * valid credentials); the use cases and read access authorize it (403 NotAuthorized). Rate limits
+ * answer the RateLimit headers and 429 with Retry-After when used up (`options.rateLimiter`,
+ * `options.clientIp`). Domain errors answer `{ code, message, details }` with the endpoint's status
+ * (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without
+ * details and go to `options.onError`. Internal use cases (`authorize: internal`) have no endpoint.
  *
  * `dependencies` is an object, or a function of the request (e.g. use cases with a unit of work per
  * request).
  */
 export function createApiHandler(
   dependencies: ApiDependencies | ((request: Request) => Awaitable<ApiDependencies>),
-  options: ApiHandlerOptions = {},
+  options: ApiHandlerOptions<Principal> = {},
 ): (request: Request) => Promise<Response> {
-  return apiHandler<ApiDependencies>(
+  return apiHandler<ApiDependencies, Principal>(
     [
       useCaseRoute(
         contract.cleaningStaff.useCases.issueInvitation,
@@ -75,14 +76,12 @@ export function createApiHandler(
       readRoute(
         contract.cleaningStaff.aggregates.cleaningStaffInvitation,
         (d) => d.cleaningStaff?.repositories?.cleaningStaffInvitationRepository,
-      ),
-      useCaseRoute(
-        contract.staffing.useCases.registerStaff,
-        (d) => d.staffing?.useCases?.registerStaff,
+        cleaningStaff.readCleaningStaffInvitation,
       ),
       readRoute(
         contract.staffing.aggregates.staffMember,
         (d) => d.staffing?.repositories?.staffMemberRepository,
+        staffing.readStaffMember,
       ),
     ],
     dependencies,

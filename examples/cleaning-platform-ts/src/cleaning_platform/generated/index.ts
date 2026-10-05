@@ -7,5 +7,6 @@
  */
 
 export * from "./runtime.js";
+export * from "./security.js";
 export * as cleaningStaff from "./cleaning-staff/index.js";
 export * as staffing from "./staffing/index.js";

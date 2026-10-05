@@ -7,6 +7,7 @@
  */
 
 import * as cleaningStaffErrors from "../cleaning-staff/domain/errors.js";
+import { SECURITY_ERRORS } from "../security.js";
 import * as staffingErrors from "../staffing/domain/errors.js";
 import { contract } from "./contract.js";
 import {
@@ -20,7 +21,7 @@ import {
 
 function cleaningStaffClient(transport: Transport) {
   const { useCases, aggregates } = contract.cleaningStaff;
-  const errors = errorRegistry(cleaningStaffErrors.ALL_ERRORS);
+  const errors = errorRegistry([...cleaningStaffErrors.ALL_ERRORS, ...SECURITY_ERRORS]);
   return {
     useCases: {
       issueInvitation: useCaseCaller(transport, useCases.issueInvitation, errors),
@@ -34,12 +35,10 @@ function cleaningStaffClient(transport: Transport) {
 }
 
 function staffingClient(transport: Transport) {
-  const { useCases, aggregates } = contract.staffing;
-  const errors = errorRegistry(staffingErrors.ALL_ERRORS);
+  const { aggregates } = contract.staffing;
+  const errors = errorRegistry([...staffingErrors.ALL_ERRORS, ...SECURITY_ERRORS]);
   return {
-    useCases: {
-      registerStaff: useCaseCaller(transport, useCases.registerStaff, errors),
-    },
+    useCases: {},
     aggregates: {
       staffMember: readCaller(transport, aggregates.staffMember, errors),
     },
@@ -54,6 +53,10 @@ function staffingClient(transport: Transport) {
  * output schemas. Error responses reject with the domain error class of their code (e.g.
  * `InvitationNotFound`), anything else with an `ApiError`. Pass `fetch` to route requests elsewhere
  * (the server handler in tests, a cookie-forwarding fetch in SSR).
+ *
+ * `getToken` supplies the bearer token per request. 401 rejects with Unauthenticated, 403 with
+ * NotAuthorized, 429 with RateLimitedError (`retryAfter` in seconds); `apiRetry` / `apiRetryDelay`
+ * are the matching retry policy for the QueryClient defaults.
  */
 export function createApiClient(options: ApiClientOptions = {}) {
   const transport = createTransport(options);

@@ -31,6 +31,7 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
     InvitationIssued,
     InvitationRevoked,
 )
+from cleaning_platform.generated.security import Principal, allow_if, authorize
 
 __all__ = ["AcceptInvitationUseCase", "IssueInvitationUseCase", "RevokeInvitationUseCase"]
 
@@ -40,6 +41,7 @@ class IssueInvitationUseCase:
 
     Actor: 清掃会社の管理者
     Transaction: required
+    Authorize: the role admin
 
     Steps:
         1. if is_blocked_email(email):
@@ -68,10 +70,14 @@ class IssueInvitationUseCase:
         self._event_publisher = event_publisher
         self._unit_of_work = unit_of_work
 
-    def execute(self, command: IssueInvitation) -> UUID:
+    def execute(self, command: IssueInvitation, principal: Principal | None) -> UUID:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
+
+        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+        role (before anything is loaded) or when allow_if does not hold.
         """
+        principal = authorize(principal, "issue_invitation", ("admin",))
         after_commit: list[DomainEvent] = []
         try:
             result = self._run(command, after_commit)
@@ -111,6 +117,9 @@ class AcceptInvitationUseCase:
 
     Actor: スタッフ候補
     Transaction: required
+    Authorize: the role candidate
+        allow_if principal.email != null and principal.email == invitation.email.value (after
+        loading invitation)
 
     Steps:
         1. load CleaningStaffInvitation by invitation_id as invitation (not found:
@@ -133,13 +142,17 @@ class AcceptInvitationUseCase:
         self._event_publisher = event_publisher
         self._unit_of_work = unit_of_work
 
-    def execute(self, command: AcceptInvitation) -> None:
+    def execute(self, command: AcceptInvitation, principal: Principal | None) -> None:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
+
+        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+        role (before anything is loaded) or when allow_if does not hold.
         """
+        principal = authorize(principal, "accept_invitation", ("candidate",))
         after_commit: list[DomainEvent] = []
         try:
-            self._run(command, after_commit)
+            self._run(command, principal, after_commit)
             self._unit_of_work.commit()
         except BaseException:
             self._unit_of_work.rollback()
@@ -147,12 +160,19 @@ class AcceptInvitationUseCase:
         if after_commit:
             self._event_publisher.publish(tuple(after_commit))
 
-    def _run(self, command: AcceptInvitation, after_commit: list[DomainEvent]) -> None:
+    def _run(
+        self, command: AcceptInvitation, principal: Principal, after_commit: list[DomainEvent]
+    ) -> None:
         emitted: list[DomainEvent] = []
         # 1. load CleaningStaffInvitation
         invitation = self._cleaning_staff_invitation_repository.get(command.invitation_id)
         if invitation is None:
             raise InvitationNotFound(id=command.invitation_id)
+        # authorize: allow_if
+        allow_if(
+            principal.email is not None and principal.email == invitation.email.value,
+            "accept_invitation",
+        )
         # 2. invitation.accept
         transition_2 = invitation.accept(at=self._clock.now())
         invitation = transition_2.aggregate
@@ -168,6 +188,7 @@ class RevokeInvitationUseCase:
 
     Actor: 清掃会社の管理者
     Transaction: required
+    Authorize: the role admin
 
     Steps:
         1. load CleaningStaffInvitation by invitation_id as invitation (not found:
@@ -192,10 +213,14 @@ class RevokeInvitationUseCase:
         self._event_publisher = event_publisher
         self._unit_of_work = unit_of_work
 
-    def execute(self, command: RevokeInvitation) -> bool:
+    def execute(self, command: RevokeInvitation, principal: Principal | None) -> bool:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
+
+        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+        role (before anything is loaded) or when allow_if does not hold.
         """
+        principal = authorize(principal, "revoke_invitation", ("admin",))
         after_commit: list[DomainEvent] = []
         try:
             result = self._run(command, after_commit)

@@ -4,6 +4,7 @@
 /** Use cases (application services) of the CleaningStaff context. */
 
 import type { DomainEvent, Id, UUID } from "../../runtime.js";
+import { allowIf, authorize, type Principal } from "../../security.js";
 import { CleaningStaffInvitation } from "../domain/aggregates.js";
 import type { AcceptInvitation, IssueInvitation, RevokeInvitation } from "../domain/commands.js";
 import { EmailBlocked, InvitationNotFound } from "../domain/errors.js";
@@ -22,6 +23,7 @@ import type {
  *
  * Actor: 清掃会社の管理者
  * Transaction: required
+ * Authorize: the role admin
  *
  * Steps:
  *   1. if is_blocked_email(email):
@@ -59,8 +61,12 @@ export class IssueInvitationUseCase {
   /**
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
+   *
+   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+   * role (before anything is loaded) or when allow_if does not hold.
    */
-  async execute(command: IssueInvitation): Promise<UUID> {
+  async execute(command: IssueInvitation, principal: Principal | null): Promise<UUID> {
+    authorize(principal, "issue_invitation", ["admin"]);
     const afterCommit: DomainEvent[] = [];
     let result: UUID;
     try {
@@ -104,6 +110,9 @@ export class IssueInvitationUseCase {
  *
  * Actor: スタッフ候補
  * Transaction: required
+ * Authorize: the role candidate
+ *   allow_if principal.email != null and principal.email == invitation.email.value (after loading
+ *   invitation)
  *
  * Steps:
  *   1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
@@ -132,11 +141,15 @@ export class AcceptInvitationUseCase {
   /**
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
+   *
+   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+   * role (before anything is loaded) or when allow_if does not hold.
    */
-  async execute(command: AcceptInvitation): Promise<void> {
+  async execute(command: AcceptInvitation, principal: Principal | null): Promise<void> {
+    authorize(principal, "accept_invitation", ["candidate"]);
     const afterCommit: DomainEvent[] = [];
     try {
-      await this.#run(command, afterCommit);
+      await this.#run(command, principal, afterCommit);
       await this.#unitOfWork.commit();
     } catch (error) {
       await this.#unitOfWork.rollback();
@@ -145,7 +158,11 @@ export class AcceptInvitationUseCase {
     if (afterCommit.length > 0) await this.#eventPublisher.publish(afterCommit);
   }
 
-  async #run(command: AcceptInvitation, afterCommit: DomainEvent[]): Promise<void> {
+  async #run(
+    command: AcceptInvitation,
+    principal: Principal,
+    afterCommit: DomainEvent[],
+  ): Promise<void> {
     const emitted: DomainEvent[] = [];
     // 1. load CleaningStaffInvitation
     const loaded1 = await this.#cleaningStaffInvitationRepository.get(
@@ -153,6 +170,11 @@ export class AcceptInvitationUseCase {
     );
     if (loaded1 === null) throw new InvitationNotFound({ id: command.invitationId });
     let invitation = loaded1;
+    // authorize: allow_if
+    allowIf(
+      principal.email !== null && principal.email === invitation.email.value,
+      "accept_invitation",
+    );
     // 2. invitation.accept
     const transition2 = invitation.accept({ at: this.#clock.now() });
     invitation = transition2.aggregate;
@@ -169,6 +191,7 @@ export class AcceptInvitationUseCase {
  *
  * Actor: 清掃会社の管理者
  * Transaction: required
+ * Authorize: the role admin
  *
  * Steps:
  *   1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
@@ -198,8 +221,12 @@ export class RevokeInvitationUseCase {
   /**
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
+   *
+   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+   * role (before anything is loaded) or when allow_if does not hold.
    */
-  async execute(command: RevokeInvitation): Promise<boolean> {
+  async execute(command: RevokeInvitation, principal: Principal | null): Promise<boolean> {
+    authorize(principal, "revoke_invitation", ["admin"]);
     const afterCommit: DomainEvent[] = [];
     let result: boolean;
     try {

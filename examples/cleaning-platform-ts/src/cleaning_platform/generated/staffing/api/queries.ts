@@ -6,10 +6,9 @@
  * mutationOptions per use case (no React API).
  */
 
-import { mutationOptions, queryOptions, skipToken } from "@tanstack/react-query";
+import { queryOptions, skipToken } from "@tanstack/react-query";
 
 import type { ApiClient } from "../../api/client.js";
-import type { RegisterStaffInput } from "../domain/commands.js";
 
 /**
  * Fields every query key of StaffMember starts with: the context (`scope`) and the aggregate
@@ -64,26 +63,5 @@ export function createStaffingQueries(api: ApiClient) {
               : ({ signal }) => api.staffing.aggregates.staffMember(id, { signal }),
         }),
     },
-  };
-}
-
-/**
- * Mutation options of the Staffing use cases: `useMutation(mutations.staffing.<useCase>)`. On
- * success each one invalidates the queries the model says it changed, through the query factories,
- * and returns that promise: the mutation stays pending until the active queries have refetched.
- *
- * Add UI reactions with `mutate(input, { onSuccess })` instead of overriding `onSuccess` here (that
- * would drop the invalidation).
- */
-export function createStaffingMutations(api: ApiClient) {
-  const queries = createStaffingQueries(api);
-  return {
-    /** 招待を受諾した人をスタッフとして登録する (`POST /api/staffing/register-staff`). */
-    registerStaff: mutationOptions({
-      mutationKey: [{ scope: "staffing", useCase: "register-staff" }],
-      mutationFn: (input: RegisterStaffInput) => api.staffing.useCases.registerStaff(input),
-      onSuccess: (_data, _input, _result, context) =>
-        context.client.invalidateQueries({ queryKey: queries.staffMember.lists() }),
-    }),
   };
 }

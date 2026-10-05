@@ -6,7 +6,7 @@
  * without a network.
  */
 
-import { MutationObserver, QueryClient } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, test } from "vitest";
 
 import { createApiClient } from "../../src/cleaning_platform/generated/api/client.js";
@@ -14,20 +14,16 @@ import {
   createApiMutations,
   createApiQueries,
 } from "../../src/cleaning_platform/generated/api/queries.js";
+import { RateLimiter } from "../../src/cleaning_platform/generated/api/rate-limit.js";
 import {
   type ApiDependencies,
   createApiHandler,
 } from "../../src/cleaning_platform/generated/api/server.js";
-import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/runtime.js";
-import { RegisterStaffUseCase } from "../../src/cleaning_platform/generated/staffing/application/use-cases.js";
+import { AggregateNotFound } from "../../src/cleaning_platform/generated/runtime.js";
+import { Principal } from "../../src/cleaning_platform/generated/security.js";
 import {
-  CapturingEventPublisher,
-  expectPresent,
   expectRejects,
-  FakeUnitOfWork,
   InMemoryStaffMemberRepository,
-  jsonOf,
-  SequentialIds,
 } from "../../src/cleaning_platform/generated/staffing/testing.js";
 
 /**
@@ -35,11 +31,28 @@ import {
  * The query and mutation factories are built from it once, as an app does. Retries are off, as in
  * any test of TanStack Query.
  */
-function connect(dependencies: ApiDependencies) {
-  const handler = createApiHandler(dependencies);
+/**
+ * A principal holding every role: the requests of these tests authenticate as it unless a test says
+ * otherwise.
+ */
+const everyone = Principal.create({ id: "test-principal", roles: ["admin", "candidate"] });
+
+/** What the client sends (`getToken`) and the test authenticator accepts. */
+const AUTHORIZATION = { authorization: "Bearer test-token" };
+
+function connect(dependencies: ApiDependencies, principal: Principal | null = everyone) {
+  const handler = createApiHandler(dependencies, {
+    // The bearer token the client sends stands for `principal` (the JWT authenticator is tested on
+    // its own).
+    authenticate: (request) =>
+      Promise.resolve(
+        request.headers.get("authorization") === AUTHORIZATION.authorization ? principal : null,
+      ),
+  });
   const statuses: number[] = [];
   const api = createApiClient({
     baseUrl: "http://localhost",
+    getToken: () => "test-token",
     fetch: async (request) => {
       const response = await handler(request);
       statuses.push(response.status);
@@ -67,18 +80,12 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
     const unknown = await handler(new Request("http://localhost/api/no-such-endpoint"));
     expect(unknown.status).toBe(404);
     expect(await responseJson(unknown)).toMatchObject({ code: "route_not_found" });
-    const wrongMethod = await handler(new Request("http://localhost/api/staffing/register-staff"));
-    expect(wrongMethod.status).toBe(405);
-    expect(wrongMethod.headers.get("allow")).toBe("POST");
-    // A use case the app did not pass to the handler is not served.
-    const unwired = await handler(
-      new Request("http://localhost/api/staffing/register-staff", { method: "POST", body: "{}" }),
-    );
-    expect(unwired.status).toBe(404);
     const staffMemberRepository = new InMemoryStaffMemberRepository();
     const served = connect({ staffing: { repositories: { staffMemberRepository } } });
     const invalid = await served.handler(
-      new Request("http://localhost/api/staffing/staff-member/not-an-id"),
+      new Request("http://localhost/api/staffing/staff-member/not-an-id", {
+        headers: AUTHORIZATION,
+      }),
     );
     expect(invalid.status).toBe(400);
     expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });
@@ -90,43 +97,45 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
   });
 
   /**
-   * A body that is not JSON is a ConstraintViolation (400). An unexpected error answers 500 without
-   * its message and goes to onError.
+   * `GET /api/staffing/staff-member/00000000-0000-4000-8000-000000000001` allows 60 request(s) per
+   * 60 s (by principal): then 429 with Retry-After and the IETF RateLimit headers, until a token
+   * has refilled. The endpoint is not wired, so allowed requests answer 404 after taking their
+   * token.
    */
-  test("server errors: invalid JSON is 400, a failure is 500 without details", async () => {
-    const failures: unknown[] = [];
+  test("rate limit: read_staff_member answers 429 with Retry-After and RateLimit headers, then refills", async () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
     const handler = createApiHandler(
+      {},
       {
-        staffing: {
-          useCases: {
-            registerStaff: { execute: () => Promise.reject(new Error("database is down")) },
-          },
-        },
-      },
-      {
-        onError: (error) => {
-          failures.push(error);
-        },
+        authenticate: () => Promise.resolve(everyone),
+        rateLimiter: new RateLimiter({ now: () => now }),
+        clientIp: () => "203.0.113.7",
       },
     );
-    const invalid = await handler(
-      new Request("http://localhost/api/staffing/register-staff", { method: "POST", body: "{" }),
-    );
-    expect(invalid.status).toBe(400);
-    expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });
-    const body = JSON.stringify({
-      invitationId: "00000000-0000-0000-0000-000000000001",
-      joinedAt: "2026-01-02T10:00:00+00:00",
+    const send = () =>
+      handler(
+        new Request(
+          "http://localhost/api/staffing/staff-member/00000000-0000-4000-8000-000000000001",
+        ),
+      );
+    const first = await send();
+    expect(first.status).toBe(404);
+    expect(first.headers.get("ratelimit-policy")).toBe('"read_staff_member";q=60;w=60');
+    expect(first.headers.get("ratelimit")).toMatch(/^"read_staff_member";r=59;t=\d+$/);
+    for (let i = 1; i < 60; i++) {
+      expect((await send()).status).toBe(404);
+    }
+    const refused = await send();
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("1");
+    expect(refused.headers.get("ratelimit")).toBe('"read_staff_member";r=0;t=1');
+    expect(await responseJson(refused)).toMatchObject({
+      code: "rate_limited",
+      details: { retryAfter: 1 },
     });
-    const failed = await handler(
-      new Request("http://localhost/api/staffing/register-staff", { method: "POST", body }),
-    );
-    expect(failed.status).toBe(500);
-    expect(await responseJson(failed)).toEqual({
-      code: "internal_error",
-      message: "Internal server error",
-    });
-    expect(failures).toHaveLength(1);
+    now += 1000;
+    expect((await send()).status).toBe(404);
+    expect((await send()).status).toBe(429);
   });
 
   /**
@@ -183,56 +192,5 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
     expect(invalidated()).toEqual([true, true, false, false]);
     await queryClient.invalidateQueries({ queryKey: staffMemberQueries.all() });
     expect(invalidated()).toEqual([true, true, true, false]);
-  });
-
-  /**
-   * Scenario `accepted_invitation_registers_staff` of register_staff as a mutation (`POST
-   * /api/staffing/register-staff`).
-   * On success it invalidates lists() of what it changes, and nothing else.
-   */
-  test("register_staff: accepted_invitation_registers_staff", async () => {
-    const unitOfWork = new FakeUnitOfWork();
-    const staffMemberRepository = new InMemoryStaffMemberRepository(unitOfWork);
-    const ids = new SequentialIds(["00000000-0000-0000-0000-0000000000bb"]);
-    const eventPublisher = new CapturingEventPublisher();
-    const useCase = new RegisterStaffUseCase({
-      staffMemberRepository,
-      ids,
-      eventPublisher,
-      unitOfWork,
-    });
-    const { queries, mutations, queryClient, statuses } = connect({
-      staffing: { useCases: { registerStaff: useCase }, repositories: { staffMemberRepository } },
-    });
-    const staffMemberQueries = queries.staffing.staffMember;
-    // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
-    // detail.
-    const staffMemberList = [{ ...staffMemberQueries.lists()[0], filter: "probe" }] as const;
-    const staffMemberOther = [
-      { ...staffMemberQueries.details()[0], id: "ffffffff-ffff-4fff-bfff-ffffffffffff" },
-    ] as const;
-    queryClient.setQueryData(staffMemberList, []);
-    queryClient.setQueryData(staffMemberOther, null);
-    const observer = new MutationObserver(queryClient, mutations.staffing.registerStaff);
-    const input = {
-      invitationId: "00000000-0000-0000-0000-000000000001",
-      joinedAt: "2026-01-02T10:00:00+00:00",
-    };
-    const result = await observer.mutate(input);
-    expect(statuses.at(-1)).toBe(200);
-    expect(String(result)).toBe("00000000-0000-0000-0000-0000000000bb");
-    expect(queryClient.getQueryState(staffMemberList)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryState(staffMemberOther)?.isInvalidated).toBe(false);
-    // A refetch shows the stored state.
-    const after0 = await queryClient.query(
-      staffMemberQueries.detail("00000000-0000-0000-0000-0000000000bb"),
-    );
-    expect(jsonOf(after0)).toEqual(
-      jsonOf(
-        expectPresent(
-          staffMemberRepository.get(id("StaffMember", "00000000-0000-0000-0000-0000000000bb")),
-        ),
-      ),
-    );
   });
 });
