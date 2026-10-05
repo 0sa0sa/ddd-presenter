@@ -234,8 +234,8 @@ tests/generated/<context>-api.test.ts
 #### サーバー（`createApiHandler`）
 
 - Web 標準の `Request` → `Response` なので、Bun.serve・Deno.serve・Hono（`c.req.raw`）・Next.js の route handler・Cloudflare Workers などでそのまま使える。`dependencies` はオブジェクトか、リクエストごとの関数（リクエストごとの UnitOfWork など）。
-- **渡したものだけを公開する**: `ApiDependencies` のコンテキスト・Use case・リポジトリはすべて省略可能で、渡していない Use case / リポジトリのパスは 404。ポリシーから動かすシステム用の Use case（例 `register_staff`）は渡さなければ公開されない。
-- **認証・認可はない**: ハンドラの前（ミドルウェア、ルーター）に置く。本文の大きさの制限もホスト側で行う。
+- **渡したものだけを公開する**: `ApiDependencies` のコンテキスト・Use case・リポジトリはすべて省略可能で、渡していない Use case / リポジトリのパスは 404。ポリシーから動かすシステム用の Use case（例 `register_staff`）は渡さなければ公開されない。`security` があれば `authorize: internal` の Use case にはそもそもエンドポイントがない。
+- **認証・認可**: `security` を書かなければ生成しないので、ハンドラの前（ミドルウェア、ルーター）に置く。書けば、認証のフック・認可・レート制限を生成する（下の「認証・認可・レート制限」）。本文の大きさの制限と CORS はホスト側で行う。
 - 入力は `parseWith(コマンドのスキーマ)` で検証し、Use case を呼び、結果を `JSON.stringify` で返す（Instant・Decimal はそのまま JSON になる）。
 
 | 状況 | ステータス | 本文 |
@@ -320,6 +320,129 @@ DOM もネットワークも使わない。クライアントの `fetch` を生�
 - **ファイルの移動**: `generated/api/<context>/contract.ts` → `generated/<context>/api/contract.ts`、`generated/api/<context>/queries.ts` → `generated/<context>/api/queries.ts`。`generated/api/queries.ts` が増えた。`generated/api/{runtime,contract,server,client,register}.ts` はそのまま。
 - **古いファイル**: `ddd generate` は古い `generated/api/<context>/{contract,queries,hooks}.ts` と `generated/api/react.ts` を stale として残す（手を入れていなければ古いファイル同士の import は解決するので、そのままでも型検査は通る）。新しい API に書き換えたら `ddd generate --prune` で消す。
 - **依存は同じ**: `@tanstack/react-query` ^5.102、`react`、`@types/react`。生成コードは React の API を呼ばないが、`@tanstack/react-query` が React を peer に要る。
+
+### 認証・認可・レート制限（`security`, 2026-10-06）
+
+モデルに `security` を書いたときだけ生成する（DSL は docs/10 §10、決定と出典は docs/09 §20）。書かなければ、Python・TypeScript・HTTP API のどの生成物も以前とバイト単位で同じ。
+
+```text
+# 両方の target
+src/<package>/generated/security.(py|ts)                       # Role、Principal、NotAuthorized / Unauthenticated、authorize / allow_if、(bearer_jwt) クレーム → Principal
+src/<package>/generated/<context>/application/read_access.py   # read-access.ts: authorize が principal を要る Aggregate の read_<aggregate>(repository, id, principal)
+tests/generated/...                                             # シナリオの principal、導出した認可のテスト
+
+# Python
+src/<package>/generated/rate_limit.py                           # RateLimit・take_token・RateLimitStore・InMemoryRateLimitStore・RateLimiter・rate_limit_headers（標準ライブラリだけ）
+src/<package>/generated/authentication.py                       # scheme: bearer_jwt のとき。PyJWT の BearerJwtAuthenticator
+tests/generated/test_security.py
+
+# TypeScript の HTTP API（typescript.api があるとき）
+src/<package>/generated/api/rate-limit.ts                       # トークンバケット・RateLimitStore・InMemoryRateLimitStore・RateLimiter・rateLimitHeaders（依存なし）
+src/<package>/generated/api/authentication.ts                   # scheme: bearer_jwt のとき。jose の createBearerJwtAuthenticator
+tests/generated/security.test.ts
+```
+
+#### アプリケーション層の契約（両方の target）
+
+- **Principal**: `id`（`security.principal.id` の型）、`roles`（宣言したロールの読み取り専用のリスト）、宣言したクレーム（省略可能なものは `null` が既定）。TypeScript は Zod のスキーマから作る型と `Principal.create(input)` / `Principal.parse(json)`、Python は凍結した Pydantic モデル `Principal(id=..., roles=(...))`。
+- **`execute(command, principal)`**: `authorize` が `authenticated` か `{ roles, allow_if }` の Use case は、2つ目の引数に `Principal | null`（Python は `Principal | None`）を取る。`public` と `internal` の Use case は今までどおり `execute(command)`。コンテキストオブジェクトではなく引数1つにしたのは、Use case が読むのは principal だけで、型で「渡し忘れ」を防げるため。
+- **順序**（迂回できない。生成コードに認可より前に手順を動かす経路はない）:
+  1. `authorize(principal, "<use case>", roles)`: principal がなければ `Unauthenticated`、ロールのどれも持たなければ `NotAuthorized`。`execute` の最初の文で、冪等性の記録の参照・トランザクション・どの `load` よりも前（データがあるかどうかを漏らさない）。
+  2. `allow_if` が入力だけを読むなら、その直後に `allow_if(<式>, "<use case>")`。
+  3. `allow_if` が `load` した Aggregate を読むなら、それが使う最後の先頭の `load` の直後、最初の変更（`create` / `invoke`）の前。DSL がそれより後の変数を使わせない（docs/10 §10）。
+- **冪等性**: principal が要る Use case の冪等性キーは principal ごと（`"<principal.id>:<key>"`）。認可は記録の参照より前なので、別の principal が同じキーで記録した結果を受け取ることはない。
+- **エラー**: `NotAuthorized`（コード `not_authorized`）の `details` は `{ action, requiredRoles }`（Python は `required_roles`）か `{ action, rule: "allow_if" }`。比べた値は入れない。`Unauthenticated`（`unauthenticated`）の `details` は `{ action }`、認証器が拒否したトークンなら `{ error: "invalid_token" }`。どちらも Domain Error なので、既存のエラー処理（`ALL_ERRORS` とは別の `SECURITY_ERRORS`）で扱える。
+- **読み取り**: `authorize` が principal を要る Aggregate は、`read_<aggregate>(repository, id, principal)` / `read<Aggregate>(repository, id, principal)` を生成する。ロールを確かめてから読み込み、見つかれば `allow_if` を確かめる。`public` の Aggregate は生成しない（リポジトリをそのまま読む）。
+- **テストダブル**: 既存のインメモリのダブルはそのまま。生成テストは `Principal.create(...)` / `Principal(...)` を作って渡す。
+
+#### HTTP API（TypeScript、`typescript.api`）
+
+- **契約**: エンドポイントごとに `auth`（`{ kind: "public" }` か `{ kind: "principal", roles }`）と `rateLimit`（`{ name, requests, windowSeconds, by }` か `null`）を持つ。principal が要るエンドポイントの `errors` に `unauthenticated: 401` と `not_authorized: 403` が入る。`internal` の Use case はエンドポイントを持たない（契約・サーバー・クライアント・mutations のどれにも出ない）。
+- **サーバー**: `createApiHandler(dependencies, { authenticate, rateLimiter, clientIp, onError })`。
+  - `authenticate: Authenticator<Principal>`（`(request) => Promise<Principal | null>`）。資格情報がなければ `null`、不正なら `Unauthenticated`（`details.error: "invalid_token"`）を投げる。`scheme: bearer_jwt` なら生成した `createBearerJwtAuthenticator({ jwksUrl | key | getKey, issuer?, audience?, clockTolerance? })` を渡す。`scheme: custom`（セッションの Cookie や API キーなど）は自分で書く。渡さなければ principal が要るエンドポイントはすべて 401。
+  - 1リクエストの流れ: ルートの照合 → `by: ip` / `global` のレート制限（認証より前なので、認証器と JWKS の取得も守る）→ principal が要るなら認証（なければ 401）→ `by: principal` のレート制限 → Use case / 読み取りのアクセス（ここで認可。403）→ レスポンスに RateLimit ヘッダーを付ける。`public` のエンドポイントは認証しない（`by: principal` の既定は IP ごとに数える）。
+  - `rateLimiter`（既定はハンドラごとのインメモリ）、`clientIp`（既定は不明で、`by: ip` のリクエストはすべて同じバケットを使う。`X-Forwarded-For` は既定では読まない。信頼できるプロキシが上書きするときだけ読む。Bun なら `(r) => server.requestIP(r)?.address`）。
+- **JWT の検証**（`api/authentication.ts`、RFC 8725）: jose の `jwtVerify` に、モデルの `algorithms` だけ（`none` は宣言できない）、`issuer`・`audience`、`clockTolerance`、必須のクレーム `exp`・`sub` を渡す。鍵は JWKS の URL（jose がキャッシュと更新をする）、1つの鍵（公開鍵の `CryptoKey`、HS* なら秘密のバイト列）、自前の鍵の取得関数のどれか。`sub` が `id`、`roles_claim` がロール（宣言していないロールは捨てる）、宣言したクレームが値になり、Principal のスキーマに合わなければ不正なトークン。JWKS が取得できないのは呼び出し側の誤りではないので 500。
+- **エラーの対応**（docs/05 §8 の表に足す）:
+
+| 状況 | ステータス | ヘッダー | 本文 |
+|---|---|---|---|
+| principal が要るエンドポイントに資格情報がない | 401 | `WWW-Authenticate: Bearer` | `{ code: "unauthenticated", message }` |
+| トークンが不正（署名・期限・iss・aud・アルゴリズム・クレーム） | 401 | `WWW-Authenticate: Bearer error="invalid_token"`（RFC 6750 §3.1） | `{ code: "unauthenticated", message, details: { error: "invalid_token" } }` |
+| ロールがない・`allow_if` が成り立たない（`NotAuthorized`） | 403 | | `{ code: "not_authorized", message, details }` |
+| レート制限を使い切った | 429（RFC 6585） | `Retry-After`（秒、RFC 9110 §10.2.3）、`RateLimit-Policy`、`RateLimit` | `{ code: "rate_limited", message, details: { retryAfter } }` |
+| 制限のあるエンドポイントのそのほかの応答 | | `RateLimit-Policy: "<name>";q=<requests>;w=<秒>`、`RateLimit: "<name>";r=<残り>;t=<秒>`（IETF draft-ietf-httpapi-ratelimit-headers） | |
+
+  `<name>` は Use case 名か `read_<aggregate>`。`t` は許可なら満杯に戻るまで、拒否なら次のトークンまでの秒数（`Retry-After` と同じ）。
+- **トークンバケット**: 容量 `requests`、`windowSeconds` の間に均等に補充。キーは `<policy>\0<by>\0<principal id | IP | *>`。`takeToken(state, policy, now)` は純粋関数なので、ストアの実装はそれを原子的に実行すればよい。`RateLimitStore.consume(key, policy, now)` はキーごとに原子的でなければならない（2つのリクエストが最後の1つを取らない）。生成した `InMemoryRateLimitStore` は1プロセス用（満杯のバケットは `maxKeys` を超えたら捨てる）。複数のインスタンスでは共有のストアを実装する: Redis / Upstash なら、`{ tokens, updatedAt }` を1つのキーに保存し、`takeToken` と同じ計算を Lua スクリプト（`EVAL`）で行い、`PEXPIRE` を `windowSeconds` にする（Upstash の `@upstash/ratelimit` の token bucket もこの形）。Cloudflare なら Durable Object の中で `takeToken` を呼ぶ。
+- **クライアント**: `createApiClient({ getToken })` は、リクエストのたびに `getToken()` を呼んで `Authorization: Bearer <token>` を付ける（更新したトークンがすぐ使われる。`null` / `undefined` なら付けない）。401 は `Unauthenticated`、403 は `NotAuthorized`（どちらも `code` から復元する Domain Error）、429 は `RateLimitedError`（`ApiError` のサブクラス、`retryAfter` は秒か `undefined`）で reject する。
+- **再試行の方針**（生成した options には入れない。TkDodo のとおりアプリの `QueryClient` の既定に書く）:
+
+```ts
+import { apiRetry, apiRetryDelay } from "./generated/api/runtime.js";
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: apiRetry, retryDelay: apiRetryDelay } } });
+```
+
+  `apiRetry` は最大3回、通信の失敗・5xx・429 だけを再試行し、ほかの 4xx（Domain Error・401・403・404）はしない。`apiRetryDelay` は 429 なら `Retry-After`（最大60秒）、それ以外は TanStack Query と同じ指数バックオフ（1秒・2秒・4秒…最大30秒）。ミューテーションは TanStack Query の既定（再試行なし）のまま。
+
+#### Python（HTTP 層は生成しない）
+
+- 認可はアプリケーション層なので TypeScript と同じ（`execute(command, principal)`、`read_<aggregate>`）。
+- `authentication.py` の `BearerJwtAuthenticator(key=... | jwks_url=..., issuer=None, audience=None, leeway=...)` は PyJWT で検証する（`algorithms` はモデルのものだけ、`require: exp, sub, iss, aud`、`leeway`）。`authenticate(authorization_header)` は principal か `None` を返し、不正なトークンは `Unauthenticated(error="invalid_token")`。依存に `pyjwt[crypto]`（RS256 / ES256 / EdDSA は cryptography が要る）を足す。
+- `rate_limit.py` の `RateLimiter(store, clock)` と `security.RATE_LIMITS`（エンドポイント名 → `RateLimit`）。
+
+FastAPI の例（Starlette でも同じ考え方）:
+
+```python
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from cleaning_platform.generated.authentication import BearerJwtAuthenticator
+from cleaning_platform.generated.rate_limit import RateLimiter, rate_limit_headers
+from cleaning_platform.generated.cleaning_staff.domain.commands import AcceptInvitation
+from cleaning_platform.generated.security import RATE_LIMITS, NotAuthorized, Principal, Unauthenticated
+
+authenticator = BearerJwtAuthenticator(jwks_url="https://auth.example.com/.well-known/jwks.json")
+limiter = RateLimiter()  # 複数プロセスなら Redis などの RateLimitStore を渡す
+app = FastAPI()
+
+def principal(authorization: str | None = Header(default=None)) -> Principal | None:
+    return authenticator.authenticate(authorization)
+
+def limited(name: str):
+    def check(request: Request, response: Response, who: Principal | None = Depends(principal)) -> None:
+        limit = RATE_LIMITS[name]
+        if limit.by == "principal" and who is not None:
+            subject = str(who.id)
+        elif limit.by == "global":
+            subject = "*"
+        else:  # ip、または principal のない公開エンドポイント（プロキシの裏では信頼できるヘッダーから）
+            subject = request.client.host if request.client else "unknown"
+        decision = limiter.consume(limit, subject)
+        headers = rate_limit_headers(limit, decision)
+        response.headers.update(headers)
+        if not decision.allowed:
+            raise HTTPException(429, "Too many requests", headers=headers)
+    return check
+
+@app.exception_handler(Unauthenticated)
+def unauthenticated(_: Request, error: Unauthenticated) -> Response:
+    challenge = 'Bearer error="invalid_token"' if error.details.get("error") == "invalid_token" else "Bearer"
+    return Response(status_code=401, headers={"WWW-Authenticate": challenge})
+
+@app.exception_handler(NotAuthorized)
+def not_authorized(_: Request, error: NotAuthorized) -> Response:
+    return Response(status_code=403)
+
+@app.post("/api/cleaning-staff/accept-invitation", dependencies=[Depends(limited("accept_invitation"))])
+def accept(command: AcceptInvitation, who: Principal | None = Depends(principal)) -> None:
+    accept_invitation_use_case().execute(command, who)  # Use case の組み立て（リポジトリ・UnitOfWork）はアプリのもの
+```
+
+#### 移行メモ（2026-10-06、`security`）
+
+- `security` を書かないプロジェクトは何も変わらない。
+- 書くと、すべての Use case と Aggregate に `authorize` が要る（`ddd validate` が示す）。principal が要る Use case の `execute` に引数が増える（`ddd diff` は破壊的変更として表示する）。呼び出し側（ハンドラ、ジョブ、手書きのテスト）は principal を渡す。ポリシーが動かす Use case は `authorize: internal`。
+- TypeScript の HTTP API で `scheme: bearer_jwt` なら、顧客所有の `package.json` に `"jose": "^6.1.0"` を手で足す（新しいプロジェクトの scaffold には入る）。Python で `bearer_jwt` なら `pyjwt[crypto]>=2.8` を足す（例の `pyproject.toml` を参照）。
+- `internal` にした Use case はエンドポイントがなくなる（`mutations.<context>.<useCase>` も消える）。
 
 ### 移行メモ（2026-10-03、ベストプラクティスの見直し）
 

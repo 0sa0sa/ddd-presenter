@@ -142,6 +142,48 @@ queryClient.invalidateQueries({ queryKey: queries.cleaningStaff.cleaningStaffInv
 queryClient.invalidateQueries({ queryKey: [{ scope: "cleaning-staff" }] }); // そのコンテキストのすべて
 ```
 
+#### 認証・認可・レート制限（`security`、オプトイン）
+
+モデルに `security` を書くと、Principal（呼び出し元）の型、Use case と読み取りの認可（ロールは何も読み込む前、`allow_if` は読み込んだ Aggregate に対して変更の前）、HTTP API の bearer JWT 認証（jose / PyJWT、RFC 8725）とトークンバケットのレート制限（429 と IETF の RateLimit ヘッダー）を生成する。書くと既定は拒否で、すべての Use case と Aggregate に `authorize` が要る（[docs/10 §10](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §20](docs/09-implementation-decisions.md)）。
+
+```yaml
+security:
+  roles: [admin, candidate]
+  principal: { id: String, claims: [{ name: email, type: String, required: false }] }
+  authentication: { scheme: bearer_jwt, issuer: https://auth.example.com/, audience: cleaning-platform, algorithms: [RS256] }
+  rate_limits: { default: { requests: 60, per: minute, by: principal } }
+# use_cases の中
+  - name: accept_invitation
+    authorize: { roles: [candidate], allow_if: principal.email != null and principal.email == invitation.email.value }
+    rate_limit: { requests: 5, per: minute, by: principal }
+```
+
+```ts
+// サーバー: 認証器とレート制限をハンドラに渡す（Use case が認可する: 401 / 403 / 429）
+import { createBearerJwtAuthenticator } from "./generated/api/authentication.js";
+import { InMemoryRateLimitStore, RateLimiter } from "./generated/api/rate-limit.js";
+import { createApiHandler } from "./generated/api/server.js";
+
+const server = Bun.serve({
+  fetch: createApiHandler(dependencies, {
+    authenticate: createBearerJwtAuthenticator({ jwksUrl: "https://auth.example.com/.well-known/jwks.json" }),
+    rateLimiter: new RateLimiter({ store: new InMemoryRateLimitStore() }), // 複数台なら Redis などの RateLimitStore
+    clientIp: (request) => server.requestIP(request)?.address, // X-Forwarded-For は既定では信用しない
+  }),
+});
+
+// Use case を直接呼ぶとき（ジョブ・テスト）も principal を渡す
+await acceptInvitation.execute(command, Principal.create({ id: "candidate-1", roles: ["candidate"], email: "staff@example.com" }));
+
+// クライアント: リクエストごとにトークンを渡し、再試行の方針を QueryClient の既定にする
+import { apiRetry, apiRetryDelay, RateLimitedError } from "./generated/api/runtime.js";
+export const api = createApiClient({ baseUrl: "", getToken: () => auth.currentAccessToken() });
+export const queryClient = new QueryClient({ defaultOptions: { queries: { retry: apiRetry, retryDelay: apiRetryDelay } } });
+// 401 → Unauthenticated、403 → NotAuthorized、429 → RateLimitedError（error.retryAfter 秒）
+```
+
+Python（HTTP 層は生成しない）は `generated/security.py`（Principal・NotAuthorized・`RATE_LIMITS`）、`generated/rate_limit.py`（`RateLimiter`）、`generated/authentication.py`（PyJWT の `BearerJwtAuthenticator`）を FastAPI などの依存関数から使う（例は docs/05 §8）。依存に `pyjwt[crypto]` を足す。
+
 ### VS Code 拡張
 
 ```sh
@@ -312,6 +354,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 - 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
 - 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（日時はミリ秒精度の ISO 文字列 `Instant`、文字列の長さの数え方など）は docs/09 §14・§17。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
-- TypeScript の HTTP API（`typescript.api`）は Use case の POST と ID による Aggregate の GET だけ。DSL にクエリ（Read model）がないので一覧のクエリは生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可はなく、ハンドラの前に置く。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
+- TypeScript の HTTP API（`typescript.api`）は Use case の POST と ID による Aggregate の GET だけ。DSL にクエリ（Read model）がないので一覧のクエリは生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可・レート制限はモデルに `security` を書いたときだけ生成する（書かなければハンドラの前に置く）。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
+- 生成する認可はロール（any-of、継承なし）と `allow_if`（入力と先頭の `load` だけを読む）。トークンの失効・リフレッシュ、複数のエンドポイントをまとめたレート制限、一覧の行ごとの認可はない。インメモリのレート制限のストアは1プロセス用（docs/09 §20）。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。

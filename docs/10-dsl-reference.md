@@ -15,6 +15,7 @@ generation:
   typescript:                       # target: typescript のときの設定
     test_runner: vitest             # vitest（既定）| bun
     api: { base_path: /api }        # 任意。HTTP API と TanStack Query のクライアントを生成する（§1.2）
+security: { roles: [...], ... }     # 任意。認証・認可・レート制限（§10）。書くと Use case / Aggregate に authorize が必要
 contexts:
   - name: CleaningStaff             # Bounded context（PascalCase）
     description: ...
@@ -290,6 +291,8 @@ extension_points:
   transaction: required            # required | none
   idempotency_key: request_id      # 同じキーの2回目は記録した結果を返す（下記）
   retry: true                      # 呼び出し側が同じコマンドを再送しうる（idempotency_key が必須）
+  authorize: { roles: [candidate], allow_if: principal.email == invitation.email.value }   # security を書いたら必須（§10）
+  rate_limit: { requests: 5, per: minute, by: principal }                                  # 任意（§10）
   input: [{ name: invitation_id, type: UUID }]
   steps:
     - load: { aggregate: CleaningStaffInvitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
@@ -341,6 +344,7 @@ scenarios:
       ids: ["..."]                               # ids.new が返す値
       aggregates: [{ type: CleaningStaffInvitation, fields: {...} }]
       extensions: { is_blocked_email: true }
+      principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com } }   # security のとき（§10）。null で未認証
     when: { input: { invitation_id: "..." } }
     then:
       returns: ...
@@ -419,3 +423,92 @@ relationships:
 | `separate_ways` | 連携しない。`events` を書くとエラー |
 
 検査: コンテキストとイベントが存在するか、自分自身への関係、同じ上流・下流の組の重複、`separate_ways` にイベント契約。契約に載っているのにどのポリシーも受けていないイベントは情報として示す。生成される各コンテキストの README には、ポリシーの一覧と Mermaid のコンテキストマップが入る。
+
+## 10. 認証・認可・レート制限（`security`）
+
+トップレベルの `security` を書くと、Principal（呼び出し元）の型、Use case と Aggregate の読み取りの認可、HTTP API の認証とレート制限を生成する（決定の理由と出典は docs/09 §20、生成物とエラーの対応は docs/05 §8）。書かなければ生成物は以前とバイト単位で同じ。
+
+```yaml
+security:
+  roles: [admin, staff, candidate]          # 宣言したロールだけを authorize.roles / has_role で使える
+  principal:
+    id: UUID                                # principal.id の型: String（既定。JWT の sub）/ UUID
+    claims:                                 # allow_if で principal.<name> として読める
+      - { name: company_id, type: UUID, required: false, claim: "https://example.com/company_id" }
+      - { name: email, type: String, required: false }
+  authentication:
+    scheme: bearer_jwt                      # bearer_jwt（既定）| custom（Authenticator を自分で書く）
+    issuer: https://auth.example.com/       # 期待する iss（実行時に上書きできる）
+    audience: hiring-api                    # 期待する aud（実行時に上書きできる）
+    algorithms: [RS256]                     # 既定 [RS256]。none は不可。HS* と公開鍵方式は混ぜない
+    roles_claim: roles                      # ロールを読むクレーム（リストか空白区切りの文字列）
+    clock_tolerance: 30                     # exp / nbf の許容するずれ（秒。0〜300、既定 30）
+  rate_limits:
+    default: { requests: 60, per: minute, by: principal }   # rate_limit のないエンドポイントの制限
+
+contexts:
+  - name: Hiring
+    aggregates:
+      - name: Job
+        authorize:                          # 識別子で読む（生成する読み取り・GET）ことを許す相手
+          roles: [admin, staff]
+          allow_if: has_role(principal, admin) or (principal.company_id != null and principal.company_id == company_id)
+        rate_limit: none                    # 既定の制限を使わない
+    use_cases:
+      - name: close_job
+        authorize:
+          roles: [admin, staff]             # どれか1つを持てばよい（any-of）。省略で認証済みなら誰でも
+          allow_if: has_role(principal, admin) or (principal.company_id != null and principal.company_id == job.company_id)
+        rate_limit: { requests: 5, per: minute, by: principal }
+        input: [{ name: job_id, type: UUID }]
+        steps:
+          - load: { aggregate: Job, by: job_id, as: job, not_found: JobNotFound }
+          - invoke: { target: job, operation: close, args: { at: clock.now } }
+          - save: job
+      - name: check_job_open
+        authorize: public                   # principal なしで誰でも
+      - name: record_audit
+        authorize: internal                 # ポリシーなど内部からだけ。HTTP に出さない
+```
+
+**`authorize` の形**
+
+| 値 | 意味 | 生成される `execute` |
+|---|---|---|
+| `public` | 誰でも（principal を使わない） | `execute(command)` |
+| `internal` | プロセス内（ポリシー・ジョブ）からだけ。HTTP のエンドポイントを作らない。Use case だけ | `execute(command)` |
+| `authenticated` | 認証済みの principal なら誰でも | `execute(command, principal)` |
+| `{ roles: [...], allow_if: <式> }` | いずれかのロールを持ち（any-of。省略で誰でも）、`allow_if` が成り立つ principal | `execute(command, principal)` |
+
+**既定は拒否**: `security` を書いたら、すべての Use case と Aggregate に `authorize` が要る。書かないとエラー `missing-authorize`（実行時にいつも拒否するコードを作るより、誰に許すかをモデルに書かせる）。公開するものは `authorize: public` と明示する。ポリシーが動かす Use case は principal なしで動くので、`authorize: internal`（または `public`）でなければエラー `policy-needs-principal`。
+
+**`allow_if`**: 認可のルール。型付きの式（§4）で、次を読める。
+
+- `principal.id`（`principal.id` の型）、`principal.roles`（`List[String]`）、宣言したクレーム（`required: false` は Optional なので `principal.company_id != null and …` と確かめてから比べる）。
+- `has_role(principal, admin)`（`has_role(principal, "admin")` でもよい）。宣言していないロールはエラー。
+- Use case では入力と、**先頭に並んだ `load` の変数**（`job.company_id`、ガードの `job.is_open`）。生成コードはロールの確認を最初に（何も読み込む前に）行い、`allow_if` はそれが使う最後の `load` の直後、最初の変更の前に評価する。後の手順（`create`・`let`・`if` の枝・変更の後の `load`）の変数を使うとエラー `authorize-too-late`。
+- Aggregate の `allow_if` は、その Aggregate のフィールドを名前だけで読む（Invariant と同じ）。
+
+**`rate_limit`**: `{ requests, per, by }`。`per` は `second` / `minute` / `hour` / `day`、`by` は `principal`（既定）/ `ip` / `global`。トークンバケット（容量 `requests`、`per` の間に均等に補充）で、エンドポイントごと・数える単位ごとに1つ。`none` で既定を使わない。`public` のエンドポイントは principal がないので、既定の `by: principal` は IP ごとに数える（明示的な `by: principal` はエラー）。`internal` の `rate_limit` は効かない（警告）。
+
+**予約語**: `security` を書いたモデルでは、入力と変数の `principal`、Extension point の `has_role`、型名 `Principal` `PrincipalInput` `Role` `NotAuthorized` `Unauthenticated` `RateLimit` `RateLimiter` は使えない。
+
+**シナリオ**: Use case のシナリオの `given.principal` が実行する principal（`{ id, roles, claims }`。`null` で未認証）。省略すると、その Use case の `authorize.roles` をすべて持ち、宣言したクレームが既定値（省略可能なものは null）の principal で動く（`allow_if` がクレームを読むなら `given.principal` を書く）。`then.raises` に `NotAuthorized`（ロールがない・`allow_if` が成り立たない）と `Unauthenticated`（`principal: null` のときだけ）を書ける。
+
+```yaml
+scenarios:
+  - name: staff_of_another_company_cannot_close
+    given:
+      principal: { id: "00000000-0000-4000-8000-000000000011", roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c2" } }
+      aggregates: [{ type: Job, fields: { ... } }]
+    when: { input: { job_id: "..." } }
+    then: { raises: NotAuthorized, state: [{ aggregate: Job, id: "...", fields: { status: open } }] }
+  - name: anonymous_caller_is_unauthenticated
+    given: { principal: null }
+    when: { input: { job_id: "..." } }
+    then: { raises: Unauthenticated }
+```
+
+生成テストは、principal が要る Use case ごとに2つのテストを足す（シナリオが1つ以上あるとき。入力は最初のシナリオのもの）: principal なしで `Unauthenticated`、必要なロールのどれも持たない principal で `NotAuthorized`（`details` に必要なロール）。どちらもリポジトリに触れると失敗するテストダブルを渡し、認可が何よりも先に行われることを確かめる。
+
+検査: 宣言していないロール、`allow_if` の型と使える変数、クレームの型（`String` / `UUID` / `Integer` / `Boolean` / `List[String]`）と名前（`id` / `roles` は組み込み）、`none` の署名アルゴリズム（`insecure-algorithm`）、HS* と公開鍵方式の混在（`mixed-algorithms`）、`clock_tolerance` の範囲、レート制限の単位と数える単位、シナリオの principal の値。
