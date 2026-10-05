@@ -11,6 +11,11 @@ import type { TsLayout, TsPaths } from "./layout.ts";
 import { prop } from "./names.ts";
 import { tsType } from "./types.ts";
 
+/** Whether the HTTP API gets the generated bearer JWT authenticator (and depends on jose). */
+export function usesJwt(model: ModelIR): boolean {
+  return !!model.generation.typescript.api && model.security?.authentication?.scheme === "bearer_jwt";
+}
+
 /** Zod schema of a principal claim / id (claims are context-free: primitives and List[String]). */
 function claimSchema(t: Type, imp: TsImports, P: TsPaths): string {
   if (t.k === "optional") return `${claimSchema(t.inner, imp, P)}.nullable().default(null)`;

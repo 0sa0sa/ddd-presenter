@@ -493,7 +493,6 @@ export function apiHandler<D>(
     return notFound(request);
   };
 }
-
 //#endif
 
 /** `instanceof DomainError`, typed with the default details (instanceof alone gives `any`). */

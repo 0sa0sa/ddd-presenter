@@ -20,7 +20,10 @@ import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
 import { tsType } from "./types.ts";
-import { readAccessFile, securityFile } from "./security.ts";
+import { readAccessFile, securityFile, usesJwt } from "./security.ts";
+import { securityTestFile } from "./security-tests.ts";
+
+export { usesJwt };
 
 /** Versions written into the scaffolded package.json (customer-owned afterwards). */
 export const TS_DEPENDENCIES = {
@@ -64,11 +67,6 @@ export function templateSections(source: string, flags: Record<string, boolean>)
     else if (stack.every(Boolean)) out.push(line);
   }
   return out.join("\n");
-}
-
-/** Whether the HTTP API gets the generated bearer JWT authenticator (and depends on jose). */
-export function usesJwt(model: ModelIR): boolean {
-  return !!model.generation.typescript.api && model.security?.authentication?.scheme === "bearer_jwt";
 }
 
 /** Deterministic TypeScript (Zod v4) generation. The analysis must come from a model without errors. */
@@ -167,6 +165,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       const t = apiTestFile(L);
       if (t) gen(t.path, t.content);
     }
+    const securityTests = securityTestFile(served);
+    if (securityTests) gen(securityTests.path, securityTests.content);
   }
   scaffold("package.json", packageJson(model));
   scaffold("tsconfig.json", tsconfigJson(model));
