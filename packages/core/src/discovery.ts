@@ -787,6 +787,8 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
           description: cmd.item.text.trim() || undefined,
           command: `${command}${current.contexts.some((x) => x.useCases.some((u) => u.command === command)) ? "Command" : ""}`,
           transaction: "required",
+          // With security declared, a new use case is not served over HTTP until the team decides who may run it.
+          ...(current.security ? { authorize: "internal" } : {}),
           input: cmd.item.creates ? [] : [{ name: idField, type: "UUID" }],
           steps,
         });
@@ -803,6 +805,8 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
             name: aggName,
             description: [a.item.text.trim(), ...ruleNotes].filter(Boolean).join("\n") || undefined,
             identity: "id",
+            // With security declared, reading a new aggregate is limited to the first declared role until reviewed.
+            ...(current.security?.roles[0] ? { authorize: { roles: [current.security.roles[0]] } } : {}),
             fields: [{ name: "id", type: "UUID" }],
             ...(factories.length ? { factories } : {}),
             ...(operations.length ? { operations } : {}),
@@ -906,6 +910,9 @@ export function boardToModel(board: Board, currentYaml: string, names: Record<st
     policyCount.set(uc.context, (policyCount.get(uc.context) ?? 0) + 1);
   }
   for (const rel of newRelationships) ops.push({ op: "add", path: ["relationships"], value: rel });
+  if (current.security && ops.some((o) => o.op === "add" && (o.path.at(-1) === "use_cases" || o.path.at(-1) === "aggregates" || o.path.at(-1) === "contexts"))) {
+    summary.push(`security: 新しい Use case は authorize: internal（HTTP に出さない）、新しい集約は authorize: { roles: [${current.security.roles[0] ?? ""}] } で反映しました。誰に許すかを見直してください`);
+  }
   for (const [ctx, n] of policyCount) summary.push(`${ctx}: ポリシー ${n}`);
   if (newRelationships.length) summary.push(`コンテキストマップ: ${newRelationships.map((r) => `${r.upstream} → ${r.downstream}`).join(", ")}`);
 

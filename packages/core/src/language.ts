@@ -1247,7 +1247,9 @@ function keyCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind
     const present = new Set(siblingKeys(s, pos));
     return (uc?.input ?? []).filter((f) => !present.has(f.name)).map((f, i) => ({ label: f.name, kind: "field" as const, detail: `${f.type}${f.required ? "" : "（省略可）"}`, insertText: `${f.name}: `, sortRank: i }));
   }
-  const keys = KEYS[pos.container] ?? [];
+  // authorize / rate_limit / given.principal only mean something once the model declares security.
+  const securityKeys = new Set(s.model?.security ? [] : ["authorize", "rate_limit", "principal"]);
+  const keys = (KEYS[pos.container] ?? []).filter((k) => !(securityKeys.has(k.key) && ["aggregate", "useCase", "given:useCase"].includes(pos.container)));
   // Hide keys already present in the same mapping.
   const present = new Set(siblingKeys(s, pos));
   return keys.filter((k) => !present.has(k.key)).map((k, i) => ({ label: k.key, kind: "key" as const, detail: k.doc, insertText: `${k.key}: `, sortRank: i }));

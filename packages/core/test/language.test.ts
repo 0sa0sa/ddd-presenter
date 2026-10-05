@@ -32,9 +32,14 @@ const labels = (text: string, offset: number) => complete(text, offset).items.ma
 
 describe("completion: keys", () => {
   test("keys of an aggregate, excluding ones already present", () => {
-    // The sample aggregate already has every key except `entities`.
+    // The sample aggregate already has every key except `entities` and `rate_limit` (offered because it declares security).
     const [t, o] = editSample("        invariants:\n          - name: expiry_after_creation", "        |\n        invariants:\n          - name: expiry_after_creation");
-    expect(labels(t, o)).toEqual(["entities"]);
+    expect(labels(t, o)).toEqual(["entities", "rate_limit"]);
+    // Without security, authorize and rate_limit are not offered.
+    const plain = SAMPLE.replace(/\n# 認証[\s\S]*?\n(?=contexts:)/, "\n");
+    const p = plain.indexOf("        invariants:\n          - name: expiry_after_creation");
+    const unsecured = plain.slice(0, p) + "        \n" + plain.slice(p);
+    expect(labels(unsecured, p + 8)).toEqual(["entities"]);
     const bare = SAMPLE.replace(/        state_guards:[\s\S]*?        factories:/, "        factories:");
     const [t2, o2] = at(bare.replace("        factories:", "        sta|\n        factories:"));
     expect(labels(t2, o2)).toEqual(["state_guards"]);

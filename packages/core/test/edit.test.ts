@@ -30,7 +30,8 @@ describe("structural edits", () => {
   test("add a field and a new aggregate from templates", () => {
     const text = edit(
       { op: "add", path: ["contexts", 0, "aggregates", 0, "fields"], value: { name: "note", type: "String", required: false } },
-      { op: "add", path: ["contexts", 0, "aggregates"], value: templates.aggregate("Crew") },
+      // The sample declares security: a new aggregate states who may read it (deny by default).
+      { op: "add", path: ["contexts", 0, "aggregates"], value: { ...templates.aggregate("Crew"), authorize: { roles: ["admin"] } } },
     );
     expect(text).toMatch(/- \{ ?name: note, type: String, required: false ?\}/);
     const r = validateModelText(text);

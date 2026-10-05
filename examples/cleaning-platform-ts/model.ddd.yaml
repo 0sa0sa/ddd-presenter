@@ -12,18 +12,22 @@ generation:
 
 # 認証・認可・レート制限（docs/09 §20）。宣言すると、すべての Use case と Aggregate に authorize が必要（既定は拒否）
 security:
-  roles: [admin, candidate]                     # 清掃会社の管理者 / スタッフ候補
+  # 清掃会社の管理者 / スタッフ候補
+  roles: [admin, candidate]
   principal:
-    id: String                                  # JWT の sub
+    # principal.id は JWT の sub。claims は allow_if で principal.<name> として読める
+    id: String
     claims:
-      - { name: email, type: String, required: false }   # allow_if で principal.email として読める
+      - { name: email, type: String, required: false }
+  # Authorization: Bearer <JWT> を検証する認証器を生成する
   authentication:
-    scheme: bearer_jwt                          # Authorization: Bearer <JWT> を検証する認証器を生成する
+    scheme: bearer_jwt
     issuer: https://auth.example.com/
     audience: cleaning-platform
     algorithms: [RS256]
+  # rate_limit を書かないエンドポイントの制限
   rate_limits:
-    default: { requests: 60, per: minute, by: principal }   # rate_limit を書かないエンドポイントの制限
+    default: { requests: 60, per: minute, by: principal }
 
 contexts:
   - name: CleaningStaff
@@ -189,9 +193,9 @@ contexts:
         actor: 清掃会社の管理者
         description: スタッフ候補へ招待を発行する
         command: IssueInvitation
+        transaction: required
         authorize: { roles: [admin] }
         rate_limit: { requests: 10, per: minute, by: principal }
-        transaction: required
         input:
           - { name: email, type: EmailAddress }
           - { name: valid_until, type: DateTime }
@@ -254,12 +258,12 @@ contexts:
         actor: スタッフ候補
         description: 招待を受諾する
         command: AcceptInvitation
+        transaction: required
         # ロールは読み込む前に、allow_if は招待を読み込んだ後・受諾する前に確かめる
         authorize:
           roles: [candidate]
           allow_if: principal.email != null and principal.email == invitation.email.value
         rate_limit: { requests: 5, per: minute, by: principal }
-        transaction: required
         input:
           - { name: invitation_id, type: UUID }
         steps:
@@ -353,8 +357,8 @@ contexts:
       - name: revoke_invitation
         actor: 清掃会社の管理者
         command: RevokeInvitation
-        authorize: { roles: [admin] }
         transaction: required
+        authorize: { roles: [admin] }
         input:
           - { name: invitation_id, type: UUID }
         steps:
@@ -443,8 +447,9 @@ contexts:
         actor: システム（ポリシー）
         description: 招待を受諾した人をスタッフとして登録する
         command: RegisterStaff
-        authorize: internal                     # ポリシーだけが実行する（HTTP には出さない）
         transaction: required
+        # ポリシーだけが実行する（HTTP には出さない）
+        authorize: internal
         input:
           - { name: invitation_id, type: UUID }
           - { name: joined_at, type: DateTime }

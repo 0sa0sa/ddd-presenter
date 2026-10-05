@@ -11,7 +11,8 @@ import { parse } from "yaml";
 import { checkExpression, complete, effectiveRateLimit, leadingLoads, makeEnv, principalEnv, scenarioPrincipal, validateModelText, type SecurityIR } from "../src/index.ts";
 
 const FIXTURE = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/security.ddd.yaml"), "utf8");
-const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform/model.ddd.yaml"), "utf8");
+/** A model without security (the examples declare it). */
+const PLAIN = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/context-map.ddd.yaml"), "utf8");
 
 const errors = (text: string) => validateModelText(text).diagnostics.filter((d) => d.severity === "error");
 const codes = (text: string) => errors(text).map((d) => d.code);
@@ -57,8 +58,8 @@ describe("security: parsing and the valid fixture", () => {
   });
 
   test("models without security are unchanged; authorize without security is an error", () => {
-    expect(validateModelText(SAMPLE).model!.security).toBeUndefined();
-    const text = SAMPLE.replace("        command: AcceptInvitation\n", "        command: AcceptInvitation\n        authorize: public\n");
+    expect(validateModelText(PLAIN).model!.security).toBeUndefined();
+    const text = PLAIN.replace("        command: AcceptCandidate\n", "        command: AcceptCandidate\n        authorize: public\n");
     expect(codes(text)).toContain("security-not-declared");
   });
 });

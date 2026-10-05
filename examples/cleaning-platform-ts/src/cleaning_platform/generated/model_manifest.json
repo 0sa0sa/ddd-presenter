@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "087c3e743630021663e9f343aa224d8d9b65586e7b89d7d1bf4d71aa386b527e",
+  "model_sha256": "9d20747997ab8e011136e57bbef266fd4c5a1caf72e36c987f86e721b4993452",
   "files": [
     {
       "path": "src/cleaning_platform/generated/adapters.ts",

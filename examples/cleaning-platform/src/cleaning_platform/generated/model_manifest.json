@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "efc031a6043d2b0706c7fea6a945881c4712ac714dca7b8edcd7f279fa703a6f",
+  "model_sha256": "0e9cefdbe64a6d85f7f237690d89da7af887db967d33d8d8e8621385ca4f5b49",
   "files": [
     {
       "path": "src/cleaning_platform/generated/__init__.py",
