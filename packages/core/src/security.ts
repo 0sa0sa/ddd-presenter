@@ -27,7 +27,7 @@ export const PRINCIPAL_BUILTIN_MEMBERS = ["id", "roles"] as const;
 /** Names the generated security modules define next to the model's types (reserved once `security` is declared). */
 export const SECURITY_TYPE_NAMES = ["Principal", "PrincipalInput", "Role", "NotAuthorized", "Unauthenticated", "RateLimit", "RateLimiter"] as const;
 /** Claim names the generated Principal class / schema uses for itself. */
-const RESERVED_CLAIMS = new Set(["id", "roles", "has_role", "model_config", "schema", "parse", "create"]);
+const RESERVED_CLAIMS = new Set(["id", "roles", "has_role", "parse", "create"]);
 
 /** Type of a declared principal claim (`List[String]` is the only list), or undefined when not allowed. */
 export function claimType(src: string): Type | undefined {

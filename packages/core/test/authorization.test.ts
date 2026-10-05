@@ -102,6 +102,9 @@ describe("security: authentication settings (RFC 8725)", () => {
   test("claims: snake_case, supported types, id and roles are built in", () => {
     expect(codes(FIXTURE.replace("{ name: email, type: String, required: false }", "{ name: email, type: Decimal, required: false }"))).toContain("invalid-claim-type");
     expect(codes(FIXTURE.replace("{ name: email, type: String, required: false }", "{ name: roles, type: String, required: false }"))).toContain("reserved-name");
+    // Claims become attributes of the generated Principal: Python keywords and Pydantic members are reserved too.
+    expect(codes(FIXTURE.replace("{ name: email, type: String, required: false }", "{ name: copy, type: String, required: false }"))).toEqual(["reserved-name"]);
+    expect(codes(FIXTURE.replace("{ name: email, type: String, required: false }", "{ name: from, type: String, required: false }"))).toEqual(["reserved-name"]);
   });
 });
 

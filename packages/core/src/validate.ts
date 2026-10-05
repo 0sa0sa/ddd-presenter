@@ -253,6 +253,10 @@ class Validator {
     this.checkPolicyCycles();
     this.checkContractUsage();
     checkSecurityBlock(this.bag, m);
+    // Claims become attributes of the generated Principal: the same naming rules as fields (keywords, Pydantic members).
+    for (const c of m.security?.principal.claims ?? []) {
+      if (/^[a-z][a-z0-9_]*$/.test(c.name) && !["id", "roles"].includes(c.name)) checkSnakeName(this.bag, c.name, "Claim name", [...c.path, "name"], "Security");
+    }
     if (m.generation.target === "typescript") this.checkTypeScriptNames();
   }
 
