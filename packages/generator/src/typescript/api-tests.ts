@@ -4,15 +4,15 @@
  * match them, the validated data, the error mapping (status and domain error class) and that each mutation
  * invalidates exactly what it changes. They use the factories like an app does: `queries.<context>.<aggregate>`.
  */
-import type { AggregateIR, Type, UseCaseIR, UseCaseScenarioIR } from "@ddd/core";
-import { aggregateKey, contextKey, idKind, idLiteral, invalidationLabel, invalidations, readPath, useCaseErrors, useCasePath, type IdKind } from "./api.ts";
+import { effectiveRateLimit, evaluateOnValues, formatPath, makePrincipal, otherRoles, requiresPrincipal, scenarioPrincipal, windowSeconds, type AggregateIR, type RateLimitIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import { aggregateKey, contextKey, idKind, idLiteral, invalidationLabel, invalidations, readPath, servedUseCases, useCaseErrors, useCasePath, type IdKind } from "./api.ts";
 import { repoName } from "./application.ts";
 import { Code, TsImports, tsString } from "./code.ts";
 import type { TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
-import { kebab, prop } from "./names.ts";
-import { build, importError, testFile, useCaseSetup } from "./tests.ts";
+import { kebab, prop, toSnake } from "./names.ts";
+import { build, importError, principalLiteral, testFile, useCaseSetup } from "./tests.ts";
 import { expectEqual, record, typedValue } from "./values.ts";
 
 const ORIGIN = "http://localhost";
@@ -21,11 +21,27 @@ const ORIGIN = "http://localhost";
  * `const { … } = connect({ context: { … } });` inside a test (depth 2), expanded like Prettier expands an object
  * argument that does not fit.
  */
-function connectLine(c: Code, names: string, key: string, parts: string[]): void {
+function connectLine(c: Code, names: string, key: string, parts: string[], principal?: string): void {
   const inner = `{ ${parts.join(", ")} }`;
   const head = `const { ${names} } = connect(`;
-  if (strWidth(`    ${head}{ ${key}: ${inner} });`) <= PRINT_WIDTH) {
-    c.line(`${head}{ ${key}: ${inner} });`);
+  const tail = principal ? `, ${principal})` : ")";
+  if (strWidth(`    ${head}{ ${key}: ${inner} }${tail};`) <= PRINT_WIDTH) {
+    c.line(`${head}{ ${key}: ${inner} }${tail};`);
+    return;
+  }
+  if (principal) {
+    c.line(head);
+    c.indent(() => {
+      if (strWidth(`      { ${key}: ${inner} },`) <= PRINT_WIDTH) c.line(`{ ${key}: ${inner} },`);
+      else {
+        c.open("{", () => {
+          if (strWidth(`        ${key}: ${inner},`) <= PRINT_WIDTH) c.line(`${key}: ${inner},`);
+          else c.open(`${key}: {`, () => parts.forEach((p) => c.line(`${p},`)), "},");
+        }, "},");
+      }
+      c.line(`${principal},`);
+    });
+    c.line(");");
     return;
   }
   c.open(`${head}{`, () => {
@@ -84,11 +100,28 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
   c.doc(
     "The client wired to the generated server handler (its `fetch`): requests never leave the process. The query and mutation factories are built from it once, as an app does. Retries are off, as in any test of TanStack Query.",
   );
-  c.block("function connect(dependencies: ApiDependencies)", () => {
-    c.line("const handler = createApiHandler(dependencies);");
+  const sec = L.model.security;
+  if (sec) {
+    imp.value(L.security, "Principal");
+    c.doc("A principal holding every role: the requests of these tests authenticate as it unless a test says otherwise.");
+    c.line(`const everyone = ${principalLiteral(L, makePrincipal(sec, { roles: sec.roles, claims: {} }), imp)};`);
+    c.line();
+    c.doc("What the client sends (`getToken`) and the test authenticator accepts.");
+    c.line('const AUTHORIZATION = { authorization: "Bearer test-token" };');
+    c.line();
+  }
+  c.block(sec ? "function connect(dependencies: ApiDependencies, principal: Principal | null = everyone)" : "function connect(dependencies: ApiDependencies)", () => {
+    if (sec) {
+      c.block("const handler = createApiHandler(dependencies,", () => {
+        c.comment("The bearer token the client sends stands for `principal` (the JWT authenticator is tested on its own).");
+        c.line("authenticate: (request) =>");
+        c.indent(() => c.line('Promise.resolve(request.headers.get("authorization") === AUTHORIZATION.authorization ? principal : null),'));
+      }, ");");
+    } else c.line("const handler = createApiHandler(dependencies);");
     c.line("const statuses: number[] = [];");
     c.block("const api = createApiClient(", () => {
       c.line(`baseUrl: ${tsString(ORIGIN)},`);
+      if (sec) c.line('getToken: () => "test-token",');
       c.block("fetch: async (request) =>", () => {
         c.line("const response = await handler(request);");
         c.line("statuses.push(response.status);");
@@ -113,13 +146,14 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
       first = false;
     };
     handlerTest(L, c, imp, sep);
+    if (sec) securityTests(L, c, imp, sep);
     for (const ag of L.ca.ir.aggregates) {
       sep();
       readTest(L, c, ag, imp);
       sep();
       keyMatchTest(L, c, ag);
     }
-    for (const uc of L.ca.ir.useCases) {
+    for (const uc of servedUseCases(L)) {
       const ok = uc.scenarios.find((s) => !s.then.raises);
       const failing = uc.scenarios.find((s) => s.then.raises);
       for (const sc of [ok, failing]) {
@@ -135,7 +169,7 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
 /** Routing and the error responses that do not come from the domain. */
 function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): void {
   const api = L.model.generation.typescript.api!;
-  const uc = L.ca.ir.useCases.find((u) => u.scenarios.length);
+  const uc = servedUseCases(L).find((u) => u.scenarios.length);
   const ag = L.ca.ir.aggregates[0];
   const key = contextKey(L);
   sep();
@@ -145,13 +179,14 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
     c.line(`const unknown = await handler(new Request(${tsString(`${ORIGIN}${api.basePath}/no-such-endpoint`)}));`);
     c.line("expect(unknown.status).toBe(404);");
     c.line('expect(await responseJson(unknown)).toMatchObject({ code: "route_not_found" });');
-    if (L.ca.ir.useCases.length) {
-      const path = `${ORIGIN}${useCasePath(api, L, L.ca.ir.useCases[0]!)}`;
+    if (servedUseCases(L).length) {
+      const path = `${ORIGIN}${useCasePath(api, L, servedUseCases(L)[0]!)}`;
       c.line(`const wrongMethod = await handler(new Request(${tsString(path)}));`);
       c.line("expect(wrongMethod.status).toBe(405);");
       c.line('expect(wrongMethod.headers.get("allow")).toBe("POST");');
       c.comment("A use case the app did not pass to the handler is not served.");
-      c.line(`const unwired = await handler(new Request(${tsString(path)}, { method: "POST", body: "{}" }));`);
+      const auth = L.model.security && requiresPrincipal(servedUseCases(L)[0]!) ? ", headers: AUTHORIZATION" : "";
+      c.line(`const unwired = await handler(new Request(${tsString(path)}, { method: "POST", body: "{}"${auth} }));`);
       c.line("expect(unwired.status).toBe(404);");
     }
     if (ag) {
@@ -161,7 +196,8 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
       c.line(`const served = connect({ ${key}: { repositories: { ${repo} } } });`);
       if (idKind(L, ag) !== "string") {
         const path = `${ORIGIN}${readPath(api, L, ag).replace(":id", "not-an-id")}`;
-        c.line(`const invalid = await served.handler(new Request(${tsString(path)}));`);
+        const auth = L.model.security && requiresPrincipal(ag) ? ", { headers: AUTHORIZATION }" : "";
+        c.line(`const invalid = await served.handler(new Request(${tsString(path)}${auth}));`);
         c.line("expect(invalid.status).toBe(400);");
         c.line('expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });');
       }
@@ -182,6 +218,7 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
       c.line(`{ ${key}: { useCases: { ${prop(uc.name)}: { execute: () => Promise.reject(new Error("database is down")) } } } },`);
       c.open("{", () => {
         c.block("onError: (error) =>", () => c.line("failures.push(error);"), ",");
+        if (L.model.security && requiresPrincipal(uc)) c.line("authenticate: () => Promise.resolve(everyone),");
       }, "},");
     });
     c.line(");");
@@ -222,10 +259,18 @@ function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
       c.line(
         `expect([...options.queryKey]).toEqual([{ scope: ${tsString(kebab(L.ca.ir.name))}, entity: ${tsString(kebab(ag.name))}, kind: "detail", id: ${idLiteral(kind, id, true)} }]);`,
       );
-      c.line("const data = await queryClient.query(options);");
-      c.line("expect(statuses).toEqual([200]);");
-      c.line("expect(jsonOf(data)).toEqual(jsonOf(stored));");
-      c.line('expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");');
+      const allowed = readAllowed(L, ag, sample);
+      if (allowed === false) {
+        imp.value(L.security, "NotAuthorized");
+        c.comment("allow_if does not hold for this principal and aggregate: 403.");
+        c.line("await expectRejects(() => queryClient.query(options), NotAuthorized);");
+        c.line("expect(statuses).toEqual([403]);");
+      } else {
+        c.line("const data = await queryClient.query(options);");
+        c.line("expect(statuses).toEqual([200]);");
+        c.line("expect(jsonOf(data)).toEqual(jsonOf(stored));");
+        c.line('expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");');
+      }
     }
     // An unknown id that still passes the identity's schema (a constrained String / Integer id may reject any guess).
     const constrained = Object.keys(ag.fields.find((f) => f.name === ag.identity)?.constraints ?? {}).length > 0;
@@ -330,7 +375,17 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
     }
     const refetches = !then.raises && Array.isArray(then.state) && then.state.length > 0;
     const used = L.ca.ir.aggregates.filter((ag) => touched.has(ag.name) || (refetches && Array.isArray(then.state) && then.state.some((x) => x.aggregate === ag.name)));
-    connectLine(c, [...(used.length ? ["queries"] : []), "mutations", "queryClient", "statuses"].join(", "), key, deps);
+    let principal: string | undefined;
+    const sec = L.model.security;
+    if (sec && requiresPrincipal(uc)) {
+      const p = scenarioPrincipal(sec, uc, sc);
+      if (p.anonymous) principal = "null";
+      else {
+        c.line(`const principal = ${principalLiteral(L, p, imp)};`);
+        principal = "principal";
+      }
+    }
+    connectLine(c, [...(used.length ? ["queries"] : []), "mutations", "queryClient", "statuses"].join(", "), key, deps, principal);
     for (const ag of used) c.line(factoryLine(L, ag));
     if (cache.length) {
       c.comment("Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated detail.");
@@ -343,7 +398,8 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
       importError(L, imp, then.raises);
       imp.value(L.contextTesting, "expectRejects");
       c.line(`const error = await expectRejects(() => observer.mutate(input), ${then.raises});`);
-      const code = then.raises === "ConstraintViolation" ? "constraint_violation" : then.raises === "AggregateNotFound" ? "aggregate_not_found" : (L.ca.ir.errors.find((e) => e.name === then.raises)?.code ?? "");
+      const builtin: Record<string, string> = { ConstraintViolation: "constraint_violation", AggregateNotFound: "aggregate_not_found", NotAuthorized: "not_authorized", Unauthenticated: "unauthenticated" };
+      const code = builtin[then.raises] ?? L.ca.ir.errors.find((e) => e.name === then.raises)?.code ?? "";
       c.line(`expect(statuses.at(-1)).toBe(${status(code)});`);
       c.line("expect(observer.getCurrentResult().error).toBe(error);");
     } else {
@@ -365,4 +421,142 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
       });
     }
   }, ");");
+}
+
+// ---------------------------------------------------------------------------
+// Authentication, authorization and rate limiting over HTTP (docs/09 §20)
+// ---------------------------------------------------------------------------
+
+/** Whether the aggregate's allow_if holds for `everyone` on the sample (undefined: cannot tell, or no rule). */
+function readAllowed(L: TsLayout, ag: AggregateIR, sample: Record<string, unknown>): boolean | undefined {
+  const sec = L.model.security;
+  const rule = ag.authorize?.allowIf !== undefined ? L.ca.exprs.get(formatPath([...ag.authorize.path, "allow_if"])) : undefined;
+  if (!sec || !rule) return undefined;
+  const v = evaluateOnValues(rule, sample, makePrincipal(sec, { roles: sec.roles, claims: {} }));
+  return typeof v === "boolean" ? v : undefined;
+}
+
+/** An endpoint with a rate limit: its request (unwired, so it answers 404 after taking a token) and limit. */
+function limitedEndpoint(L: TsLayout): { name: string; method: "GET" | "POST"; path: string; limit: RateLimitIR; secured: boolean } | undefined {
+  const api = L.model.generation.typescript.api!;
+  for (const uc of servedUseCases(L)) {
+    const limit = effectiveRateLimit(L.model, uc);
+    if (limit) return { name: uc.name, method: "POST", path: useCasePath(api, L, uc), limit, secured: requiresPrincipal(uc) };
+  }
+  for (const ag of L.ca.ir.aggregates) {
+    const limit = effectiveRateLimit(L.model, ag);
+    const id = idKind(L, ag) === "integer" ? "1" : idKind(L, ag) === "string" ? "some-id" : "00000000-0000-4000-8000-000000000001";
+    if (limit) return { name: `read_${toSnake(ag.name)}`, method: "GET", path: readPath(api, L, ag).replace(":id", id), limit, secured: requiresPrincipal(ag) };
+  }
+  return undefined;
+}
+
+function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): void {
+  const sec = L.model.security!;
+  const api = L.model.generation.typescript.api!;
+  const key = contextKey(L);
+  const isProtected = servedUseCases(L).filter((u) => requiresPrincipal(u) && u.scenarios.length);
+  const uc = isProtected[0];
+  if (uc) {
+    const sc = uc.scenarios[0]!;
+    const url = tsString(`${ORIGIN}${useCasePath(api, L, uc)}`);
+    imp.value(L.security, "Unauthenticated");
+    imp.value(L.contextTesting, "expectRejects");
+    imp.value("@tanstack/react-query", "MutationObserver");
+    sep();
+    c.doc(
+      `\`POST ${useCasePath(api, L, uc)}\` needs a principal: without credentials it answers 401 with \`WWW-Authenticate: Bearer\`, with an invalid token 401 with \`error="invalid_token"\` (RFC 6750 §3.1); the client rejects with Unauthenticated.`,
+    );
+    c.block(`test("authentication: 401 with a Bearer challenge without or with an invalid token", async () =>`, () => {
+      c.line('const badToken = new Unauthenticated({ error: "invalid_token" }, "The token is invalid");');
+      c.line("const handler = createApiHandler(");
+      c.indent(() => {
+        c.line("{},");
+        c.open("{", () => {
+          c.line("authenticate: (request) =>");
+          c.indent(() => {
+            c.line('request.headers.get("authorization") === "Bearer bad"');
+            c.indent(() => {
+              c.line("? Promise.reject(badToken)");
+              c.line(": Promise.resolve(null),");
+            });
+          });
+        }, "},");
+      });
+      c.line(");");
+      c.line(`const missing = await handler(new Request(${url}, { method: "POST", body: "{}" }));`);
+      c.line("expect(missing.status).toBe(401);");
+      c.line('expect(missing.headers.get("www-authenticate")).toBe("Bearer");');
+      c.line('expect(await responseJson(missing)).toMatchObject({ code: "unauthenticated" });');
+      c.line('const headers = { authorization: "Bearer bad" };');
+      c.line(`const invalid = await handler(new Request(${url}, { method: "POST", body: "{}", headers }));`);
+      c.line("expect(invalid.status).toBe(401);");
+      c.line(`expect(invalid.headers.get("www-authenticate")).toBe('Bearer error="invalid_token"');`);
+      c.line("const { mutations, queryClient, statuses } = connect({}, null);");
+      c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(uc.name)});`);
+      c.line(`await expectRejects(() => observer.mutate(${record(uc.command, sc.when.input, imp, L)}), Unauthenticated);`);
+      c.line("expect(statuses).toEqual([401]);");
+    }, ");");
+  }
+  const withRoles = isProtected.find((u) => u.authorize!.roles.length);
+  if (withRoles) {
+    const sc = withRoles.scenarios[0]!;
+    imp.value(L.security, "NotAuthorized");
+    imp.value(L.contextTesting, "expectRejects");
+    imp.value("@tanstack/react-query", "MutationObserver");
+    const roles = otherRoles(sec, withRoles.authorize!);
+    sep();
+    c.doc(`A principal without ${withRoles.authorize!.roles.join(" / ")} is refused by ${withRoles.name}: 403, and the client rejects with NotAuthorized.`);
+    c.block(`test(${tsString(`authorization: ${withRoles.name} without a required role is 403`)}, async () =>`, () => {
+      useCaseSetup(L, c, withRoles, sc, imp);
+      c.line(`const principal = ${principalLiteral(L, makePrincipal(sec, { roles, claims: {} }), imp)};`);
+      connectLine(c, "mutations, queryClient, statuses", key, [`useCases: { ${prop(withRoles.name)}: useCase }`], "principal");
+      c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(withRoles.name)});`);
+      c.line(`const error = await expectRejects(() => observer.mutate(${record(withRoles.command, sc.when.input, imp, L)}), NotAuthorized);`);
+      c.line(`expect(error.details).toMatchObject({ requiredRoles: [${withRoles.authorize!.roles.map(tsString).join(", ")}] });`);
+      c.line("expect(statuses).toEqual([403]);");
+    }, ");");
+  }
+  const limited = limitedEndpoint(L);
+  if (limited) {
+    const { limit } = limited;
+    const w = windowSeconds(limit);
+    const retry = Math.ceil(w / limit.requests);
+    const name = limited.name;
+    imp.value(L.apiModule("rate-limit"), "RateLimiter");
+    sep();
+    c.doc(
+      `\`${limited.method} ${limited.path}\` allows ${limit.requests} request(s) per ${w} s (by ${limit.by}): then 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint is not wired, so allowed requests answer 404 after taking their token.`,
+    );
+    c.block(`test(${tsString(`rate limit: ${name} answers 429 with Retry-After and RateLimit headers, then refills`)}, async () =>`, () => {
+      c.line('let now = Date.parse("2026-01-01T00:00:00Z");');
+      c.line("const handler = createApiHandler(");
+      c.indent(() => {
+        c.line("{},");
+        c.open("{", () => {
+          if (limited.secured) c.line("authenticate: () => Promise.resolve(everyone),");
+          c.line("rateLimiter: new RateLimiter({ now: () => now }),");
+          c.line('clientIp: () => "203.0.113.7",');
+        }, "},");
+      });
+      c.line(");");
+      const init = limited.method === "POST" ? `{ method: "POST", body: "{}" }` : "";
+      c.line(`const send = () => handler(new Request(${tsString(`${ORIGIN}${limited.path}`)}${init ? `, ${init}` : ""}));`);
+      c.line("const first = await send();");
+      c.line("expect(first.status).toBe(404);");
+      c.line(`expect(first.headers.get("ratelimit-policy")).toBe(${tsString(`"${name}";q=${limit.requests};w=${w}`)});`);
+      c.line(`expect(first.headers.get("ratelimit")).toMatch(/^"${name}";r=${limit.requests - 1};t=\\d+$/);`);
+      if (limit.requests > 1) {
+        c.block(`for (let i = 1; i < ${limit.requests}; i++)`, () => c.line("expect((await send()).status).toBe(404);"));
+      }
+      c.line("const refused = await send();");
+      c.line("expect(refused.status).toBe(429);");
+      c.line(`expect(refused.headers.get("retry-after")).toBe(${tsString(String(retry))});`);
+      c.line(`expect(refused.headers.get("ratelimit")).toBe(${tsString(`"${name}";r=0;t=${retry}`)});`);
+      c.line(`expect(await responseJson(refused)).toMatchObject({ code: "rate_limited", details: { retryAfter: ${retry} } });`);
+      c.line(`now += ${retry * 1000};`);
+      c.line("expect((await send()).status).toBe(404);");
+      c.line("expect((await send()).status).toBe(429);");
+    }, ");");
+  }
 }

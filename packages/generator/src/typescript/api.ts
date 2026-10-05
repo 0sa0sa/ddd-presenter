@@ -3,7 +3,7 @@
  * server handler, a typed client and TanStack Query (v5) query factories (keys + queryOptions) and mutationOptions. Design notes and the
  * TkDodo rules the client follows: docs/09 §18; contract: docs/05 §8.
  */
-import { formatPath, type AggregateIR, type ApiSettings, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
+import { effectiveRateLimit, formatPath, requiresPrincipal, servedOverHttp, windowSeconds, type AggregateIR, type ApiSettings, type AuthorizeIR, type RateLimitIR, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
 import { useCaseClass } from "./application.ts";
 import { assemble, Code, header, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
@@ -11,6 +11,7 @@ import type { TsLayout, TsPaths } from "./layout.ts";
 import { camel, ident, kebab, pascal, prop, toSnake } from "./names.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { zodSchema } from "./types.ts";
+import { protectedAggregates, readAccessName } from "./security.ts";
 
 /** `readonly name?: Pick<Type, "member">;` at `depth`, broken like Prettier breaks long type arguments. */
 function pickLine(c: Code, depth: number, name: string, type: string, member: string): void {
@@ -22,11 +23,44 @@ function pickLine(c: Code, depth: number, name: string, type: string, member: st
   c.open(`readonly ${name}?: Pick<`, () => c.line(`${type},`).line(`${tsString(member)}`), ">;");
 }
 
-export type ErrorStatus = 400 | 404 | 409 | 422;
+export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 422;
+
+/** Use cases with an endpoint: all but `authorize: internal` (run in-process only, e.g. by a policy). */
+export function servedUseCases(L: TsLayout): UseCaseIR[] {
+  return L.ca.ir.useCases.filter(servedOverHttp);
+}
+
+/** `{ kind: "principal", roles: [...] }` / `{ kind: "public" }`: who may call an endpoint (contract). */
+function authObject(a: AuthorizeIR | undefined): string {
+  return a?.kind === "principal" ? `{ kind: "principal", roles: [${a.roles.map(tsString).join(", ")}] }` : '{ kind: "public" }';
+}
+
+/** The contract's rate limit of an endpoint (`name` is the policy name in the RateLimit headers). */
+function rateLimitObject(name: string, limit: RateLimitIR | undefined): string {
+  if (!limit) return "null";
+  return `{ name: ${tsString(name)}, requests: ${limit.requests}, windowSeconds: ${windowSeconds(limit)}, by: ${tsString(limit.by)} }`;
+}
+
+/** Contract lines of an endpoint's authorization and rate limit (only with `security`). */
+function securityLines(c: Code, L: TsLayout, owner: { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" }, name: string): void {
+  if (!L.model.security) return;
+  c.line(`auth: ${authObject(owner.authorize)},`);
+  const limit = rateLimitObject(name, effectiveRateLimit(L.model, owner));
+  if (strWidth(`      rateLimit: ${limit},`) <= PRINT_WIDTH) c.line(`rateLimit: ${limit},`);
+  else {
+    const l = effectiveRateLimit(L.model, owner)!;
+    c.open("rateLimit: {", () => {
+      c.line(`name: ${tsString(name)},`);
+      c.line(`requests: ${l.requests},`);
+      c.line(`windowSeconds: ${windowSeconds(l)},`);
+      c.line(`by: ${tsString(l.by)},`);
+    }, "},");
+  }
+}
 
 /** Contexts that get endpoints: those with use cases or aggregates. */
 export function apiContexts(Ls: TsLayout[]): TsLayout[] {
-  return Ls.filter((L) => L.ca.ir.useCases.length || L.ca.ir.aggregates.length);
+  return Ls.filter((L) => servedUseCases(L).length || L.ca.ir.aggregates.length);
 }
 
 /** `cleaningStaff`: the context's key in the contract, the client and the server dependencies. */
@@ -109,6 +143,10 @@ function errorCode(L: TsLayout, name: string): string {
  */
 export function useCaseErrors(L: TsLayout, uc: UseCaseIR): Map<string, ErrorStatus> {
   const out = new Map<string, ErrorStatus>([["constraint_violation", 400]]);
+  if (L.model.security && requiresPrincipal(uc)) {
+    out.set("unauthenticated", 401);
+    out.set("not_authorized", 403);
+  }
   const add = (name: string, status: ErrorStatus) => {
     const code = errorCode(L, name);
     if (!out.has(code)) out.set(code, status);
@@ -300,7 +338,7 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
   c.doc(`Endpoints of the ${L.ca.ir.name} context: a POST per use case, a GET per aggregate (load by identity).`);
   c.block("export const contract =", () => {
     c.block("useCases:", () => {
-      for (const uc of L.ca.ir.useCases) {
+      for (const uc of servedUseCases(L)) {
         imp.value(L.apiModule("runtime"), "useCaseEndpoint");
         imp.value(L.mod("commands"), uc.command);
         const info = L.ca.useCases.get(uc.name)!;
@@ -313,6 +351,7 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
           c.line(`input: ${uc.command}.schema,`);
           c.line(`output: ${info.returnType ? jsonSchema(L, info.returnType, imp) : "z.void()"},`);
           c.line(`errors: ${errorsObject(useCaseErrors(L, uc))},`);
+          securityLines(c, L, uc, uc.name);
         }, "),");
       }
     }, ",");
@@ -327,7 +366,9 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
           c.line(`id: ${zodSchema(L.tsFieldType(ag.name, ag.identity)!, imp, L, ag.fields.find((f) => f.name === ag.identity)?.constraints ?? {})},`);
           c.line(`idType: ${idKind(L, ag) === "integer" ? '"number"' : '"string"'},`);
           c.line(`output: ${jsonName(ag.name)},`);
-          c.line("errors: { constraint_violation: 400, aggregate_not_found: 404 },");
+          const secured = !!L.model.security && requiresPrincipal(ag);
+          c.line(`errors: { constraint_violation: 400, ${secured ? "unauthenticated: 401, not_authorized: 403, " : ""}aggregate_not_found: 404 },`);
+          securityLines(c, L, ag, `read_${toSnake(ag.name)}`);
         }, "),");
       }
     }, ",");
@@ -372,10 +413,10 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
       imp.namespace(L.index, ns);
       const key = contextKey(L);
       c.block(`readonly ${key}?:`, () => {
-        if (L.ca.ir.useCases.length) {
+        if (servedUseCases(L).length) {
           imp.value(P.apiModule("runtime"), "useCaseRoute");
           c.block("readonly useCases?:", () => {
-            for (const uc of L.ca.ir.useCases) {
+            for (const uc of servedUseCases(L)) {
               pickLine(c, 3, prop(uc.name), `${ns}.${useCaseClass(uc)}`, "execute");
               routes.push(`useCaseRoute(contract.${key}.useCases.${prop(uc.name)}, (d) => d.${key}?.useCases?.${prop(uc.name)}),`);
             }
@@ -387,7 +428,8 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
             for (const ag of L.ca.ir.aggregates) {
               const repo = `${camel(toSnake(ag.name))}Repository`;
               pickLine(c, 3, repo, `${ns}.${ag.name}Repository`, "get");
-              routes.push(`readRoute(contract.${key}.aggregates.${prop(toSnake(ag.name))}, (d) => d.${key}?.repositories?.${repo}),`);
+              const read = protectedAggregates(L).includes(ag) ? `, ${ns}.${readAccessName(ag)}` : "";
+              routes.push(`readRoute(contract.${key}.aggregates.${prop(toSnake(ag.name))}, (d) => d.${key}?.repositories?.${repo}${read}),`);
             }
           }, ";");
         }
@@ -400,7 +442,9 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
     [
       "The API as a Web-standard handler (`Request` → `Response`): use it with Bun.serve, Deno.serve, Hono (`app.all(\"/api/*\", (c) => handler(c.req.raw))`), a Next.js route handler or any fetch-style server.",
       "",
-      "Inputs are parsed with the command schemas (400 with the issues). Domain errors answer `{ code, message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to `options.onError`. There is no authentication or authorization: put that in front of the handler.",
+      P.model.security
+        ? "Inputs are parsed with the command schemas (400 with the issues). Endpoints that need a principal authenticate the request with `options.authenticate` (401 with `WWW-Authenticate: Bearer` without valid credentials); the use cases and read access authorize it (403 NotAuthorized). Rate limits answer the RateLimit headers and 429 with Retry-After when used up (`options.rateLimiter`, `options.clientIp`). Domain errors answer `{ code, message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to `options.onError`. Internal use cases (`authorize: internal`) have no endpoint."
+        : "Inputs are parsed with the command schemas (400 with the issues). Domain errors answer `{ code, message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to `options.onError`. There is no authentication or authorization: put that in front of the handler.",
       "",
       "`dependencies` is an object, or a function of the request (e.g. use cases with a unit of work per request).",
     ].join("\n"),
@@ -408,14 +452,16 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
   c.line("export function createApiHandler(");
   c.indent(() => {
     c.line("dependencies: ApiDependencies | ((request: Request) => Awaitable<ApiDependencies>),");
-    c.line("options: ApiHandlerOptions = {},");
+    c.line(`options: ApiHandlerOptions${P.model.security ? "<Principal>" : ""} = {},`);
   });
+  if (P.model.security) imp.type(P.security, "Principal");
+  const handlerTypes = P.model.security ? "<ApiDependencies, Principal>" : "<ApiDependencies>";
   c.block("): (request: Request) => Promise<Response>", () => {
     if (!routes.length) {
-      c.line("return apiHandler<ApiDependencies>([], dependencies, options);");
+      c.line(`return apiHandler${handlerTypes}([], dependencies, options);`);
       return;
     }
-    c.line("return apiHandler<ApiDependencies>(");
+    c.line(`return apiHandler${handlerTypes}(`);
     c.indent(() => {
       c.open("[", () => c.lines_(routes), "],");
       c.line("dependencies,");
@@ -443,17 +489,20 @@ export function clientFile(P: TsPaths, Ls: TsLayout[]): TsFile {
     imp.value(P.apiModule("runtime"), "errorRegistry");
     imp.type(P.apiModule("runtime"), "Transport");
     imp.value(P.apiModule("contract"), "contract");
-    const parts = [L.ca.ir.useCases.length ? "useCases" : "", L.ca.ir.aggregates.length ? "aggregates" : ""].filter(Boolean);
+    const parts = [servedUseCases(L).length ? "useCases" : "", L.ca.ir.aggregates.length ? "aggregates" : ""].filter(Boolean);
     c.line();
     c.block(`function ${key}Client(transport: Transport)`, () => {
       c.line(`const { ${parts.join(", ")} } = contract.${key};`);
-      c.line(`const errors = errorRegistry(${errorsNs}.ALL_ERRORS);`);
+      if (P.model.security) {
+        imp.value(P.security, "SECURITY_ERRORS");
+        c.line(`const errors = errorRegistry([...${errorsNs}.ALL_ERRORS, ...SECURITY_ERRORS]);`);
+      } else c.line(`const errors = errorRegistry(${errorsNs}.ALL_ERRORS);`);
       c.block("return", () => {
-        if (!L.ca.ir.useCases.length) c.line("useCases: {},");
+        if (!servedUseCases(L).length) c.line("useCases: {},");
         else {
           imp.value(P.apiModule("runtime"), "useCaseCaller");
           c.block("useCases:", () => {
-            for (const uc of L.ca.ir.useCases) c.line(`${prop(uc.name)}: useCaseCaller(transport, useCases.${prop(uc.name)}, errors),`);
+            for (const uc of servedUseCases(L)) c.line(`${prop(uc.name)}: useCaseCaller(transport, useCases.${prop(uc.name)}, errors),`);
           }, ",");
         }
         if (!L.ca.ir.aggregates.length) c.line("aggregates: {},");
@@ -472,6 +521,12 @@ export function clientFile(P: TsPaths, Ls: TsLayout[]): TsFile {
       "A typed client of the API: `api.<context>.useCases.<useCase>(input)` and `api.<context>.aggregates.<aggregate>(id)`.",
       "",
       "Inputs are validated with the command schemas before sending, responses with the contract's output schemas. Error responses reject with the domain error class of their code (e.g. `InvitationNotFound`), anything else with an `ApiError`. Pass `fetch` to route requests elsewhere (the server handler in tests, a cookie-forwarding fetch in SSR).",
+      ...(P.model.security
+        ? [
+            "",
+            "`getToken` supplies the bearer token per request. 401 rejects with Unauthenticated, 403 with NotAuthorized, 429 with RateLimitedError (`retryAfter` in seconds); `apiRetry` / `apiRetryDelay` are the matching retry policy for the QueryClient defaults.",
+          ]
+        : []),
     ].join("\n"),
   );
   c.block("export function createApiClient(options: ApiClientOptions = {})", () => {
@@ -551,10 +606,10 @@ export function queriesFile(L: TsLayout): TsFile {
       }, ";");
     });
   }
-  if (L.ca.ir.useCases.length) {
+  if (servedUseCases(L).length) {
     imp.value("@tanstack/react-query", "mutationOptions");
     imp.type(L.apiModule("client"), "ApiClient");
-    const all = L.ca.ir.useCases.map((uc) => invalidations(L, uc));
+    const all = servedUseCases(L).map((uc) => invalidations(L, uc));
     c.line();
     c.doc(
       [
@@ -566,7 +621,7 @@ export function queriesFile(L: TsLayout): TsFile {
     c.block(`export function ${mutationsCreator(L)}(api: ApiClient)`, () => {
       if (all.some((ks) => ks.length)) c.line(`const queries = ${queriesCreator(L)}(api);`);
       c.block("return", () => {
-        L.ca.ir.useCases.forEach((uc, i) => {
+        servedUseCases(L).forEach((uc, i) => {
           imp.type(L.mod("commands"), `${uc.command}Input`);
           const keys = all[i]!;
           c.doc(`${uc.description ?? `Use case ${uc.name}`} (\`POST ${useCasePath(api, L, uc)}\`).`);
@@ -600,7 +655,7 @@ export function apiQueriesFile(P: TsPaths, Ls: TsLayout[]): TsFile {
   const c = new Code();
   imp.type(P.apiModule("client"), "ApiClient");
   const withQueries = Ls.filter((L) => L.ca.ir.aggregates.length);
-  const withMutations = Ls.filter((L) => L.ca.ir.useCases.length);
+  const withMutations = Ls.filter((L) => servedUseCases(L).length);
   const creator = (name: string, doc: string, Lx: TsLayout[], fn: (L: TsLayout) => string) => {
     c.line();
     c.doc(doc);

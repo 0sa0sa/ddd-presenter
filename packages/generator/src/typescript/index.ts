@@ -13,6 +13,8 @@ import { ident, prop, toSnake } from "./names.ts";
 import { policiesFile, policyTestFile, translatorScaffold } from "./policies.ts";
 import ADAPTERS_TS from "./templates/adapters.ts.txt" with { type: "text" };
 import API_REGISTER_TS from "./templates/api-register.ts.txt" with { type: "text" };
+import API_AUTHENTICATION_TS from "./templates/api-authentication.ts.txt" with { type: "text" };
+import API_RATE_LIMIT_TS from "./templates/api-rate-limit.ts.txt" with { type: "text" };
 import API_RUNTIME_TS from "./templates/api-runtime.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
@@ -41,6 +43,33 @@ export const TS_API_DEPENDENCIES = {
   react: "^19.0.0",
   "@types/react": "^19.0.0",
 } as const;
+
+/** Added to the scaffolded package.json when the HTTP API authenticates bearer JWTs (`security.authentication`). */
+export const TS_SECURITY_DEPENDENCIES = {
+  jose: "^6.1.0",
+} as const;
+
+/**
+ * Keeps the `//#if <flag>` … `//#else` … `//#endif` sections of a template that apply (marker lines are dropped), so
+ * one template serves models with and without the flag and the output without it stays byte for byte the same.
+ */
+export function templateSections(source: string, flags: Record<string, boolean>): string {
+  const out: string[] = [];
+  const stack: boolean[] = [];
+  for (const line of source.split("\n")) {
+    const m = /^\s*\/\/#(if|else|endif)\b\s*(\w*)/.exec(line);
+    if (m?.[1] === "if") stack.push(!!flags[m[2]!]);
+    else if (m?.[1] === "else") stack.push(!stack.pop());
+    else if (m?.[1] === "endif") stack.pop();
+    else if (stack.every(Boolean)) out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** Whether the HTTP API gets the generated bearer JWT authenticator (and depends on jose). */
+export function usesJwt(model: ModelIR): boolean {
+  return !!model.generation.typescript.api && model.security?.authentication?.scheme === "bearer_jwt";
+}
 
 /** Deterministic TypeScript (Zod v4) generation. The analysis must come from a model without errors. */
 export function generateTypeScript(analysis: Analysis, modelText: string): GenerationOutput {
@@ -116,7 +145,20 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
   if (api) {
     // Not re-exported from generated/index.ts or a context's index.ts: a backend importing the domain never loads
     // TanStack Query. Shared modules live in generated/api/, each context's contract and queries in generated/<context>/api/.
-    gen(P.file(P.apiModule("runtime")), template("Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch transport and the error mapping (zod only).", API_RUNTIME_TS));
+    const secured = !!model.security;
+    gen(
+      P.file(P.apiModule("runtime")),
+      template(
+        `Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch transport and the error mapping${secured ? ", authentication and rate limiting hooks, typed client errors and the retry policy" : ""} (zod only).`,
+        templateSections(API_RUNTIME_TS, { security: secured }),
+      ),
+    );
+    if (secured) {
+      gen(P.file(P.apiModule("rate-limit")), template("Rate limiting of the HTTP API: a token bucket per endpoint and caller, a pluggable store, the IETF RateLimit header fields (no dependencies).", API_RATE_LIMIT_TS));
+    }
+    if (usesJwt(model)) {
+      gen(P.file(P.apiModule("authentication")), template("Bearer JWT authentication of the HTTP API (RFC 6750, RFC 7519, RFC 8725) with jose.", API_AUTHENTICATION_TS));
+    }
     gen(P.file(P.apiModule("register")), template("Registers the client's error type as TanStack Query's default error (module augmentation).", API_REGISTER_TS));
     const served = apiContexts(layouts);
     for (const f of [contractFile(P, served, api), serverFile(P, served), clientFile(P, served), apiQueriesFile(P, served)]) gen(f.path, f.content);
@@ -209,6 +251,7 @@ function packageJson(model: ModelIR): string {
     dependencies: {
       ...(api ? { "@tanstack/react-query": TS_API_DEPENDENCIES["@tanstack/react-query"] } : {}),
       "decimal.js": TS_DEPENDENCIES["decimal.js"],
+      ...(usesJwt(model) ? { jose: TS_SECURITY_DEPENDENCIES.jose } : {}),
       ...(api ? { react: TS_API_DEPENDENCIES.react } : {}),
       zod: TS_DEPENDENCIES.zod,
     },

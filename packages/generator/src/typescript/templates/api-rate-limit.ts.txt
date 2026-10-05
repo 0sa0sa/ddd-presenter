@@ -1,0 +1,129 @@
+import type { Awaitable } from "../runtime.js";
+
+/**
+ * Rate limit of an endpoint (`rate_limit` in the model): a token bucket that holds `requests`
+ * tokens and refills them evenly over `windowSeconds`, counted per principal, per client IP or for
+ * every caller together (`by`). `name` names the policy in the RateLimit headers.
+ */
+export interface RateLimitPolicy {
+  readonly name: string;
+  readonly requests: number;
+  readonly windowSeconds: number;
+  readonly by: "principal" | "ip" | "global";
+}
+
+/** A bucket as a store keeps it: the tokens left at `updatedAt` (milliseconds since the epoch). */
+export interface BucketState {
+  readonly tokens: number;
+  readonly updatedAt: number;
+}
+
+/** The answer for one request. */
+export interface RateLimitDecision {
+  readonly allowed: boolean;
+  /** Whole tokens left after this request. */
+  readonly remaining: number;
+  /** Seconds until the next token (0 when allowed): the `Retry-After` of a 429. */
+  readonly retryAfter: number;
+  /** Seconds until the bucket is full again. */
+  readonly reset: number;
+}
+
+/**
+ * One token-bucket step, pure: refill `state` for the time since it was saved, then take a token
+ * if there is one. Store implementations (Redis, a Durable Object, a database row) run exactly this
+ * on the stored state, atomically per key.
+ */
+export function takeToken(
+  state: BucketState | null,
+  policy: Pick<RateLimitPolicy, "requests" | "windowSeconds">,
+  now: number,
+): { readonly state: BucketState; readonly decision: RateLimitDecision } {
+  const capacity = policy.requests;
+  const perSecond = policy.requests / policy.windowSeconds;
+  const elapsed = state === null ? 0 : Math.max(0, now - state.updatedAt) / 1000;
+  const available =
+    state === null ? capacity : Math.min(capacity, state.tokens + elapsed * perSecond);
+  const allowed = available >= 1;
+  const tokens = allowed ? available - 1 : available;
+  const decision: RateLimitDecision = {
+    allowed,
+    remaining: Math.floor(tokens),
+    retryAfter: allowed ? 0 : Math.ceil((1 - tokens) / perSecond),
+    reset: Math.ceil((capacity - tokens) / perSecond),
+  };
+  return { state: { tokens, updatedAt: now }, decision };
+}
+
+/**
+ * Where buckets live. `consume` must be atomic per key: two concurrent requests must not both take
+ * the last token. The in-memory store is right for one process; several instances need a shared
+ * store (e.g. Redis or Upstash running `takeToken` in a Lua script, see docs/05 §8).
+ */
+export interface RateLimitStore {
+  consume(key: string, policy: RateLimitPolicy, now: number): Awaitable<RateLimitDecision>;
+}
+
+/**
+ * Buckets in a Map of this process (atomic because JavaScript runs one request at a time between
+ * awaits). Full buckets are dropped once more than `maxKeys` are kept, so memory stays bounded.
+ */
+export class InMemoryRateLimitStore implements RateLimitStore {
+  readonly #buckets = new Map<string, { state: BucketState; policy: RateLimitPolicy }>();
+  readonly #maxKeys: number;
+
+  constructor(options: { readonly maxKeys?: number } = {}) {
+    this.#maxKeys = options.maxKeys ?? 10_000;
+  }
+
+  consume(key: string, policy: RateLimitPolicy, now: number): RateLimitDecision {
+    const step = takeToken(this.#buckets.get(key)?.state ?? null, policy, now);
+    this.#buckets.set(key, { state: step.state, policy });
+    if (this.#buckets.size > this.#maxKeys) this.#sweep(now);
+    return step.decision;
+  }
+
+  #sweep(now: number): void {
+    for (const [key, { state, policy }] of this.#buckets) {
+      const refilled = ((now - state.updatedAt) / 1000) * (policy.requests / policy.windowSeconds);
+      // A full bucket is the same as no bucket: forgetting it changes nothing.
+      if (state.tokens + refilled >= policy.requests) this.#buckets.delete(key);
+    }
+  }
+}
+
+/** Takes tokens from a store; `now` is injectable so tests can move time. */
+export class RateLimiter {
+  readonly #store: RateLimitStore;
+  readonly #now: () => number;
+
+  constructor(options: { readonly store?: RateLimitStore; readonly now?: () => number } = {}) {
+    this.#store = options.store ?? new InMemoryRateLimitStore();
+    this.#now = options.now ?? (() => Date.now());
+  }
+
+  /** Takes a token of `policy` for `subject` (a principal id, a client IP or "*"). */
+  async consume(policy: RateLimitPolicy, subject: string): Promise<RateLimitDecision> {
+    const key = policy.name + "\u0000" + policy.by + "\u0000" + subject;
+    return await this.#store.consume(key, policy, this.#now());
+  }
+}
+
+/**
+ * The IETF RateLimit header fields (draft-ietf-httpapi-ratelimit-headers):
+ * `RateLimit-Policy: "name";q=5;w=60` and `RateLimit: "name";r=4;t=12`, plus `Retry-After`
+ * (RFC 9110 §10.2.3) when the request is refused.
+ */
+export function rateLimitHeaders(
+  policy: RateLimitPolicy,
+  decision: RateLimitDecision,
+): Record<string, string> {
+  const name = JSON.stringify(policy.name);
+  const window = decision.allowed ? decision.reset : decision.retryAfter;
+  const headers: Record<string, string> = {
+    "ratelimit-policy": `${name};q=${String(policy.requests)};w=${String(policy.windowSeconds)}`,
+    ratelimit: `${name};r=${String(decision.remaining)};t=${String(window)}`,
+  };
+  if (!decision.allowed) headers["retry-after"] = String(decision.retryAfter);
+  return headers;
+}

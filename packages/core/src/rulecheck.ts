@@ -289,35 +289,42 @@ function fitsConstraints(v: unknown, t: Type, decl: FieldIR | undefined): boolea
 
 const COMPARISONS = new Set(["==", "!=", "<", "<=", ">", ">="]);
 
-export function evaluateOnValues(e: TExpr, self: Rec): unknown {
+/** The caller an authorization rule (`allow_if`) is evaluated for. */
+export interface EvalPrincipal {
+  id: string;
+  roles: string[];
+  claims: Record<string, unknown>;
+}
+
+export function evaluateOnValues(e: TExpr, self: Rec, principal?: EvalPrincipal): unknown {
   switch (e.t) {
     case "lit":
       return e.kind === "null" ? null : e.value;
     case "field": {
       if (!e.owner) return self[e.name] ?? null;
-      const o = evaluateOnValues(e.owner, self);
+      const o = evaluateOnValues(e.owner, self, principal);
       if (o === null || o === undefined || typeof o !== "object" || Array.isArray(o)) return undefined;
       return (o as Rec)[e.name] ?? null;
     }
     case "enumValue":
       return e.value;
     case "not": {
-      const v = evaluateOnValues(e.operand, self);
+      const v = evaluateOnValues(e.operand, self, principal);
       return typeof v === "boolean" ? !v : undefined;
     }
     case "isNull": {
-      const v = evaluateOnValues(e.operand, self);
+      const v = evaluateOnValues(e.operand, self, principal);
       if (v === undefined) return undefined;
       return e.negate ? v !== null : v === null;
     }
     case "builtin": {
-      const a = evaluateOnValues(e.args[0]!, self);
+      const a = evaluateOnValues(e.args[0]!, self, principal);
       if (e.fn === "is_empty") return Array.isArray(a) || typeof a === "string" ? a.length === 0 : undefined;
       if (e.fn === "length") return Array.isArray(a) || typeof a === "string" ? a.length : undefined;
       // Only `contains` is evaluated besides the two above; arithmetic, time and collection functions
       // (sum, count, days, round, …) are "cannot tell", so no derived test relies on an approximation.
       if (e.fn !== "contains" || e.args.length < 2) return undefined;
-      const b = evaluateOnValues(e.args[1]!, self);
+      const b = evaluateOnValues(e.args[1]!, self, principal);
       if (!Array.isArray(a) || b === undefined) return undefined;
       const item = e.args[0]!.type.k === "list" ? (e.args[0]!.type as { item: Type }).item : undefined;
       const hits = a.map((x) => compare("==", x, b, item));
@@ -325,19 +332,26 @@ export function evaluateOnValues(e: TExpr, self: Rec): unknown {
     }
     case "binary": {
       if (e.op === "and" || e.op === "or") {
-        const l = evaluateOnValues(e.left, self);
+        const l = evaluateOnValues(e.left, self, principal);
         if (typeof l !== "boolean") return undefined;
         if (e.op === "and" && !l) return false;
         if (e.op === "or" && l) return true;
-        const r = evaluateOnValues(e.right, self);
+        const r = evaluateOnValues(e.right, self, principal);
         return typeof r === "boolean" ? r : undefined;
       }
       if (!COMPARISONS.has(e.op)) return undefined; // + - * / are not evaluated here (see above)
-      const l = evaluateOnValues(e.left, self);
-      const r = evaluateOnValues(e.right, self);
+      const l = evaluateOnValues(e.left, self, principal);
+      const r = evaluateOnValues(e.right, self, principal);
       if (l === undefined || r === undefined) return undefined;
       return compare(e.op, l, r, e.left.type);
     }
+    case "principal":
+      if (!principal) return undefined;
+      if (e.member === "id") return principal.id;
+      if (e.member === "roles") return principal.roles;
+      return principal.claims[e.member] ?? null;
+    case "hasRole":
+      return principal ? principal.roles.includes(e.role) : undefined;
     default:
       // Parameters, locals, guards, ports and extensions have no value in a constructed object.
       return undefined;

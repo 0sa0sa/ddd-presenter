@@ -74,6 +74,44 @@ export function securityFile(model: ModelIR, P: TsPaths): TsFile {
     c.block("create(input: PrincipalInput): Principal", () => c.line('return parseWith(PrincipalFields, input, "Principal");'), ",");
     c.block("parse(input: unknown): Principal", () => c.line('return parseWith(PrincipalFields, input, "Principal");'), ",");
   }, " as const;");
+  const auth = sec.authentication;
+  if (auth?.scheme === "bearer_jwt") {
+    c.line();
+    c.doc("Bearer JWT settings (`security.authentication`): the defaults of the generated authenticator.");
+    c.block("export const AUTHENTICATION =", () => {
+      c.line(`issuer: ${auth.issuer === undefined ? "undefined" : tsString(auth.issuer)} as string | undefined,`);
+      c.line(`audience: ${auth.audience === undefined ? "undefined" : tsString(auth.audience)} as string | undefined,`);
+      c.line(`algorithms: [${auth.algorithms.map(tsString).join(", ")}],`);
+      c.line(`rolesClaim: ${tsString(auth.rolesClaim)},`);
+      c.line(`clockTolerance: ${auth.clockTolerance},`);
+    }, " as const;");
+    c.line();
+    c.doc(
+      [
+        `The principal a verified token stands for: \`sub\` is the id, \`${auth.rolesClaim}\` the roles (a list, or one space-separated string; roles the model does not declare are dropped)${sec.principal.claims.length ? `, ${sec.principal.claims.map((cl) => `\`${cl.claim ?? cl.name}\` ${prop(cl.name)}`).join(", ")}` : ""}.`,
+        "",
+        "Null when the claims do not fit the Principal schema (e.g. a required claim is missing).",
+      ].join("\n"),
+    );
+    c.block("export function principalFromClaims(claims: Readonly<Record<string, unknown>>): Principal | null", () => {
+      c.line(`const roles = claims[${tsString(auth.rolesClaim)}];`);
+      c.line("const listed: unknown[] = Array.isArray(roles)");
+      c.indent(() => {
+        c.line("? roles");
+        c.line(': typeof roles === "string"');
+        c.indent(() => {
+          c.line('? roles.split(" ")');
+          c.line(": [];");
+        });
+      });
+      c.block("const result = PrincipalFields.safeParse(", () => {
+        c.line('id: claims["sub"],');
+        c.line("roles: listed.filter((role) => RoleSchema.safeParse(role).success),");
+        for (const cl of sec.principal.claims) c.line(`${prop(cl.name)}: claims[${tsString(cl.claim ?? cl.name)}]${cl.required ? "" : " ?? null"},`);
+      }, ");");
+      c.line("return result.success ? result.data : null;");
+    });
+  }
   c.line();
   c.doc("Whether the principal holds `role` (`has_role(principal, role)` in rules).");
   c.block("export function hasRole(principal: Principal, role: Role): boolean", () => c.line("return principal.roles.includes(role);"));
