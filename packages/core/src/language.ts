@@ -72,6 +72,14 @@ type Container =
   | "generation"
   | "generation:typescript"
   | "generation:typescript:api"
+  | "security"
+  | "security:principal"
+  | "principalClaim"
+  | "security:authentication"
+  | "security:rateLimits"
+  | "rateLimit"
+  | "authorize"
+  | "given:principal"
   | "context"
   | "glossary"
   | "error"
@@ -127,8 +135,11 @@ type Container =
   | "unknown";
 
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
-  root: { generation: "generation", contexts: "context", relationships: "relationship" },
+  root: { generation: "generation", security: "security", contexts: "context", relationships: "relationship" },
   generation: { typescript: "generation:typescript" },
+  security: { principal: "security:principal", authentication: "security:authentication", rate_limits: "security:rateLimits" },
+  "security:principal": { claims: "principalClaim" },
+  "security:rateLimits": { default: "rateLimit" },
   "generation:typescript": { api: "generation:typescript:api" },
   context: {
     glossary: "glossary",
@@ -151,6 +162,8 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
     factories: "factory",
     operations: "operation",
     scenarios: "scenario:aggregate",
+    authorize: "authorize",
+    rate_limit: "rateLimit",
   },
   entity: { fields: "field", invariants: "invariant" },
   guard: { parameters: "parameter" },
@@ -158,7 +171,7 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   operation: { parameters: "parameter", changes: "exprMap:changes", emits: "emission", require: "require" },
   emission: { fields: "eventField" },
   extension: { parameters: "parameter" },
-  useCase: { input: "field", steps: "step", scenarios: "scenario:useCase" },
+  useCase: { input: "field", steps: "step", scenarios: "scenario:useCase", authorize: "authorize", rate_limit: "rateLimit" },
   policy: { args: "exprMap:policyArgs" },
   step: { load: "step:load", create: "step:create", invoke: "step:invoke", if: "step:if", let: "step:let" },
   "step:create": { args: "exprMap:args" },
@@ -169,7 +182,8 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   "when:aggregate": { construct: "data:aggregate", args: "data:args" },
   "then:aggregate": { state: "data:aggregate", emits: "expectedEvent" },
   "scenario:useCase": { given: "given:useCase", when: "when:useCase", then: "then:useCase" },
-  "given:useCase": { aggregates: "givenAggregate", extensions: "data:extensions", ids: "ids" },
+  "given:useCase": { aggregates: "givenAggregate", extensions: "data:extensions", ids: "ids", principal: "given:principal" },
+  "given:principal": { claims: "data:nested" },
   givenAggregate: { fields: "data:givenAggregate" },
   "when:useCase": { input: "data:input" },
   "then:useCase": { state: "expectedState", emits: "expectedEvent" },
@@ -198,6 +212,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("project", "プロジェクトID（生成物のマニフェストに記録）"),
     K("description", "説明"),
     K("generation", "生成設定（パッケージ名・出力先）"),
+    K("security", "認証・認可・レート制限（roles・principal・authentication・rate_limits）。宣言すると全 Use case / Aggregate に authorize が必要"),
     K("contexts", "Bounded context の一覧"),
     K("relationships", "コンテキストマップ（コンテキスト間の関係とイベント契約）"),
   ],
@@ -216,6 +231,39 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("base_path", "全エンドポイントのパスの接頭辞（既定 /api。/ で始め、末尾に / を付けない。なしは \"\"）"),
     K("client", "クライアントのライブラリ: tanstack-query（既定・唯一。@tanstack/react-query v5）"),
   ],
+  security: [
+    K("roles", "宣言するロール（snake_case）。authorize.roles と has_role(principal, ロール) で使う"),
+    K("principal", "呼び出し元の型: id（String / UUID）と claims（allow_if で principal.<名前> として読める）"),
+    K("authentication", "認証の方式: scheme（bearer_jwt / custom）・issuer・audience・algorithms・roles_claim・clock_tolerance"),
+    K("rate_limits", "レート制限の既定: default: { requests, per, by }"),
+  ],
+  "security:principal": [K("id", "principal.id の型: String（既定。JWT の sub）/ UUID"), K("claims", "allow_if で読めるクレーム: { name, type, required, claim }")],
+  principalClaim: [
+    K("name", "principal.<名前> として読む名前（snake_case。id と roles は組み込み）"),
+    K("type", "型: String / UUID / Integer / Boolean / List[String]"),
+    K("required", "false で省略可能（既定 true。必須のクレームがないトークンは無効）"),
+    K("claim", "JWT のクレーム名（既定は name。例: https://example.com/company_id）"),
+    K("description", "説明"),
+  ],
+  "security:authentication": [
+    K("scheme", "bearer_jwt（既定。JWT を検証する認証器を生成）/ custom（Authenticator を自分で実装）"),
+    K("issuer", "期待する iss（実行時に上書きできる）"),
+    K("audience", "期待する aud（実行時に上書きできる）"),
+    K("algorithms", "受け付ける署名アルゴリズム（既定 [RS256]。none は不可。HS* と公開鍵方式は混ぜない）"),
+    K("roles_claim", "ロールを読むクレーム（既定 roles。リストか空白区切りの文字列）"),
+    K("clock_tolerance", "exp / nbf の許容する時計のずれ（秒。既定 30、最大 300）"),
+  ],
+  "security:rateLimits": [K("default", "rate_limit を書かないエンドポイントの制限: { requests, per, by }")],
+  rateLimit: [
+    K("requests", "窓あたりのリクエスト数（トークンバケットの容量）"),
+    K("per", "窓: second / minute / hour / day"),
+    K("by", "数える単位: principal（既定）/ ip / global"),
+  ],
+  authorize: [
+    K("roles", "いずれかを持てば実行できるロール（省略で認証済みなら誰でも）"),
+    K("allow_if", "読み込み後に確認する条件式（principal.*・has_role(principal, ロール)・入力・先頭の load の変数）"),
+  ],
+  "given:principal": [K("id", "principal.id（省略で既定の ID）"), K("roles", "持っているロール"), K("claims", "クレームの値")],
   context: [
     K("name", "コンテキスト名（PascalCase）"),
     K("description", "責務の説明"),
@@ -256,6 +304,8 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("factories", "新しいAggregateを作る操作"),
     K("operations", "状態を変える名前付き操作"),
     K("scenarios", "Aggregate単体のGiven-When-Then（テストになる）"),
+    K("authorize", "識別子で読む（生成される読み取りと GET）ことを許す相手: public / authenticated / { roles, allow_if }（security を宣言したら必須）"),
+    K("rate_limit", "GET のレート制限: { requests, per, by } / none"),
   ],
   entity: [K("name", "Entity名"), K("description", "説明"), K("identity", "識別子フィールド"), K("fields", "フィールド"), K("invariants", "不変条件")],
   invariant: [
@@ -287,6 +337,8 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("transaction", "required（既定）/ none"),
     K("idempotency_key", "冪等性キーにする入力フィールド"),
     K("retry", "再試行されうる処理か"),
+    K("authorize", "実行を許す相手: public / internal（ポリシーなど内部だけ。HTTP に出さない）/ authenticated / { roles, allow_if }（security を宣言したら必須）"),
+    K("rate_limit", "エンドポイントのレート制限: { requests, per, by } / none（既定を使わない）"),
     K("steps", "手順（load / create / invoke / save / publish / if / let / fail / return）"),
     K("scenarios", "Given-When-Then（テストになる）"),
   ],
@@ -326,7 +378,13 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
   "when:aggregate": [K("construct", "このフィールド値で直接作る"), K("operation", "実行する操作"), K("factory", "使うファクトリ"), K("args", "引数")],
   "then:aggregate": [K("raises", "送出されるDomain Error"), K("state", "結果の状態（一部のフィールド）"), K("emits", "発生するイベント（順番通り）")],
   "scenario:useCase": [K("name", "シナリオ名（テスト関数名になる）"), K("description", "説明"), K("given", "前提（時刻・ID・保存済みAggregate・拡張点の値）"), K("when", "入力"), K("then", "期待する結果")],
-  "given:useCase": [K("clock", "現在時刻（タイムゾーン付き）"), K("ids", "ids.new が返すID"), K("aggregates", "保存済みのAggregate"), K("extensions", "拡張点のスタブ値")],
+  "given:useCase": [
+    K("clock", "現在時刻（タイムゾーン付き）"),
+    K("ids", "ids.new が返すID"),
+    K("aggregates", "保存済みのAggregate"),
+    K("extensions", "拡張点のスタブ値"),
+    K("principal", "実行する principal: { id, roles, claims }、null で未認証（省略で authorize.roles を持つ既定の principal）"),
+  ],
   givenAggregate: [K("type", "Aggregate名"), K("fields", "フィールド値（必須フィールドはすべて）")],
   "when:useCase": [K("input", "Commandの入力値")],
   "then:useCase": [K("raises", "送出されるDomain Error"), K("returns", "戻り値"), K("state", "保存後の状態"), K("emits", "公開されるイベント（順番通り）")],
@@ -335,7 +393,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
 };
 
 /** Keys whose values are rule expressions. */
-const EXPRESSION_KEYS = new Set(["expression", "condition", "when", "return", "by"]);
+const EXPRESSION_KEYS = new Set(["expression", "condition", "when", "return", "by", "allow_if"]);
 
 // ---------------------------------------------------------------------------
 // Document snapshot and scope
@@ -777,6 +835,47 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     ];
   if (c === "generation:typescript:api" && key === "client")
     return [{ label: "tanstack-query", kind: "value" as const, detail: "既定。@tanstack/react-query v5 の queryOptions / mutationOptions とフック", sortRank: 0 }];
+  if (c === "security:authentication" && key === "scheme")
+    return [
+      { label: "bearer_jwt", kind: "value" as const, detail: "既定。Authorization: Bearer の JWT を検証する認証器を生成（TS: jose / Python: PyJWT）", sortRank: 0 },
+      { label: "custom", kind: "value" as const, detail: "認証器を自分で実装する（Authenticator のポート）", sortRank: 1 },
+    ];
+  if (c === "security:authentication" && key === "algorithms")
+    return ["RS256", "ES256", "PS256", "EdDSA", "HS256"].map((a, i) => ({ label: a, kind: "value" as const, sortRank: i }));
+  if (c === "rateLimit" && key === "per") return ["second", "minute", "hour", "day"].map((v, i) => ({ label: v, kind: "value" as const, sortRank: i }));
+  if (c === "rateLimit" && key === "by")
+    return [
+      { label: "principal", kind: "value" as const, detail: "既定。認証済みの principal ごと（公開エンドポイントでは IP ごと）", sortRank: 0 },
+      { label: "ip", kind: "value" as const, detail: "クライアントの IP ごと（clientIp で取り出す）", sortRank: 1 },
+      { label: "global", kind: "value" as const, detail: "全員で 1 つ", sortRank: 2 },
+    ];
+  if ((c === "useCase" || c === "aggregate") && key === "authorize")
+    return [
+      { label: "public", kind: "value" as const, detail: "誰でも（principal なし）", sortRank: 0 },
+      ...(c === "useCase" ? [{ label: "internal", kind: "value" as const, detail: "ポリシーなど内部だけ。HTTP に出さない", sortRank: 1 }] : []),
+      { label: "authenticated", kind: "value" as const, detail: "認証済みなら誰でも", sortRank: 2 },
+    ];
+  if ((c === "useCase" || c === "aggregate") && key === "rate_limit") return [{ label: "none", kind: "value" as const, detail: "既定の制限を使わない" }];
+  if ((c === "authorize" && key === "roles") || (c === "given:principal" && key === "roles"))
+    return (s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" }));
+  if (c === "authorize" && key === "allow_if" && s.model?.security) {
+    const sec = s.model.security;
+    const principal: CompletionItem[] = [
+      { label: "principal.id", kind: "variable", detail: sec.principal.idType, sortRank: 0 },
+      { label: "principal.roles", kind: "variable", detail: "List[String]", sortRank: 0 },
+      ...sec.principal.claims.map((cl) => ({ label: `principal.${cl.name}`, kind: "variable" as const, detail: cl.required ? cl.type : `Optional[${cl.type}]`, sortRank: 0 })),
+      ...sec.roles.map((r) => ({ label: `has_role(principal, ${r})`, kind: "function" as const, detail: "Boolean", sortRank: 1 })),
+    ];
+    return [...principal, ...expressionCompletions(s, scope, pos)];
+  }
+  if (key === "raises" && c === "then:useCase" && s.model?.security)
+    return [
+      ...errors(),
+      { label: "ConstraintViolation", kind: "error", detail: "組み込み: フィールド制約の違反" },
+      { label: "AggregateNotFound", kind: "error", detail: "組み込み: load で見つからない" },
+      { label: "NotAuthorized", kind: "error", detail: "組み込み: ロールがない・allow_if が成り立たない（403）" },
+      { label: "Unauthenticated", kind: "error", detail: "組み込み: principal がない（401。given.principal: null）" },
+    ];
   if (c === "context" && key === "subdomain")
     return [
       { label: "core", kind: "value" as const, detail: "コア: 競争力の源。いちばん力を入れて作り込む", sortRank: 0 },

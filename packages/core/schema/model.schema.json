@@ -7,6 +7,7 @@
   "required": ["schema_version", "project", "contexts"],
   "additionalProperties": false,
   "properties": {
+    "security": { "$ref": "#/$defs/security" },
     "schema_version": { "const": 1 },
     "project": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
@@ -151,6 +152,11 @@
       "allOf": [{ "$ref": "#/$defs/entity" }],
       "unevaluatedProperties": false,
       "properties": {
+        "authorize": {
+          "description": "Who may read it by identity (read access / GET endpoint): public, authenticated or { roles, allow_if }.",
+          "anyOf": [{ "enum": ["public", "authenticated"] }, { "$ref": "#/$defs/authorizeRule" }]
+        },
+        "rate_limit": { "$ref": "#/$defs/rateLimitOrNone" },
         "entities": {
           "type": "array",
           "items": { "allOf": [{ "$ref": "#/$defs/entity" }], "unevaluatedProperties": false }
@@ -276,7 +282,22 @@
                 "properties": { "type": { "$ref": "#/$defs/pascal" }, "fields": { "type": "object" } }
               }
             },
-            "extensions": { "type": "object" }
+            "extensions": { "type": "object" },
+            "principal": {
+              "description": "Who runs the use case; null for an anonymous caller.",
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": ["string", "integer"] },
+                    "roles": { "type": "array", "items": { "$ref": "#/$defs/snake" } },
+                    "claims": { "type": "object" }
+                  }
+                }
+              ]
+            }
           }
         },
         "when": {
@@ -445,6 +466,8 @@
               "transaction": { "enum": ["required", "none"] },
               "idempotency_key": { "$ref": "#/$defs/snake" },
               "retry": { "type": "boolean" },
+              "authorize": { "$ref": "#/$defs/authorize" },
+              "rate_limit": { "$ref": "#/$defs/rateLimitOrNone" },
               "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
               "scenarios": { "type": "array", "items": { "$ref": "#/$defs/useCaseScenario" } }
             }
@@ -452,6 +475,82 @@
         },
         "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } },
         "subdomain": { "enum": ["core", "supporting", "generic"] }
+      }
+    },
+    "authorizeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "roles": { "type": "array", "items": { "$ref": "#/$defs/snake" } },
+        "allow_if": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "authorize": {
+      "description": "Who may run a use case: public, internal (in-process only), authenticated, or { roles, allow_if }.",
+      "anyOf": [{ "enum": ["public", "internal", "authenticated"] }, { "$ref": "#/$defs/authorizeRule" }]
+    },
+    "rateLimit": {
+      "type": "object",
+      "required": ["requests", "per"],
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "type": "integer", "minimum": 1 },
+        "per": { "enum": ["second", "minute", "hour", "day"] },
+        "by": { "enum": ["principal", "ip", "global"] }
+      }
+    },
+    "rateLimitOrNone": { "anyOf": [{ "const": "none" }, { "$ref": "#/$defs/rateLimit" }] },
+    "security": {
+      "description": "Authentication, authorization and rate limiting (docs/09 §20).",
+      "type": "object",
+      "required": ["roles"],
+      "additionalProperties": false,
+      "properties": {
+        "roles": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/snake" } },
+        "principal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "enum": ["String", "UUID"] },
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "$ref": "#/$defs/snake" },
+                  "type": { "enum": ["String", "UUID", "Integer", "Boolean", "List[String]"] },
+                  "required": { "type": "boolean" },
+                  "claim": { "type": "string" },
+                  "description": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "authentication": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scheme": { "enum": ["bearer_jwt", "custom"] },
+            "issuer": { "type": "string" },
+            "audience": { "type": "string" },
+            "algorithms": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "enum": ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA", "HS256", "HS384", "HS512"] }
+            },
+            "roles_claim": { "type": "string", "minLength": 1 },
+            "clock_tolerance": { "type": "integer", "minimum": 0, "maximum": 300 }
+          }
+        },
+        "rate_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "default": { "$ref": "#/$defs/rateLimit" } }
+        }
       }
     },
     "policy": {
