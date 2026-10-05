@@ -1,6 +1,6 @@
 /**
  * HTTP API of the TypeScript target (`generation.typescript.api`): a framework-agnostic contract, a Web-standard
- * server handler, a typed client and TanStack Query (v5) query / mutation options and hooks. Design notes and the
+ * server handler, a typed client and TanStack Query (v5) query factories (keys + queryOptions) and mutationOptions. Design notes and the
  * TkDodo rules the client follows: docs/09 §18; contract: docs/05 §8.
  */
 import { formatPath, type AggregateIR, type ApiSettings, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
@@ -34,15 +34,20 @@ export function contextKey(L: TsLayout): string {
   return prop(toSnake(L.ca.ir.name));
 }
 
-/** `cleaningStaffInvitationKeys` / `…Queries` */
-export function keysName(aggregate: string): string {
-  return `${camel(toSnake(aggregate))}Keys`;
+/** `cleaningStaffInvitation`: an aggregate's member in the query factories (`queries.<context>.<aggregate>`). */
+export function aggregateKey(aggregate: string): string {
+  return prop(toSnake(aggregate));
 }
-export function queriesName(aggregate: string): string {
-  return `${camel(toSnake(aggregate))}Queries`;
+/** `createCleaningStaffQueries` / `createCleaningStaffMutations`: the per-context factory creators. */
+export function queriesCreator(L: TsLayout): string {
+  return `create${pascal(L.ca.ir.name)}Queries`;
 }
-export function mutationsName(L: TsLayout): string {
-  return `${camel(toSnake(L.ca.ir.name))}Mutations`;
+export function mutationsCreator(L: TsLayout): string {
+  return `create${pascal(L.ca.ir.name)}Mutations`;
+}
+/** `cleaningStaffInvitationKey`: module constant with the fields every query key of the aggregate starts with. */
+function baseKeyName(aggregate: string): string {
+  return `${camel(toSnake(aggregate))}Key`;
 }
 /** `CleaningStaffInvitationJson`: schema (and type) of the aggregate's / entity's JSON form. */
 export function jsonName(name: string): string {
@@ -158,11 +163,18 @@ export function useCaseErrors(L: TsLayout, uc: UseCaseIR): Map<string, ErrorStat
   return out;
 }
 
-/** Query keys a successful run of the use case makes stale (code expressions over `input`). */
-export function invalidations(L: TsLayout, uc: UseCaseIR): string[] {
+/**
+ * A query key a successful run of a use case makes stale: the detail of the loaded aggregate by an input field, every
+ * detail of the aggregate (the identity is computed), or its lists.
+ */
+export type Invalidation = { aggregate: string; kind: "detail"; byInput: string } | { aggregate: string; kind: "details" | "lists" };
+
+/** Query keys a successful run of the use case makes stale, in a stable order without duplicates. */
+export function invalidations(L: TsLayout, uc: UseCaseIR): Invalidation[] {
   const bound = new Map<string, { aggregate: string; byInput?: string; created: boolean }>();
   const saved: string[] = [];
-  const inputs = new Set(uc.input.map((f) => f.name));
+  // Only a required input field names one aggregate (an optional one may be absent: invalidate every detail then).
+  const inputs = new Set(uc.input.filter((f) => f.required).map((f) => f.name));
   walk(uc.steps, (s) => {
     if (s.kind === "let") inputs.delete(s.name);
   });
@@ -175,18 +187,28 @@ export function invalidations(L: TsLayout, uc: UseCaseIR): string[] {
     if (s.kind === "create") bound.set(s.as, { aggregate: s.aggregate, created: true });
     if (s.kind === "save" && !saved.includes(s.target)) saved.push(s.target);
   });
-  const keys: string[] = [];
-  const add = (k: string) => {
-    if (!keys.includes(k)) keys.push(k);
+  const out: Invalidation[] = [];
+  const add = (k: Invalidation) => {
+    if (!out.some((x) => invalidationExpr("q", x) === invalidationExpr("q", k))) out.push(k);
   };
   for (const v of saved) {
     const b = bound.get(v);
     if (!b) continue;
-    const k = keysName(b.aggregate);
-    if (!b.created) add(b.byInput ? `${k}.detail(input.${prop(b.byInput)})` : `${k}.details()`);
-    add(`${k}.lists()`);
+    if (!b.created) add(b.byInput ? { aggregate: b.aggregate, kind: "detail", byInput: b.byInput } : { aggregate: b.aggregate, kind: "details" });
+    add({ aggregate: b.aggregate, kind: "lists" });
   }
-  return keys;
+  return out;
+}
+
+/** The query key of an invalidation as code over a context's query factories `q` (and the mutation's `input`). */
+export function invalidationExpr(q: string, k: Invalidation): string {
+  const member = `${q}.${aggregateKey(k.aggregate)}`;
+  return k.kind === "detail" ? `${member}.detail(input.${prop(k.byInput)}).queryKey` : `${member}.${k.kind}()`;
+}
+
+/** Short label of an invalidation for docs: `detail(invitationId)`, `lists()`. */
+export function invalidationLabel(k: Invalidation): string {
+  return k.kind === "detail" ? `detail(${prop(k.byInput)})` : `${k.kind}()`;
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +485,7 @@ export function clientFile(P: TsPaths, Ls: TsLayout[]): TsFile {
 }
 
 // ---------------------------------------------------------------------------
-// TanStack Query: keys, query options, mutation options, hooks
+// TanStack Query: one factory object per aggregate (keys + queryOptions), mutationOptions per use case
 // ---------------------------------------------------------------------------
 
 export function queriesFile(L: TsLayout): TsFile {
@@ -471,75 +493,93 @@ export function queriesFile(L: TsLayout): TsFile {
   const imp = new TsImports(mod);
   const c = new Code();
   const key = contextKey(L);
-  const ctxKebab = kebab(L.ca.ir.name);
-  for (const ag of L.ca.ir.aggregates) {
-    imp.value("@tanstack/react-query", "queryOptions", "skipToken");
-    imp.type(L.apiModule("client"), "ApiClient");
-    const K = keysName(ag.name);
-    const Q = queriesName(ag.name);
-    const kind = idKind(L, ag);
-    const T = idParam(kind);
-    const call = `api.${key}.aggregates.${prop(toSnake(ag.name))}(id, { signal })`;
+  const scope = kebab(L.ca.ir.name);
+  const api = L.model.generation.typescript.api!;
+  const aggregates = L.ca.ir.aggregates;
+  for (const ag of aggregates) {
     c.line();
-    c.doc(
-      `Query keys of ${ag.name}, from generic to specific: invalidate \`all\` for everything, \`lists()\` for every list, \`detail(id)\` for one.${kind === "uuid" ? " Ids are lower-cased like the schema stores them." : ""}`,
-    );
-    c.block(`export const ${K} =`, () => {
-      c.line(`all: [${tsString(ctxKebab)}, ${tsString(kebab(ag.name))}] as const,`);
-      c.comment("Prefix of the list queries you add yourself (the model declares no queries yet).");
-      c.line(`lists: () => [...${K}.all, "list"] as const,`);
-      c.line(`details: () => [...${K}.all, "detail"] as const,`);
-      c.line(`detail: (id: ${T} | undefined) => [...${K}.details(), ${kind === "uuid" ? "id?.toLowerCase()" : "id"}] as const,`);
-    }, ";");
-    c.line();
-    c.doc(`Query options of ${ag.name}: key and fetcher together, for useQuery, useSuspenseQuery, queryClient.query and prefetching.`);
-    c.block(`export const ${Q} =`, () => {
-      c.doc(`The ${ag.name} with this ${ag.identity}, validated with its JSON schema (\`GET ${readPath(L.model.generation.typescript.api!, L, ag)}\`).`);
-      c.line(`detail: (api: ApiClient, id: ${T}) =>`);
-      c.indent(() => {
-        c.block("queryOptions(", () => {
-          c.line(`queryKey: ${K}.detail(id),`);
-          c.line(`queryFn: ({ signal }) => ${call},`);
-        }, "),");
-      });
-      c.doc("Like `detail`, but disabled (skipToken) while the id is undefined. Not for useSuspenseQuery.");
-      c.line(`detailOrSkip: (api: ApiClient, id: ${T} | undefined) =>`);
-      c.indent(() => {
-        c.block("queryOptions(", () => {
-          c.line(`queryKey: ${K}.detail(id),`);
-          c.line(`queryFn: id === undefined ? skipToken : ({ signal }) => ${call},`);
-        }, "),");
-      });
-    }, ";");
+    c.doc(`Fields every query key of ${ag.name} starts with: \`invalidateQueries({ queryKey: [{ scope: ${tsString(scope)} }] })\` matches every query of the ${L.ca.ir.name} context.`);
+    c.line(`const ${baseKeyName(ag.name)} = { scope: ${tsString(scope)}, entity: ${tsString(kebab(ag.name))} } as const;`);
   }
-  if (L.ca.ir.useCases.length) {
-    imp.value("@tanstack/react-query", "mutationOptions");
+  if (aggregates.length) {
+    imp.value("@tanstack/react-query", "queryOptions", "skipToken");
     imp.type(L.apiModule("client"), "ApiClient");
     c.line();
     c.doc(
       [
-        `Mutation options of the ${L.ca.ir.name} use cases. On success each one invalidates the queries the model says it changed, and returns that promise: the mutation stays pending until the active queries have refetched.`,
+        `Query factories of the ${L.ca.ir.name} aggregates: per aggregate one object with its query keys (\`all()\`, \`lists()\`, \`details()\`, for invalidation) and its \`queryOptions\` (\`detail(id)\`), from generic to specific.`,
         "",
-        "Add UI reactions with `mutate(input, { onSuccess })` instead of overriding `onSuccess` here.",
+        "Every key is an array with exactly one object (`[{ scope, entity, kind, id }]`): filters match it by name, so `all()` matches every query of the aggregate, `details()` every detail and `detail(id).queryKey` the one with that id. The options are not configurable; add `select`, `staleTime` or `throwOnError` at the call site: `useQuery({ ...queries.x.detail(id), select })`.",
+        "",
+        "Create them once per API client (`createApiQueries(api)` builds every context); the client is a parameter so SSR and tests can bring their own.",
       ].join("\n"),
     );
-    c.block(`export const ${mutationsName(L)} =`, () => {
-      for (const uc of L.ca.ir.useCases) {
-        imp.type(L.mod("commands"), `${uc.command}Input`);
-        const keys = invalidations(L, uc);
-        c.doc(`${uc.description ?? `Use case ${uc.name}`} (\`POST ${useCasePath(L.model.generation.typescript.api!, L, uc)}\`).`);
-        c.line(`${prop(uc.name)}: (api: ApiClient) =>`);
-        c.indent(() => {
-          c.block("mutationOptions(", () => {
-            c.line(`mutationKey: [${tsString(ctxKebab)}, ${tsString(kebab(uc.name))}],`);
+    c.block(`export function ${queriesCreator(L)}(api: ApiClient)`, () => {
+      c.block("return", () => {
+        for (const ag of aggregates) {
+          const base = baseKeyName(ag.name);
+          const kind = idKind(L, ag);
+          const T = idParam(kind);
+          const call = (id: string) => `api.${key}.aggregates.${prop(toSnake(ag.name))}(${id}, { signal })`;
+          c.block(`${aggregateKey(ag.name)}:`, () => {
+            c.line(`all: () => [{ ...${base} }] as const,`);
+            c.comment("Prefix of the list queries you add yourself (the model declares no queries yet).");
+            c.line(`lists: () => [{ ...${base}, kind: "list" }] as const,`);
+            c.line(`details: () => [{ ...${base}, kind: "detail" }] as const,`);
+            c.doc(
+              `The ${ag.name} with this ${ag.identity} (\`GET ${readPath(api, L, ag)}\`), validated with its JSON schema. For useQuery, useSuspenseQuery, \`queryClient.query\` (loaders, SSR) and \`getQueryData\`.${kind === "uuid" ? " The id in the key is lower-cased like the schema stores it." : ""}`,
+            );
+            c.line(`detail: (id: ${T}) =>`);
+            c.indent(() => {
+              c.block("queryOptions(", () => {
+                c.line(`queryKey: [{ ...${base}, kind: "detail", ${kind === "uuid" ? "id: id.toLowerCase()" : "id"} }] as const,`);
+                c.line(`queryFn: ({ queryKey: [{ id }], signal }) => ${call("id")},`);
+              }, "),");
+            });
+            c.doc(
+              "Like `detail`, but disabled (`skipToken`) while the id is undefined, for `useQuery` in a component that may not have the id yet. Not for useSuspenseQuery or `queryClient.query`, whose types reject `skipToken`. While disabled the key's `id` is undefined, which hashes like `details()` (never itself a query).",
+            );
+            c.line(`detailOrSkip: (id: ${T} | undefined) =>`);
+            c.indent(() => {
+              c.block("queryOptions(", () => {
+                c.line(`queryKey: [{ ...${base}, kind: "detail", ${kind === "uuid" ? "id: id?.toLowerCase()" : "id"} }] as const,`);
+                c.line(`queryFn: id === undefined ? skipToken : ({ signal }) => ${call("id")},`);
+              }, "),");
+            });
+          }, ",");
+        }
+      }, ";");
+    });
+  }
+  if (L.ca.ir.useCases.length) {
+    imp.value("@tanstack/react-query", "mutationOptions");
+    imp.type(L.apiModule("client"), "ApiClient");
+    const all = L.ca.ir.useCases.map((uc) => invalidations(L, uc));
+    c.line();
+    c.doc(
+      [
+        `Mutation options of the ${L.ca.ir.name} use cases: \`useMutation(mutations.${key}.<useCase>)\`. On success each one invalidates the queries the model says it changed, through the query factories, and returns that promise: the mutation stays pending until the active queries have refetched.`,
+        "",
+        "Add UI reactions with `mutate(input, { onSuccess })` instead of overriding `onSuccess` here (that would drop the invalidation).",
+      ].join("\n"),
+    );
+    c.block(`export function ${mutationsCreator(L)}(api: ApiClient)`, () => {
+      if (all.some((ks) => ks.length)) c.line(`const queries = ${queriesCreator(L)}(api);`);
+      c.block("return", () => {
+        L.ca.ir.useCases.forEach((uc, i) => {
+          imp.type(L.mod("commands"), `${uc.command}Input`);
+          const keys = all[i]!;
+          c.doc(`${uc.description ?? `Use case ${uc.name}`} (\`POST ${useCasePath(api, L, uc)}\`).`);
+          c.block(`${prop(uc.name)}: mutationOptions(`, () => {
+            c.line(`mutationKey: [{ scope: ${tsString(scope)}, useCase: ${tsString(kebab(uc.name))} }],`);
             c.line(`mutationFn: (input: ${uc.command}Input) => api.${key}.useCases.${prop(uc.name)}(input),`);
             if (!keys.length) {
               c.comment("Saves no aggregate: nothing to invalidate.");
               return;
             }
-            const usesInput = keys.some((k) => k.includes("(input."));
+            const usesInput = keys.some((k) => k.kind === "detail");
             const head = `onSuccess: (_data, ${usesInput ? "input" : "_input"}, _result, context) =>`;
-            const inv = (k: string) => `context.client.invalidateQueries({ queryKey: ${k} })`;
+            const inv = (k: Invalidation) => `context.client.invalidateQueries({ queryKey: ${invalidationExpr("queries", k)} })`;
             if (keys.length === 1) c.line(`${head} ${inv(keys[0]!)},`);
             else {
               c.line(head);
@@ -547,37 +587,59 @@ export function queriesFile(L: TsLayout): TsFile {
             }
           }, "),");
         });
-      }
-    }, ";");
+      }, ";");
+    });
   }
-  return file(L, mod, `TanStack Query keys, query options and mutation options of the ${L.ca.ir.name} context (no React).`, imp, c.toString());
+  return file(L, mod, `TanStack Query factories of the ${L.ca.ir.name} context: query keys and queryOptions per aggregate, mutationOptions per use case (no React API).`, imp, c.toString());
 }
 
-export function hooksFile(L: TsLayout): TsFile {
-  const mod = L.apiContext(L.ca.ir.name, "hooks");
+/** `createApiQueries(api)` / `createApiMutations(api)`: every context's factories, built once per API client. */
+export function apiQueriesFile(P: TsPaths, Ls: TsLayout[]): TsFile {
+  const mod = P.apiModule("queries");
   const imp = new TsImports(mod);
   const c = new Code();
-  const queries = L.apiContext(L.ca.ir.name, "queries");
-  for (const ag of L.ca.ir.aggregates) {
-    imp.value("@tanstack/react-query", "useQuery");
-    imp.value(L.apiModule("react"), "useApiClient");
-    imp.value(queries, queriesName(ag.name));
+  imp.type(P.apiModule("client"), "ApiClient");
+  const withQueries = Ls.filter((L) => L.ca.ir.aggregates.length);
+  const withMutations = Ls.filter((L) => L.ca.ir.useCases.length);
+  const creator = (name: string, doc: string, Lx: TsLayout[], fn: (L: TsLayout) => string) => {
     c.line();
-    c.doc(`The ${ag.name} with this ${ag.identity} (\`useQuery\`); disabled while the id is undefined. Check \`data\` before \`error\`: a failed background refetch keeps the last data.`);
-    c.block(`export function use${ag.name}(id: ${idParam(idKind(L, ag))} | undefined)`, () => {
-      c.line(`return useQuery(${queriesName(ag.name)}.detailOrSkip(useApiClient(), id));`);
+    c.doc(doc);
+    c.block(`export function ${name}(${Lx.length ? "api" : "_api"}: ApiClient)`, () => {
+      if (!Lx.length) {
+        c.line("return {};");
+        return;
+      }
+      c.block("return", () => {
+        for (const L of Lx) {
+          imp.value(L.apiContext(L.ca.ir.name, "queries"), fn(L));
+          c.line(`${contextKey(L)}: ${fn(L)}(api),`);
+        }
+      }, ";");
     });
-  }
-  for (const uc of L.ca.ir.useCases) {
-    imp.value("@tanstack/react-query", "useMutation");
-    imp.value(L.apiModule("react"), "useApiClient");
-    imp.value(queries, mutationsName(L));
-    c.line();
-    c.doc(`Runs use case ${uc.name} (\`useMutation\`); invalidates what it changes before it settles.`);
-    c.block(`export function use${pascal(uc.name)}()`, () => {
-      c.line(`return useMutation(${mutationsName(L)}.${prop(uc.name)}(useApiClient()));`);
-    });
-  }
-  if (!L.ca.ir.aggregates.length && !L.ca.ir.useCases.length) c.line("export {};");
-  return file(L, mod, `React hooks of the ${L.ca.ir.name} context: thin wrappers over the query and mutation options.`, imp, c.toString());
+  };
+  creator(
+    "createApiQueries",
+    [
+      "Query factories of every context: `queries.<context>.<aggregate>` holds the aggregate's query keys and queryOptions. Create them once next to the API client and use the same options everywhere:",
+      "",
+      "```ts",
+      "export const queries = createApiQueries(api);",
+      "useQuery(queries.<context>.<aggregate>.detail(id)); // or useSuspenseQuery",
+      "await queryClient.query(queries.<context>.<aggregate>.detail(id)); // route loader, SSR",
+      "queryClient.invalidateQueries({ queryKey: queries.<context>.<aggregate>.all() });",
+      "```",
+    ].join("\n"),
+    withQueries,
+    queriesCreator,
+  );
+  creator(
+    "createApiMutations",
+    "Mutation options of every context's use cases (`useMutation(mutations.<context>.<useCase>)`); each invalidates what its use case changes.",
+    withMutations,
+    mutationsCreator,
+  );
+  c.line();
+  c.line("export type ApiQueries = ReturnType<typeof createApiQueries>;");
+  c.line("export type ApiMutations = ReturnType<typeof createApiMutations>;");
+  return { path: P.file(mod), content: assemble(header(P.model), "TanStack Query factories of the whole API: every context's query keys, queryOptions and mutationOptions (no React API).", imp, c.toString()) };
 }

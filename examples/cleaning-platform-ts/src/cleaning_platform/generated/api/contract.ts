@@ -3,8 +3,8 @@
 
 /** HTTP contract of the API: the endpoints of every context. */
 
-import * as cleaningStaff from "./cleaning-staff/contract.js";
-import * as staffing from "./staffing/contract.js";
+import * as cleaningStaff from "../cleaning-staff/api/contract.js";
+import * as staffing from "../staffing/api/contract.js";
 
 /** Path prefix of every endpoint (`generation.typescript.api.base_path`). */
 export const API_BASE_PATH = "/api";

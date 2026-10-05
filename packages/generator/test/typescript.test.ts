@@ -205,7 +205,35 @@ describe("TypeScript target: plan", () => {
     const plan = computePlan(next, out.manifest, (p) => disk().get(p));
     expect(plan.stale.map((s) => [s.path, s.autoPrune])).toEqual([["tests/generated/cleaning-staff-revoke-invitation.test.ts", true]]);
     // Removed exports are reported as breaking changes to the generated API (tests are not API).
-    expect(plan.breaking.map((b) => b.symbol).sort()).toEqual(["RevokeInvitation", "RevokeInvitationInput", "RevokeInvitationUseCase", "RevokeInvitationUseCase.constructor", "RevokeInvitationUseCase.execute", "useRevokeInvitation"]);
+    // The mutation options are members of `createCleaningStaffMutations`' result, not exports: only the domain symbols.
+    expect(plan.breaking.map((b) => b.symbol).sort()).toEqual(["RevokeInvitation", "RevokeInvitationInput", "RevokeInvitationUseCase", "RevokeInvitationUseCase.constructor", "RevokeInvitationUseCase.execute"]);
+  });
+
+  test("upgrading a project generated with the old API layout: moved files and hooks are stale (kept until --prune), their exports are breaking", () => {
+    // What the previous generator wrote: per-context api files under generated/api/<context>/, hooks and a React context.
+    const api = "src/cleaning_platform/generated/api";
+    const old = new Map([
+      [`${api}/react.ts`, "export const ApiClientContext = createContext<ApiClient | null>(null);\nexport function useApiClient(): ApiClient {\n  return api;\n}\n"],
+      [`${api}/cleaning-staff/hooks.ts`, "export function useCleaningStaffInvitation(id: string | undefined) {\n  return useQuery(q);\n}\nexport function useAcceptInvitation() {\n  return useMutation(m);\n}\n"],
+      [`${api}/cleaning-staff/queries.ts`, "export const cleaningStaffInvitationKeys = {};\nexport const cleaningStaffInvitationQueries = {};\nexport const cleaningStaffMutations = {};\n"],
+      [`${api}/cleaning-staff/contract.ts`, "export const CleaningStaffInvitationJson = z.object({});\nexport const contract = {} as const;\n"],
+    ]);
+    const previous = { ...out.manifest, files: [...out.manifest.files.filter((f) => !f.path.includes("/api/")), ...[...old].map(([path, content]) => ({ path, sha256: sha256(content) }))] };
+    const d = new Map([...[...disk()].filter(([path]) => !path.includes("/api/")), ...old]);
+    const plan = computePlan(out, previous, (p) => d.get(p));
+    expect(plan.stale.map((s) => [s.path, s.autoPrune, s.modified]).sort()).toEqual([...old.keys()].sort().map((p) => [p, false, false]));
+    expect(plan.conflicts).toEqual([]);
+    for (const p of ["cleaning-staff/api/queries.ts", "cleaning-staff/api/contract.ts", "api/queries.ts"]) {
+      expect(plan.entries.find((e) => e.path === `src/cleaning_platform/generated/${p}`)?.action).toBe("create");
+    }
+    expect(plan.breaking.filter((b) => b.reason === "module removed").map((b) => b.symbol).sort()).toEqual(
+      ["ApiClientContext", "CleaningStaffInvitationJson", "cleaningStaffInvitationKeys", "cleaningStaffInvitationQueries", "cleaningStaffMutations", "contract", "useAcceptInvitation", "useApiClient", "useCleaningStaffInvitation"].sort(),
+    );
+    // Kept (and recorded as stale in the manifest) until `ddd generate --prune` deletes them.
+    const manifest = JSON.parse(plan.entries.find((e) => e.ownership === "manifest")!.after!) as { stale?: { path: string }[] };
+    expect(manifest.stale?.map((s) => s.path).sort()).toEqual([...old.keys()].sort());
+    const pruned = computePlan(out, previous, (p) => d.get(p), { prune: true });
+    expect(JSON.parse(pruned.entries.find((e) => e.ownership === "manifest")!.after!).stale).toBeUndefined();
   });
 
   test("a changed operation signature is a breaking change", () => {
@@ -381,6 +409,16 @@ describe("TypeScript target: Prettier-compatible formatting", () => {
     ]);
   });
 
+  test("a ternary's branches are indented by two (Prettier's align(2)), also an arrow's broken body", () => {
+    expect(fmt("          queryFn: id === undefined ? skipToken : ({ signal }) => api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),")).toEqual([
+      "          queryFn:",
+      "            id === undefined",
+      "              ? skipToken",
+      "              : ({ signal }) =>",
+      "                  api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),",
+    ]);
+  });
+
   test("the last argument expands: arrays, objects and arrow functions (the body breaks after `=>`)", () => {
     expect(fmt('    expect(eventPublisher.published.map((event) => event.type)).toEqual(["Ordering.BigOrderPlaced", "Ordering.OrderPlaced"]);')).toEqual([
       "    expect(eventPublisher.published.map((event) => event.type)).toEqual([",
@@ -498,30 +536,33 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
   const out = gen();
   const file = (p: string) => out.files.find((f) => f.path === `src/cleaning_platform/generated/${p}`)?.content ?? "";
 
-  test("layout: shared api modules, one directory per context, tests per context; the domain index does not load them", () => {
-    const api = out.files.filter((f) => f.path.includes("/generated/api/")).map((f) => f.path.replace("src/cleaning_platform/generated/api/", ""));
+  test("layout: shared modules in generated/api/, each context's contract and queries next to its domain (vertical); no hooks, no React API; the indexes do not load them", () => {
+    const api = out.files.filter((f) => /\/api\/[^/]+\.ts$/.test(f.path)).map((f) => f.path.replace("src/cleaning_platform/generated/", ""));
     expect(api.sort()).toEqual([
-      "cleaning-staff/contract.ts",
-      "cleaning-staff/hooks.ts",
-      "cleaning-staff/queries.ts",
-      "client.ts",
-      "contract.ts",
-      "react.ts",
-      "register.ts",
-      "runtime.ts",
-      "server.ts",
-      "staffing/contract.ts",
-      "staffing/hooks.ts",
-      "staffing/queries.ts",
+      "api/client.ts",
+      "api/contract.ts",
+      "api/queries.ts",
+      "api/register.ts",
+      "api/runtime.ts",
+      "api/server.ts",
+      "cleaning-staff/api/contract.ts",
+      "cleaning-staff/api/queries.ts",
+      "staffing/api/contract.ts",
+      "staffing/api/queries.ts",
     ]);
     expect(out.files.filter((f) => f.path.endsWith("-api.test.ts")).map((f) => f.path)).toEqual(["tests/generated/cleaning-staff-api.test.ts", "tests/generated/staffing-api.test.ts"]);
     expect(file("index.ts")).not.toContain("api");
     expect(file("cleaning-staff/index.ts")).not.toContain("api");
+    const generated = out.files.filter((f) => f.path.endsWith(".ts") && !f.path.includes("/tests/") && !f.path.startsWith("tests/")).map((f) => f.content).join("\n");
+    // No custom hooks and no React API anywhere: queryOptions / mutationOptions are the abstraction.
+    expect(generated).not.toMatch(/from "react"|useApiClient|ApiClientContext|export function use(?!Case)[A-Z]/);
     expect(file("api/contract.ts") + file("api/client.ts") + file("api/server.ts") + file("api/runtime.ts")).not.toMatch(/react/);
+    expect(file("cleaning-staff/api/contract.ts")).toContain('from "../../api/runtime.js";');
+    expect(file("api/contract.ts")).toContain('import * as cleaningStaff from "../cleaning-staff/api/contract.js";');
   });
 
   test("contract: a POST per use case (command schema in, result out, error statuses), a GET per aggregate", () => {
-    const contract = file("api/cleaning-staff/contract.ts");
+    const contract = file("cleaning-staff/api/contract.ts");
     expect(contract).toContain('path: "/api/cleaning-staff/accept-invitation",\n      input: AcceptInvitation.schema,\n      output: z.void(),');
     expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n      },");
     expect(contract).toContain("output: uuidSchema,");
@@ -529,48 +570,62 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
     expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      idType: "string",\n      output: CleaningStaffInvitationJson,');
     expect(contract).toContain("acceptedAt: InstantSchema.nullable(),");
     expect(file("api/contract.ts")).toContain('export const API_BASE_PATH = "/api";');
-    const root = gen(withApi(withoutApi(MODEL), '{ base_path: "" }')).files.find((f) => f.path.endsWith("api/cleaning-staff/contract.ts"))!.content;
+    const root = gen(withApi(withoutApi(MODEL), '{ base_path: "" }')).files.find((f) => f.path.endsWith("cleaning-staff/api/contract.ts"))!.content;
     expect(root).toContain('path: "/cleaning-staff/issue-invitation",');
   });
 
   test("entities inside an aggregate's JSON form are plain objects (their own JSON schema)", () => {
-    const sales = gen(withApi(ORDERING)).files.find((f) => f.path.endsWith("api/sales/contract.ts"))!.content;
+    const sales = gen(withApi(ORDERING)).files.find((f) => f.path.endsWith("sales/api/contract.ts"))!.content;
     expect(sales.indexOf("export const OrderLineJson = z.object({")).toBeLessThan(sales.indexOf("export const OrderJson = z.object({"));
     expect(sales).toContain("lines: z.array(OrderLineJson)");
   });
 
-  test("queries: hierarchical key factory, queryOptions with the AbortSignal, skipToken only in detailOrSkip; no query callbacks", () => {
-    const q = file("api/cleaning-staff/queries.ts");
-    expect(q).toContain('all: ["cleaning-staff", "cleaning-staff-invitation"] as const,');
-    expect(q).toContain('lists: () => [...cleaningStaffInvitationKeys.all, "list"] as const,');
-    expect(q).toContain("[...cleaningStaffInvitationKeys.details(), id?.toLowerCase()] as const,");
-    expect(q).toContain("queryFn: ({ signal }) => api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),");
-    expect(q.slice(q.indexOf("detail: (api"), q.indexOf("Like `detail`"))).not.toContain("skipToken");
+  test("queries: one factory object per aggregate (object keys + queryOptions), created from the API client; the queryFn reads the key", () => {
+    const q = file("cleaning-staff/api/queries.ts");
+    expect(q).toContain('const cleaningStaffInvitationKey = {\n  scope: "cleaning-staff",\n  entity: "cleaning-staff-invitation",\n} as const;');
+    expect(q).toContain("export function createCleaningStaffQueries(api: ApiClient) {\n  return {\n    cleaningStaffInvitation: {\n      all: () => [{ ...cleaningStaffInvitationKey }] as const,");
+    expect(q).toContain('lists: () => [{ ...cleaningStaffInvitationKey, kind: "list" }] as const,');
+    expect(q).toContain('details: () => [{ ...cleaningStaffInvitationKey, kind: "detail" }] as const,');
+    expect(q).toContain('{ ...cleaningStaffInvitationKey, kind: "detail", id: id.toLowerCase() },');
+    // The query function takes the id from the key by name (object keys) and passes the AbortSignal.
+    expect(q).toContain("queryFn: ({ queryKey: [{ id }], signal }) =>\n            api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),");
+    // Not configurable: no options parameters; skipToken only in detailOrSkip (useSuspenseQuery rejects it).
+    expect(q).toContain("detail: (id: string) =>");
+    expect(q).toContain("detailOrSkip: (id: string | undefined) =>");
+    expect(q.slice(q.indexOf("detail: (id"), q.indexOf("Like `detail`"))).not.toContain("skipToken");
     expect(q).toMatch(/id === undefined\s+\? skipToken/);
-    expect(q.slice(0, q.indexOf("Mutation options of"))).not.toMatch(/onSuccess|onError|onSettled/);
+    expect(q).not.toMatch(/options\?:|Partial<|UseQueryOptions/);
+    const code = q.split("\n").filter((l) => !/^\s*(\*|\/\*|\/\/)/.test(l)).join("\n");
+    expect(code.slice(0, code.indexOf("export function createCleaningStaffMutations"))).not.toMatch(/onSuccess|onError|onSettled|select|staleTime/);
+    const all = file("api/queries.ts");
+    expect(all).toContain("export function createApiQueries(api: ApiClient) {\n  return {\n    cleaningStaff: createCleaningStaffQueries(api),\n    staffing: createStaffingQueries(api),\n  };\n}");
+    expect(all).toContain("export function createApiMutations(api: ApiClient) {\n  return {\n    cleaningStaff: createCleaningStaffMutations(api),\n    staffing: createStaffingMutations(api),\n  };\n}");
+    expect(all).toContain("export type ApiQueries = ReturnType<typeof createApiQueries>;");
   });
 
-  test("mutations: invalidate what the use case saves (detail by input id + lists, lists for created) and return the promise", () => {
-    const q = file("api/cleaning-staff/queries.ts");
-    const issue = q.slice(q.indexOf("issueInvitation: (api"), q.indexOf("acceptInvitation: (api"));
-    expect(issue).toContain('mutationKey: ["cleaning-staff", "issue-invitation"],');
-    expect(issue).toMatch(/onSuccess: \(_data, _input, _result, context\) =>\s+context\.client\.invalidateQueries\(\{ queryKey: cleaningStaffInvitationKeys\.lists\(\) \}\),/);
-    const accept = q.slice(q.indexOf("acceptInvitation: (api"), q.indexOf("revokeInvitation: (api"));
+  test("mutations: mutationOptions that invalidate through the same factory object (detail by input id + lists, lists for created) and return the promise", () => {
+    const q = file("cleaning-staff/api/queries.ts");
+    expect(q).toContain("export function createCleaningStaffMutations(api: ApiClient) {\n  const queries = createCleaningStaffQueries(api);");
+    const issue = q.slice(q.indexOf("issueInvitation: mutationOptions("), q.indexOf("acceptInvitation: mutationOptions("));
+    expect(issue).toContain('mutationKey: [{ scope: "cleaning-staff", useCase: "issue-invitation" }],');
+    expect(issue).toMatch(/onSuccess: \(_data, _input, _result, context\) =>\s+context\.client\.invalidateQueries\(\{ queryKey: queries\.cleaningStaffInvitation\.lists\(\) \}\),/);
+    const accept = q.slice(q.indexOf("acceptInvitation: mutationOptions("), q.indexOf("revokeInvitation: mutationOptions("));
     expect(accept).toMatch(/onSuccess: \(_data, input, _result, context\) =>\s+Promise\.all\(\[/);
-    expect(accept).toContain("queryKey: cleaningStaffInvitationKeys.detail(input.invitationId),");
+    expect(accept).toContain("queryKey: queries.cleaningStaffInvitation.detail(input.invitationId).queryKey,");
     expect(accept).not.toContain("setQueryData");
-    const hooks = file("api/cleaning-staff/hooks.ts");
-    expect(hooks).toContain("return useQuery(cleaningStaffInvitationQueries.detailOrSkip(useApiClient(), id));");
-    expect(hooks).toContain("return useMutation(cleaningStaffMutations.acceptInvitation(useApiClient()));");
+    // Staffing's register_staff creates its aggregate: only the lists are stale.
+    const staffing = file("staffing/api/queries.ts");
+    expect(staffing).toContain("context.client.invalidateQueries({ queryKey: queries.staffMember.lists() }),");
   });
 
   test("String and Integer identities: keys are not lower-cased, Integer ids are numbers in keys and paths", () => {
     const files = gen(withApi(IDENTITIES)).files;
-    const q = files.find((f) => f.path.endsWith("api/catalog/queries.ts"))!.content;
-    expect(q).toContain("detail: (id: string | undefined) => [...productKeys.details(), id] as const,");
-    expect(q).toContain("detail: (id: number | undefined) => [...shelfKeys.details(), id] as const,");
-    expect(q).toContain("detail: (api: ApiClient, id: number) =>");
-    const contract = files.find((f) => f.path.endsWith("api/catalog/contract.ts"))!.content;
+    const q = files.find((f) => f.path.endsWith("catalog/api/queries.ts"))!.content;
+    expect(q).toMatch(/\{ \.\.\.productKey, kind: "detail", id \}/);
+    expect(q).toMatch(/\{ \.\.\.shelfKey, kind: "detail", id \}/);
+    expect(q).toContain("detail: (id: number) =>");
+    expect(q).toContain("detailOrSkip: (id: number | undefined) =>");
+    const contract = files.find((f) => f.path.endsWith("catalog/api/contract.ts"))!.content;
     expect(contract).toContain('idType: "number",');
   });
 
@@ -585,6 +640,16 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
     expect(server).toContain('readonly acceptInvitation?: Pick<cleaningStaff.AcceptInvitationUseCase, "execute">;');
     expect(server).toMatch(/useCaseRoute\(\s+contract\.cleaningStaff\.useCases\.acceptInvitation,\s+\(d\) => d\.cleaningStaff\?\.useCases\?\.acceptInvitation,\s+\),/);
     expect(server).toContain('import * as cleaningStaff from "../cleaning-staff/index.js";');
+  });
+
+  test("generated API tests use the factories like an app and check object-key matching", () => {
+    const t = out.files.find((f) => f.path === "tests/generated/cleaning-staff-api.test.ts")!.content;
+    expect(t).toContain("const queries = createApiQueries(api);\n  const mutations = createApiMutations(api);");
+    expect(t).toContain("const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;");
+    expect(t).toContain("new MutationObserver(queryClient, mutations.cleaningStaff.acceptInvitation)");
+    expect(t).toContain('test("CleaningStaffInvitation: object query keys match by name", async () => {');
+    expect(t).toContain("expect(invalidated()).toEqual([true, false, false, false]);");
+    expect(t).not.toMatch(/fetchQuery|ensureQueryData/);
   });
 });
 
@@ -679,7 +744,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+28 passed/);
+      expect(vitest.out).toMatch(/Tests\s+30 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });

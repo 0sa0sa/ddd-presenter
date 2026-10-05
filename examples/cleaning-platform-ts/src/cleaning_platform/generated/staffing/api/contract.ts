@@ -7,9 +7,9 @@
 
 import { z } from "zod";
 
+import { readEndpoint, useCaseEndpoint } from "../../api/runtime.js";
 import { idSchema, InstantSchema, uuidSchema } from "../../runtime.js";
-import { RegisterStaff } from "../../staffing/domain/commands.js";
-import { readEndpoint, useCaseEndpoint } from "../runtime.js";
+import { RegisterStaff } from "../domain/commands.js";
 
 /**
  * JSON form of StaffMember (what `GET /api/staffing/staff-member/:id` returns): its fields,

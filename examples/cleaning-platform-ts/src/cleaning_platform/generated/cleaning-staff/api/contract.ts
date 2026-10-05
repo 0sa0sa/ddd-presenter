@@ -8,15 +8,11 @@
 
 import { z } from "zod";
 
-import {
-  AcceptInvitation,
-  IssueInvitation,
-  RevokeInvitation,
-} from "../../cleaning-staff/domain/commands.js";
-import { InvitationStatusSchema } from "../../cleaning-staff/domain/enums.js";
-import { EmailAddressSchema } from "../../cleaning-staff/domain/value-objects.js";
+import { readEndpoint, useCaseEndpoint } from "../../api/runtime.js";
 import { idSchema, InstantSchema, uuidSchema } from "../../runtime.js";
-import { readEndpoint, useCaseEndpoint } from "../runtime.js";
+import { AcceptInvitation, IssueInvitation, RevokeInvitation } from "../domain/commands.js";
+import { InvitationStatusSchema } from "../domain/enums.js";
+import { EmailAddressSchema } from "../domain/value-objects.js";
 
 /**
  * JSON form of CleaningStaffInvitation (what `GET

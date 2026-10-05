@@ -1,16 +1,17 @@
 /**
  * Generated tests of the HTTP API of one context: the client and TanStack Query run against the generated server
- * handler (no DOM, no network), backed by the in-memory test doubles. They check the query keys, the validated data,
- * the error mapping (status and domain error class) and that each mutation invalidates exactly what it changes.
+ * handler (no DOM, no network), backed by the in-memory test doubles. They check the object query keys and how filters
+ * match them, the validated data, the error mapping (status and domain error class) and that each mutation
+ * invalidates exactly what it changes. They use the factories like an app does: `queries.<context>.<aggregate>`.
  */
 import type { AggregateIR, Type, UseCaseIR, UseCaseScenarioIR } from "@ddd/core";
-import { contextKey, idKind, idLiteral, invalidations, keysName, mutationsName, queriesName, readPath, useCaseErrors, useCasePath } from "./api.ts";
+import { aggregateKey, contextKey, idKind, idLiteral, invalidationLabel, invalidations, readPath, useCaseErrors, useCasePath, type IdKind } from "./api.ts";
 import { repoName } from "./application.ts";
 import { Code, TsImports, tsString } from "./code.ts";
 import type { TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
-import { prop } from "./names.ts";
+import { kebab, prop } from "./names.ts";
 import { build, importError, testFile, useCaseSetup } from "./tests.ts";
 import { expectEqual, record, typedValue } from "./values.ts";
 
@@ -35,8 +36,23 @@ function connectLine(c: Code, names: string, key: string, parts: string[]): void
 /** An id no scenario uses: its cache entry must never be invalidated by a mutation of another aggregate. */
 const OTHER_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
 
-function otherId(kind: "uuid" | "string" | "integer"): string {
+function otherId(kind: IdKind): string {
   return kind === "integer" ? "987654321" : kind === "string" ? '"no-such-id"' : tsString(OTHER_ID);
+}
+
+/** An id literal for the key-matching test (canonical: a UUID in lower case). */
+function someId(kind: IdKind): string {
+  return kind === "integer" ? "1" : kind === "string" ? '"some-id"' : '"00000000-0000-4000-8000-000000000001"';
+}
+
+/** `cleaningStaffInvitationQueries`: a test's local name for an aggregate's query factory. */
+function factory(ag: AggregateIR): string {
+  return `${aggregateKey(ag.name)}Queries`;
+}
+
+/** `const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;` (reached like an app does). */
+function factoryLine(L: TsLayout, ag: AggregateIR): string {
+  return `const ${factory(ag)} = queries.${contextKey(L)}.${aggregateKey(ag.name)};`;
 }
 
 function hasEntity(t: Type): boolean {
@@ -63,8 +79,11 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
   imp.value(L.apiModule("server"), "createApiHandler");
   imp.type(L.apiModule("server"), "ApiDependencies");
   imp.value(L.apiModule("client"), "createApiClient");
+  imp.value(L.apiModule("queries"), "createApiQueries", "createApiMutations");
   c.line();
-  c.doc("The client wired to the generated server handler (its `fetch`): requests never leave the process. Retries are off, as in any test of TanStack Query.");
+  c.doc(
+    "The client wired to the generated server handler (its `fetch`): requests never leave the process. The query and mutation factories are built from it once, as an app does. Retries are off, as in any test of TanStack Query.",
+  );
   c.block("function connect(dependencies: ApiDependencies)", () => {
     c.line("const handler = createApiHandler(dependencies);");
     c.line("const statuses: number[] = [];");
@@ -77,7 +96,9 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
       }, ",");
     }, ");");
     c.line("const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });");
-    c.line("return { api, handler, queryClient, statuses };");
+    c.line("const queries = createApiQueries(api);");
+    c.line("const mutations = createApiMutations(api);");
+    c.line("return { handler, queryClient, statuses, queries, mutations };");
   });
   c.line();
   c.doc("The JSON body of a response.");
@@ -95,6 +116,8 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
     for (const ag of L.ca.ir.aggregates) {
       sep();
       readTest(L, c, ag, imp);
+      sep();
+      keyMatchTest(L, c, ag);
     }
     for (const uc of L.ca.ir.useCases) {
       const ok = uc.scenarios.find((s) => !s.then.raises);
@@ -174,33 +197,31 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
   }, ");");
 }
 
-/** The detail query: key, fetched JSON form, typed cache data, 404 → AggregateNotFound. */
+/** The detail query: object key, fetched JSON form, typed cache data, 404 → AggregateNotFound. */
 function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
   const key = contextKey(L);
   const repo = repoName(ag.name);
-  const K = keysName(ag.name);
-  const Q = queriesName(ag.name);
-  const queries = L.apiContext(L.ca.ir.name, "queries");
+  const F = factory(ag);
+  const kind = idKind(L, ag);
   const sample = sampleAggregate(L, ag);
-  imp.value(queries, Q);
   imp.value(L.contextTesting, `InMemory${ag.name}Repository`, "expectRejects");
   imp.value(L.runtime, "AggregateNotFound");
   c.doc(
-    `\`${Q}.detail\` loads a stored ${ag.name} through \`GET ${readPath(L.model.generation.typescript.api!, L, ag)}\`: hierarchical key (ids lower-cased), the JSON form validated by its schema, the same data in the cache. An unknown id rejects with AggregateNotFound (404).`,
+    `\`queries.${key}.${aggregateKey(ag.name)}.detail(id)\` loads a stored ${ag.name} through \`GET ${readPath(L.model.generation.typescript.api!, L, ag)}\`: an object key (\`{ scope, entity, kind, id }\`${kind === "uuid" ? ", the id lower-cased" : ""}), the JSON form validated by its schema, the same data in the cache. An unknown id rejects with AggregateNotFound (404).`,
   );
   c.block(`test(${tsString(`${ag.name}: detail query`)}, async () =>`, () => {
     c.line(`const ${repo} = new InMemory${ag.name}Repository();`);
-    connectLine(c, "api, queryClient, statuses", key, [`repositories: { ${repo} }`]);
+    connectLine(c, "queries, queryClient, statuses", key, [`repositories: { ${repo} }`]);
+    c.line(factoryLine(L, ag));
     const id = sample?.[ag.identity];
-    const kind = idKind(L, ag);
     if (sample && (typeof id === "string" || typeof id === "number")) {
       imp.value(L.contextTesting, "jsonOf");
       c.line(`const stored = ${build(L, ag.name, "aggregate", sample, imp)};`);
       c.line(`${repo}.seed(stored);`);
-      c.line(`const options = ${Q}.detail(api, ${kind === "uuid" ? tsString(String(id).toUpperCase()) : idLiteral(kind, id)});`);
-      imp.value(queries, K);
-      c.line(`expect([...options.queryKey]).toEqual([...${K}.details(), ${idLiteral(kind, id, true)}]);`);
-      c.line(`expect(${K}.details().slice(0, ${K}.all.length)).toEqual([...${K}.all]);`);
+      c.line(`const options = ${F}.detail(${kind === "uuid" ? tsString(String(id).toUpperCase()) : idLiteral(kind, id)});`);
+      c.line(
+        `expect([...options.queryKey]).toEqual([{ scope: ${tsString(kebab(L.ca.ir.name))}, entity: ${tsString(kebab(ag.name))}, kind: "detail", id: ${idLiteral(kind, id, true)} }]);`,
+      );
       c.line("const data = await queryClient.query(options);");
       c.line("expect(statuses).toEqual([200]);");
       c.line("expect(jsonOf(data)).toEqual(jsonOf(stored));");
@@ -209,7 +230,7 @@ function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
     // An unknown id that still passes the identity's schema (a constrained String / Integer id may reject any guess).
     const constrained = Object.keys(ag.fields.find((f) => f.name === ag.identity)?.constraints ?? {}).length > 0;
     if (kind === "uuid" || !constrained) {
-      c.line(`const missing = ${Q}.detail(api, ${otherId(kind)});`);
+      c.line(`const missing = ${F}.detail(${otherId(kind)});`);
       c.line("const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);");
       c.line(`expect(error.details).toMatchObject({ aggregate: ${tsString(ag.name)} });`);
       c.line("expect(statuses.at(-1)).toBe(404);");
@@ -218,22 +239,49 @@ function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
   }, ");");
 }
 
+/**
+ * Object keys are matched by name (a partial deep match, independent of property order): a detail's key touches only
+ * that id, `details()` every detail, `all()` every query of the aggregate, and nothing of another scope.
+ */
+function keyMatchTest(L: TsLayout, c: Code, ag: AggregateIR): void {
+  const F = factory(ag);
+  const kind = idKind(L, ag);
+  c.doc(
+    `Filters match the object keys of ${ag.name} by name: \`detail(id).queryKey\` touches only that id, \`details()\` every detail, \`all()\` every query of the aggregate, and the same entity under another scope is never touched.`,
+  );
+  c.block(`test(${tsString(`${ag.name}: object query keys match by name`)}, async () =>`, () => {
+    c.line("const { queries, queryClient } = connect({});");
+    c.line(factoryLine(L, ag));
+    c.line(`const target = [{ ...${F}.details()[0], id: ${someId(kind)} }] as const;`);
+    c.line(`const neighbour = [{ ...${F}.details()[0], id: ${otherId(kind)} }] as const;`);
+    c.line(`const list = [{ ...${F}.lists()[0], page: 1 }] as const;`);
+    c.line(`const elsewhere = [{ ...${F}.details()[0], scope: "another-context", id: ${someId(kind)} }] as const;`);
+    c.line("const keys = [target, neighbour, list, elsewhere];");
+    c.block("for (const key of keys)", () => c.line("queryClient.setQueryData(key, null);"));
+    c.line("const invalidated = () => keys.map((key) => queryClient.getQueryState(key)?.isInvalidated);");
+    c.line(`await queryClient.invalidateQueries({ queryKey: ${F}.detail(${someId(kind)}).queryKey });`);
+    c.line("expect(invalidated()).toEqual([true, false, false, false]);");
+    c.line(`await queryClient.invalidateQueries({ queryKey: ${F}.details() });`);
+    c.line("expect(invalidated()).toEqual([true, true, false, false]);");
+    c.line(`await queryClient.invalidateQueries({ queryKey: ${F}.all() });`);
+    c.line("expect(invalidated()).toEqual([true, true, true, false]);");
+  }, ");");
+}
+
 /** One scenario run as a mutation through the client: result, status, invalidated keys, state seen by a refetch. */
 function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: TsImports): void {
   const key = contextKey(L);
   const info = L.ca.useCases.get(uc.name)!;
-  const queries = L.apiContext(L.ca.ir.name, "queries");
   const then = sc.then;
   const keys = invalidations(L, uc);
   imp.value("@tanstack/react-query", "MutationObserver");
-  imp.value(queries, mutationsName(L));
   c.doc(
     [
       `Scenario \`${sc.name}\` of ${uc.name} as a mutation (\`POST ${useCasePath(L.model.generation.typescript.api!, L, uc)}\`).`,
       then.raises
         ? `It rejects with ${then.raises} and invalidates nothing.`
         : keys.length
-          ? `On success it invalidates ${keys.map((k) => k.replace(/^\w+Keys\./, "").replace("input.", "")).join(", ")} of what it changes, and nothing else.`
+          ? `On success it invalidates ${keys.map(invalidationLabel).join(", ")} of what it changes, and nothing else.`
           : "It saves no aggregate and invalidates nothing.",
     ].join("\n"),
   );
@@ -241,12 +289,11 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
     const repos = useCaseSetup(L, c, uc, sc, imp);
     const deps = [`useCases: { ${prop(uc.name)}: useCase }`];
     if (repos.length) deps.push(`repositories: { ${repos.map(repoName).join(", ")} }`);
-    connectLine(c, "api, queryClient, statuses", key, deps);
     // Cache entries the mutation may make stale: stored aggregates fetched through the API, plus probes.
-    const probes: { expr: string; label: string; invalidated: boolean }[] = [];
+    const probes: { expr: string; invalidated: boolean }[] = [];
     const input = sc.when.input;
     const fetched = new Set<string>();
-    c.comment("Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated detail.");
+    const cache: string[] = [];
     for (const a of sc.given.aggregates) {
       const ag = L.aggregate(a.type)!;
       const id = a.fields[ag.identity];
@@ -254,35 +301,43 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
       const canonical = idKind(L, ag) === "uuid" ? String(id).toLowerCase() : String(id);
       if (fetched.has(`${ag.name}:${canonical}`)) continue;
       fetched.add(`${ag.name}:${canonical}`);
-      imp.value(queries, queriesName(ag.name));
-      c.line(`await queryClient.query(${queriesName(ag.name)}.detail(api, ${idLiteral(idKind(L, ag), id)}));`);
+      cache.push(`await queryClient.query(${factory(ag)}.detail(${idLiteral(idKind(L, ag), id)}));`);
     }
-    const touched = [...new Set([...keys.map((k) => k.split(".")[0]!), ...sc.given.aggregates.map((a) => keysName(a.type))])];
+    const touched = new Set([...keys.map((k) => k.aggregate), ...sc.given.aggregates.map((a) => a.type)]);
+    const ok = !then.raises;
     for (const ag of L.ca.ir.aggregates) {
-      const K = keysName(ag.name);
-      if (!touched.includes(K)) continue;
+      if (!touched.has(ag.name)) continue;
+      const F = factory(ag);
       const kind = idKind(L, ag);
-      imp.value(queries, K);
-      c.line(`queryClient.setQueryData([...${K}.lists(), "probe"], []);`);
-      c.line(`queryClient.setQueryData(${K}.detail(${otherId(kind)}), null);`);
-      const ok = !then.raises;
-      const has = (k: string) => ok && keys.includes(`${K}.${k}`);
-      probes.push({ expr: `[...${K}.lists(), "probe"]`, label: `${K}.lists()`, invalidated: has("lists()") });
-      probes.push({ expr: `${K}.detail(${otherId(kind)})`, label: "other", invalidated: has("details()") });
+      const has = (k: "details" | "lists") => ok && keys.some((x) => x.aggregate === ag.name && x.kind === k);
+      const list = `${aggregateKey(ag.name)}List`;
+      const other = `${aggregateKey(ag.name)}Other`;
+      cache.push(`const ${list} = [{ ...${F}.lists()[0], filter: "probe" }] as const;`);
+      cache.push(`const ${other} = [{ ...${F}.details()[0], id: ${otherId(kind)} }] as const;`);
+      cache.push(`queryClient.setQueryData(${list}, []);`);
+      cache.push(`queryClient.setQueryData(${other}, null);`);
+      probes.push({ expr: list, invalidated: has("lists") });
+      probes.push({ expr: other, invalidated: has("details") });
+      const byInput = keys.find((k) => k.aggregate === ag.name && k.kind === "detail");
+      const value = byInput?.kind === "detail" ? input[byInput.byInput] : undefined;
       for (const f of fetched) {
         const [name, id] = f.split(":") as [string, string];
         if (name !== ag.name) continue;
-        const byInput = keys.find((k) => k.startsWith(`${K}.detail(input.`));
-        const field = byInput ? /input\.(\w+)/.exec(byInput)![1]! : undefined;
-        const inputField = field ? uc.input.find((x) => prop(x.name) === field) : undefined;
-        const value = inputField ? input[inputField.name] : undefined;
         const given = kind === "uuid" ? String(value).toLowerCase() : String(value);
         const hit = value !== undefined && value !== null && given === id;
-        probes.push({ expr: `${K}.detail(${idLiteral(kind, id)})`, label: id, invalidated: ok && (has("details()") || hit) });
+        probes.push({ expr: `${F}.detail(${idLiteral(kind, id)}).queryKey`, invalidated: ok && (has("details") || hit) });
       }
     }
+    const refetches = !then.raises && Array.isArray(then.state) && then.state.length > 0;
+    const used = L.ca.ir.aggregates.filter((ag) => touched.has(ag.name) || (refetches && Array.isArray(then.state) && then.state.some((x) => x.aggregate === ag.name)));
+    connectLine(c, [...(used.length ? ["queries"] : []), "mutations", "queryClient", "statuses"].join(", "), key, deps);
+    for (const ag of used) c.line(factoryLine(L, ag));
+    if (cache.length) {
+      c.comment("Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated detail.");
+      c.lines_(cache);
+    }
     const status = (code: string) => useCaseErrors(L, uc).get(code) ?? 422;
-    c.line(`const observer = new MutationObserver(queryClient, ${mutationsName(L)}.${prop(uc.name)}(api));`);
+    c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(uc.name)});`);
     c.line(`const input = ${record(uc.command, input, imp, L)};`);
     if (then.raises) {
       importError(L, imp, then.raises);
@@ -298,15 +353,14 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
       if (assertsResult) c.line(expectEqual("result", then.returns, info.returnType!, imp, L));
     }
     for (const p of probes) c.line(`expect(queryClient.getQueryState(${p.expr})?.isInvalidated).toBe(${p.invalidated});`);
-    if (!then.raises && Array.isArray(then.state)) {
+    if (refetches && Array.isArray(then.state)) {
       imp.value(L.contextTesting, "jsonOf", "expectPresent");
       then.state.forEach((s, i) => {
         const ag = L.aggregate(s.aggregate)!;
         if (typeof s.id !== "string" && typeof s.id !== "number") return;
-        imp.value(queries, queriesName(ag.name));
         if (!i) c.comment("A refetch shows the stored state.");
         const stored = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
-        c.line(`const after${i} = await queryClient.query(${queriesName(ag.name)}.detail(api, ${idLiteral(idKind(L, ag), s.id)}));`);
+        c.line(`const after${i} = await queryClient.query(${factory(ag)}.detail(${idLiteral(idKind(L, ag), s.id)}));`);
         c.line(`expect(jsonOf(after${i})).toEqual(jsonOf(expectPresent(${repoName(ag.name)}.get(${stored}))));`);
       });
     }

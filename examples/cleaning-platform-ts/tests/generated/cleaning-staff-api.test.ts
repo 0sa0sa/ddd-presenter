@@ -9,12 +9,11 @@
 import { MutationObserver, QueryClient } from "@tanstack/react-query";
 import { describe, expect, test } from "vitest";
 
-import {
-  cleaningStaffInvitationKeys,
-  cleaningStaffInvitationQueries,
-  cleaningStaffMutations,
-} from "../../src/cleaning_platform/generated/api/cleaning-staff/queries.js";
 import { createApiClient } from "../../src/cleaning_platform/generated/api/client.js";
+import {
+  createApiMutations,
+  createApiQueries,
+} from "../../src/cleaning_platform/generated/api/queries.js";
 import {
   type ApiDependencies,
   createApiHandler,
@@ -44,7 +43,8 @@ import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/run
 
 /**
  * The client wired to the generated server handler (its `fetch`): requests never leave the process.
- * Retries are off, as in any test of TanStack Query.
+ * The query and mutation factories are built from it once, as an app does. Retries are off, as in
+ * any test of TanStack Query.
  */
 function connect(dependencies: ApiDependencies) {
   const handler = createApiHandler(dependencies);
@@ -58,7 +58,9 @@ function connect(dependencies: ApiDependencies) {
     },
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return { api, handler, queryClient, statuses };
+  const queries = createApiQueries(api);
+  const mutations = createApiMutations(api);
+  return { handler, queryClient, statuses, queries, mutations };
 }
 
 /** The JSON body of a response. */
@@ -149,16 +151,17 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
   });
 
   /**
-   * `cleaningStaffInvitationQueries.detail` loads a stored CleaningStaffInvitation through `GET
-   * /api/cleaning-staff/cleaning-staff-invitation/:id`: hierarchical key (ids lower-cased), the
-   * JSON form validated by its schema, the same data in the cache. An unknown id rejects with
-   * AggregateNotFound (404).
+   * `queries.cleaningStaff.cleaningStaffInvitation.detail(id)` loads a stored
+   * CleaningStaffInvitation through `GET /api/cleaning-staff/cleaning-staff-invitation/:id`: an
+   * object key (`{ scope, entity, kind, id }`, the id lower-cased), the JSON form validated by its
+   * schema, the same data in the cache. An unknown id rejects with AggregateNotFound (404).
    */
   test("CleaningStaffInvitation: detail query", async () => {
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository();
-    const { api, queryClient, statuses } = connect({
+    const { queries, queryClient, statuses } = connect({
       cleaningStaff: { repositories: { cleaningStaffInvitationRepository } },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     const stored = CleaningStaffInvitation.from({
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "staff@example.com" },
@@ -167,29 +170,68 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       expiresAt: "2026-01-08T10:00:00+00:00",
     });
     cleaningStaffInvitationRepository.seed(stored);
-    const options = cleaningStaffInvitationQueries.detail(
-      api,
-      "00000000-0000-0000-0000-000000000001",
-    );
+    const options = cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001");
     expect([...options.queryKey]).toEqual([
-      ...cleaningStaffInvitationKeys.details(),
-      "00000000-0000-0000-0000-000000000001",
+      {
+        scope: "cleaning-staff",
+        entity: "cleaning-staff-invitation",
+        kind: "detail",
+        id: "00000000-0000-0000-0000-000000000001",
+      },
     ]);
-    expect(
-      cleaningStaffInvitationKeys.details().slice(0, cleaningStaffInvitationKeys.all.length),
-    ).toEqual([...cleaningStaffInvitationKeys.all]);
     const data = await queryClient.query(options);
     expect(statuses).toEqual([200]);
     expect(jsonOf(data)).toEqual(jsonOf(stored));
     expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");
-    const missing = cleaningStaffInvitationQueries.detail(
-      api,
-      "ffffffff-ffff-4fff-bfff-ffffffffffff",
-    );
+    const missing = cleaningStaffInvitationQueries.detail("ffffffff-ffff-4fff-bfff-ffffffffffff");
     const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);
     expect(error.details).toMatchObject({ aggregate: "CleaningStaffInvitation" });
     expect(statuses.at(-1)).toBe(404);
     expect(queryClient.getQueryState(missing.queryKey)?.error).toBe(error);
+  });
+
+  /**
+   * Filters match the object keys of CleaningStaffInvitation by name: `detail(id).queryKey` touches
+   * only that id, `details()` every detail, `all()` every query of the aggregate, and the same
+   * entity under another scope is never touched.
+   */
+  test("CleaningStaffInvitation: object query keys match by name", async () => {
+    const { queries, queryClient } = connect({});
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
+    const target = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "00000000-0000-4000-8000-000000000001",
+      },
+    ] as const;
+    const neighbour = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    const list = [{ ...cleaningStaffInvitationQueries.lists()[0], page: 1 }] as const;
+    const elsewhere = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        scope: "another-context",
+        id: "00000000-0000-4000-8000-000000000001",
+      },
+    ] as const;
+    const keys = [target, neighbour, list, elsewhere];
+    for (const key of keys) {
+      queryClient.setQueryData(key, null);
+    }
+    const invalidated = () => keys.map((key) => queryClient.getQueryState(key)?.isInvalidated);
+    await queryClient.invalidateQueries({
+      queryKey: cleaningStaffInvitationQueries.detail("00000000-0000-4000-8000-000000000001")
+        .queryKey,
+    });
+    expect(invalidated()).toEqual([true, false, false, false]);
+    await queryClient.invalidateQueries({ queryKey: cleaningStaffInvitationQueries.details() });
+    expect(invalidated()).toEqual([true, true, false, false]);
+    await queryClient.invalidateQueries({ queryKey: cleaningStaffInvitationQueries.all() });
+    expect(invalidated()).toEqual([true, true, true, false]);
   });
 
   /**
@@ -214,35 +256,36 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       cleaningStaff: {
         useCases: { issueInvitation: useCase },
         repositories: { cleaningStaffInvitationRepository },
       },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
-    queryClient.setQueryData([...cleaningStaffInvitationKeys.lists(), "probe"], []);
-    queryClient.setQueryData(
-      cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      null,
-    );
-    const observer = new MutationObserver(queryClient, cleaningStaffMutations.issueInvitation(api));
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.issueInvitation);
     const input = { email: { value: "new@example.com" }, validUntil: "2026-01-08T10:00:00+00:00" };
     const result = await observer.mutate(input);
     expect(statuses.at(-1)).toBe(200);
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000aa");
-    expect(
-      queryClient.getQueryState([...cleaningStaffInvitationKeys.lists(), "probe"])?.isInvalidated,
-    ).toBe(true);
-    expect(
-      queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      )?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
     // A refetch shows the stored state.
     const after0 = await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-0000000000aa"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-0000000000aa"),
     );
     expect(jsonOf(after0)).toEqual(
       jsonOf(
@@ -277,20 +320,27 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       cleaningStaff: {
         useCases: { issueInvitation: useCase },
         repositories: { cleaningStaffInvitationRepository },
       },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
-    queryClient.setQueryData([...cleaningStaffInvitationKeys.lists(), "probe"], []);
-    queryClient.setQueryData(
-      cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      null,
-    );
-    const observer = new MutationObserver(queryClient, cleaningStaffMutations.issueInvitation(api));
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.issueInvitation);
     const input = {
       email: { value: "blocked@example.com" },
       validUntil: "2026-01-08T10:00:00+00:00",
@@ -298,14 +348,8 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const error = await expectRejects(() => observer.mutate(input), EmailBlocked);
     expect(statuses.at(-1)).toBe(422);
     expect(observer.getCurrentResult().error).toBe(error);
-    expect(
-      queryClient.getQueryState([...cleaningStaffInvitationKeys.lists(), "probe"])?.isInvalidated,
-    ).toBe(false);
-    expect(
-      queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      )?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
   });
 
   /**
@@ -335,45 +379,43 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       cleaningStaff: {
         useCases: { acceptInvitation: useCase },
         repositories: { cleaningStaffInvitationRepository },
       },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
     await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-000000000001"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
-    queryClient.setQueryData([...cleaningStaffInvitationKeys.lists(), "probe"], []);
-    queryClient.setQueryData(
-      cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      null,
-    );
-    const observer = new MutationObserver(
-      queryClient,
-      cleaningStaffMutations.acceptInvitation(api),
-    );
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.acceptInvitation);
     const input = { invitationId: "00000000-0000-0000-0000-000000000001" };
     await observer.mutate(input);
     expect(statuses.at(-1)).toBe(204);
-    expect(
-      queryClient.getQueryState([...cleaningStaffInvitationKeys.lists(), "probe"])?.isInvalidated,
-    ).toBe(true);
-    expect(
-      queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      )?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
     expect(
       queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("00000000-0000-0000-0000-000000000001"),
+        cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001").queryKey,
       )?.isInvalidated,
     ).toBe(true);
     // A refetch shows the stored state.
     const after0 = await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-000000000001"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
     expect(jsonOf(after0)).toEqual(
       jsonOf(
@@ -413,41 +455,39 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       cleaningStaff: {
         useCases: { acceptInvitation: useCase },
         repositories: { cleaningStaffInvitationRepository },
       },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
     await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-000000000001"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
-    queryClient.setQueryData([...cleaningStaffInvitationKeys.lists(), "probe"], []);
-    queryClient.setQueryData(
-      cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      null,
-    );
-    const observer = new MutationObserver(
-      queryClient,
-      cleaningStaffMutations.acceptInvitation(api),
-    );
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.acceptInvitation);
     const input = { invitationId: "00000000-0000-0000-0000-000000000001" };
     const error = await expectRejects(() => observer.mutate(input), InvitationNotDeliverable);
     expect(statuses.at(-1)).toBe(409);
     expect(observer.getCurrentResult().error).toBe(error);
-    expect(
-      queryClient.getQueryState([...cleaningStaffInvitationKeys.lists(), "probe"])?.isInvalidated,
-    ).toBe(false);
-    expect(
-      queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      )?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
     expect(
       queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("00000000-0000-0000-0000-000000000001"),
+        cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001").queryKey,
       )?.isInvalidated,
     ).toBe(false);
   });
@@ -477,46 +517,44 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       cleaningStaff: {
         useCases: { revokeInvitation: useCase },
         repositories: { cleaningStaffInvitationRepository },
       },
     });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
     await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-000000000001"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
-    queryClient.setQueryData([...cleaningStaffInvitationKeys.lists(), "probe"], []);
-    queryClient.setQueryData(
-      cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      null,
-    );
-    const observer = new MutationObserver(
-      queryClient,
-      cleaningStaffMutations.revokeInvitation(api),
-    );
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.revokeInvitation);
     const input = { invitationId: "00000000-0000-0000-0000-000000000001" };
     const result = await observer.mutate(input);
     expect(statuses.at(-1)).toBe(200);
     expect(result).toBe(true);
-    expect(
-      queryClient.getQueryState([...cleaningStaffInvitationKeys.lists(), "probe"])?.isInvalidated,
-    ).toBe(true);
-    expect(
-      queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"),
-      )?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
     expect(
       queryClient.getQueryState(
-        cleaningStaffInvitationKeys.detail("00000000-0000-0000-0000-000000000001"),
+        cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001").queryKey,
       )?.isInvalidated,
     ).toBe(true);
     // A refetch shows the stored state.
     const after0 = await queryClient.query(
-      cleaningStaffInvitationQueries.detail(api, "00000000-0000-0000-0000-000000000001"),
+      cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
     expect(jsonOf(after0)).toEqual(
       jsonOf(

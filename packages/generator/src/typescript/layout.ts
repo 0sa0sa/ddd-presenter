@@ -30,13 +30,16 @@ export class TsPaths {
   extensions(context: string, file: "extensions" | "translators"): string {
     return join(this.root, "extensions", kebab(context), file);
   }
-  /** Shared module of the HTTP API (`generation.typescript.api`): `generated/api/<name>`. */
+  /** Shared module of the HTTP API (`generation.typescript.api`): `generated/api/<name>` (runtime, contract, server, client, register, queries). */
   apiModule(name: string): string {
     return `${this.generated}/api/${name}`;
   }
-  /** Per-context module of the HTTP API: `generated/api/<context>/<name>`. */
+  /**
+   * Per-context module of the HTTP API: `generated/<context>/api/<name>`, next to the context's domain code (vertical
+   * layout). The context's index.ts does not re-export it, so a backend importing the domain never loads TanStack Query.
+   */
   apiContext(context: string, name: string): string {
-    return `${this.generated}/api/${kebab(context)}/${name}`;
+    return `${this.contextBase(context)}/api/${name}`;
   }
   /** Module path → file path. */
   file(module: string): string {

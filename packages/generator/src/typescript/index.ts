@@ -1,7 +1,7 @@
 import type { Analysis, ModelIR } from "@ddd/core";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "../output.ts";
 import { GENERATOR_NAME, GENERATOR_VERSION } from "../python/support.ts";
-import { apiContexts, clientFile, contextContractFile, contractFile, hooksFile, queriesFile, serverFile } from "./api.ts";
+import { apiContexts, apiQueriesFile, clientFile, contextContractFile, contractFile, queriesFile, serverFile } from "./api.ts";
 import { apiTestFile } from "./api-tests.ts";
 import { extensionSignature, portsFile, useCasesFile } from "./application.ts";
 import { assemble, Code, docLines, header, relativeSpecifier, SCAFFOLD_HEADER, TsImports, tsString } from "./code.ts";
@@ -12,7 +12,6 @@ import { TsLayout, TsPaths } from "./layout.ts";
 import { ident, prop, toSnake } from "./names.ts";
 import { policiesFile, policyTestFile, translatorScaffold } from "./policies.ts";
 import ADAPTERS_TS from "./templates/adapters.ts.txt" with { type: "text" };
-import API_REACT_TS from "./templates/api-react.ts.txt" with { type: "text" };
 import API_REGISTER_TS from "./templates/api-register.ts.txt" with { type: "text" };
 import API_RUNTIME_TS from "./templates/api-runtime.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
@@ -33,7 +32,8 @@ export const TS_DEPENDENCIES = {
 /**
  * Added to the scaffolded package.json when `generation.typescript.api` is set. TanStack Query 5.102 is the first
  * release with every API the generated code uses (`mutationOptions` 5.82, the mutation callbacks' `context.client`
- * 5.89, `queryClient.query` 5.102).
+ * 5.89, `queryClient.query` 5.102). The generated code calls no React API (no hooks, no context), but
+ * `queryOptions` / `mutationOptions` come from `@tanstack/react-query`, which needs React as a peer.
  */
 export const TS_API_DEPENDENCIES = {
   "@tanstack/react-query": "^5.102.0",
@@ -107,14 +107,14 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
   }
   const api = model.generation.typescript.api;
   if (api) {
-    // Not re-exported from generated/index.ts: a backend importing the domain never loads React or TanStack Query.
+    // Not re-exported from generated/index.ts or a context's index.ts: a backend importing the domain never loads
+    // TanStack Query. Shared modules live in generated/api/, each context's contract and queries in generated/<context>/api/.
     gen(P.file(P.apiModule("runtime")), template("Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch transport and the error mapping (zod only).", API_RUNTIME_TS));
-    gen(P.file(P.apiModule("react")), template("React context that hands the API client to the generated hooks.", API_REACT_TS));
     gen(P.file(P.apiModule("register")), template("Registers the client's error type as TanStack Query's default error (module augmentation).", API_REGISTER_TS));
     const served = apiContexts(layouts);
-    for (const f of [contractFile(P, served, api), serverFile(P, served), clientFile(P, served)]) gen(f.path, f.content);
+    for (const f of [contractFile(P, served, api), serverFile(P, served), clientFile(P, served), apiQueriesFile(P, served)]) gen(f.path, f.content);
     for (const L of served) {
-      for (const f of [contextContractFile(L, api), queriesFile(L), hooksFile(L)]) gen(f.path, f.content);
+      for (const f of [contextContractFile(L, api), queriesFile(L)]) gen(f.path, f.content);
       const t = apiTestFile(L);
       if (t) gen(t.path, t.content);
     }

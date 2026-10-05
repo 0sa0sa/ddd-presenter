@@ -11,14 +11,13 @@ import { describe, expect, test } from "vitest";
 
 import { createApiClient } from "../../src/cleaning_platform/generated/api/client.js";
 import {
+  createApiMutations,
+  createApiQueries,
+} from "../../src/cleaning_platform/generated/api/queries.js";
+import {
   type ApiDependencies,
   createApiHandler,
 } from "../../src/cleaning_platform/generated/api/server.js";
-import {
-  staffingMutations,
-  staffMemberKeys,
-  staffMemberQueries,
-} from "../../src/cleaning_platform/generated/api/staffing/queries.js";
 import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/runtime.js";
 import { RegisterStaffUseCase } from "../../src/cleaning_platform/generated/staffing/application/use-cases.js";
 import {
@@ -33,7 +32,8 @@ import {
 
 /**
  * The client wired to the generated server handler (its `fetch`): requests never leave the process.
- * Retries are off, as in any test of TanStack Query.
+ * The query and mutation factories are built from it once, as an app does. Retries are off, as in
+ * any test of TanStack Query.
  */
 function connect(dependencies: ApiDependencies) {
   const handler = createApiHandler(dependencies);
@@ -47,7 +47,9 @@ function connect(dependencies: ApiDependencies) {
     },
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return { api, handler, queryClient, statuses };
+  const queries = createApiQueries(api);
+  const mutations = createApiMutations(api);
+  return { handler, queryClient, statuses, queries, mutations };
 }
 
 /** The JSON body of a response. */
@@ -128,20 +130,59 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
   });
 
   /**
-   * `staffMemberQueries.detail` loads a stored StaffMember through `GET
-   * /api/staffing/staff-member/:id`: hierarchical key (ids lower-cased), the JSON form validated by
-   * its schema, the same data in the cache. An unknown id rejects with AggregateNotFound (404).
+   * `queries.staffing.staffMember.detail(id)` loads a stored StaffMember through `GET
+   * /api/staffing/staff-member/:id`: an object key (`{ scope, entity, kind, id }`, the id
+   * lower-cased), the JSON form validated by its schema, the same data in the cache. An unknown id
+   * rejects with AggregateNotFound (404).
    */
   test("StaffMember: detail query", async () => {
     const staffMemberRepository = new InMemoryStaffMemberRepository();
-    const { api, queryClient, statuses } = connect({
+    const { queries, queryClient, statuses } = connect({
       staffing: { repositories: { staffMemberRepository } },
     });
-    const missing = staffMemberQueries.detail(api, "ffffffff-ffff-4fff-bfff-ffffffffffff");
+    const staffMemberQueries = queries.staffing.staffMember;
+    const missing = staffMemberQueries.detail("ffffffff-ffff-4fff-bfff-ffffffffffff");
     const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);
     expect(error.details).toMatchObject({ aggregate: "StaffMember" });
     expect(statuses.at(-1)).toBe(404);
     expect(queryClient.getQueryState(missing.queryKey)?.error).toBe(error);
+  });
+
+  /**
+   * Filters match the object keys of StaffMember by name: `detail(id).queryKey` touches only that
+   * id, `details()` every detail, `all()` every query of the aggregate, and the same entity under
+   * another scope is never touched.
+   */
+  test("StaffMember: object query keys match by name", async () => {
+    const { queries, queryClient } = connect({});
+    const staffMemberQueries = queries.staffing.staffMember;
+    const target = [
+      { ...staffMemberQueries.details()[0], id: "00000000-0000-4000-8000-000000000001" },
+    ] as const;
+    const neighbour = [
+      { ...staffMemberQueries.details()[0], id: "ffffffff-ffff-4fff-bfff-ffffffffffff" },
+    ] as const;
+    const list = [{ ...staffMemberQueries.lists()[0], page: 1 }] as const;
+    const elsewhere = [
+      {
+        ...staffMemberQueries.details()[0],
+        scope: "another-context",
+        id: "00000000-0000-4000-8000-000000000001",
+      },
+    ] as const;
+    const keys = [target, neighbour, list, elsewhere];
+    for (const key of keys) {
+      queryClient.setQueryData(key, null);
+    }
+    const invalidated = () => keys.map((key) => queryClient.getQueryState(key)?.isInvalidated);
+    await queryClient.invalidateQueries({
+      queryKey: staffMemberQueries.detail("00000000-0000-4000-8000-000000000001").queryKey,
+    });
+    expect(invalidated()).toEqual([true, false, false, false]);
+    await queryClient.invalidateQueries({ queryKey: staffMemberQueries.details() });
+    expect(invalidated()).toEqual([true, true, false, false]);
+    await queryClient.invalidateQueries({ queryKey: staffMemberQueries.all() });
+    expect(invalidated()).toEqual([true, true, true, false]);
   });
 
   /**
@@ -160,14 +201,19 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const { api, queryClient, statuses } = connect({
+    const { queries, mutations, queryClient, statuses } = connect({
       staffing: { useCases: { registerStaff: useCase }, repositories: { staffMemberRepository } },
     });
+    const staffMemberQueries = queries.staffing.staffMember;
     // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
     // detail.
-    queryClient.setQueryData([...staffMemberKeys.lists(), "probe"], []);
-    queryClient.setQueryData(staffMemberKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"), null);
-    const observer = new MutationObserver(queryClient, staffingMutations.registerStaff(api));
+    const staffMemberList = [{ ...staffMemberQueries.lists()[0], filter: "probe" }] as const;
+    const staffMemberOther = [
+      { ...staffMemberQueries.details()[0], id: "ffffffff-ffff-4fff-bfff-ffffffffffff" },
+    ] as const;
+    queryClient.setQueryData(staffMemberList, []);
+    queryClient.setQueryData(staffMemberOther, null);
+    const observer = new MutationObserver(queryClient, mutations.staffing.registerStaff);
     const input = {
       invitationId: "00000000-0000-0000-0000-000000000001",
       joinedAt: "2026-01-02T10:00:00+00:00",
@@ -175,16 +221,11 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
     const result = await observer.mutate(input);
     expect(statuses.at(-1)).toBe(200);
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000bb");
-    expect(queryClient.getQueryState([...staffMemberKeys.lists(), "probe"])?.isInvalidated).toBe(
-      true,
-    );
-    expect(
-      queryClient.getQueryState(staffMemberKeys.detail("ffffffff-ffff-4fff-bfff-ffffffffffff"))
-        ?.isInvalidated,
-    ).toBe(false);
+    expect(queryClient.getQueryState(staffMemberList)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(staffMemberOther)?.isInvalidated).toBe(false);
     // A refetch shows the stored state.
     const after0 = await queryClient.query(
-      staffMemberQueries.detail(api, "00000000-0000-0000-0000-0000000000bb"),
+      staffMemberQueries.detail("00000000-0000-0000-0000-0000000000bb"),
     );
     expect(jsonOf(after0)).toEqual(
       jsonOf(

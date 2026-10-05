@@ -1197,7 +1197,9 @@ function printBinaryish(node: Extract<Node, { k: "bin" }>, path: Path): Doc {
 function printTernary(node: Extract<Node, { k: "cond" }>, path: Path): Doc {
   const parent = path.parent;
   const isParentTest = !!parent && isNode(parent) && parent.k === "cond" && path.key === "test";
-  const consAlt = [line, "? ", print(node.cons, { parent: node, key: "cons" }), line, ": ", print(node.alt, { parent: node, key: "alt" })];
+  // Prettier prints each branch with `align(2, …)` (an indent of two spaces), except a nested ternary as the alternate.
+  const alt = print(node.alt, { parent: node, key: "alt" });
+  const consAlt = [line, "? ", indent(print(node.cons, { parent: node, key: "cons" })), line, ": ", node.alt.k === "cond" ? alt : indent(alt)];
   const shouldNotIndent = !!parent && isNode(parent) && parent.k === "cond" && path.key === "alt";
   const result = group([print(node.test, { parent: node, key: "test" }), shouldNotIndent ? consAlt : indent(consAlt)]);
   return isParentTest ? group([indent([line, result]), softline]) : result;
