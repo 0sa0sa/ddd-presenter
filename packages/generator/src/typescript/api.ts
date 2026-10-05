@@ -498,7 +498,7 @@ export function queriesFile(L: TsLayout): TsFile {
   const aggregates = L.ca.ir.aggregates;
   for (const ag of aggregates) {
     c.line();
-    c.doc(`Fields every query key of ${ag.name} starts with: \`invalidateQueries({ queryKey: [{ scope: ${tsString(scope)} }] })\` matches every query of the ${L.ca.ir.name} context.`);
+    c.doc(`Fields every query key of ${ag.name} starts with: the context (\`scope\`) and the aggregate (\`entity\`).`);
     c.line(`const ${baseKeyName(ag.name)} = { scope: ${tsString(scope)}, entity: ${tsString(kebab(ag.name))} } as const;`);
   }
   if (aggregates.length) {
@@ -509,7 +509,7 @@ export function queriesFile(L: TsLayout): TsFile {
       [
         `Query factories of the ${L.ca.ir.name} aggregates: per aggregate one object with its query keys (\`all()\`, \`lists()\`, \`details()\`, for invalidation) and its \`queryOptions\` (\`detail(id)\`), from generic to specific.`,
         "",
-        "Every key is an array with exactly one object (`[{ scope, entity, kind, id }]`): filters match it by name, so `all()` matches every query of the aggregate, `details()` every detail and `detail(id).queryKey` the one with that id. The options are not configurable; add `select`, `staleTime` or `throwOnError` at the call site: `useQuery({ ...queries.x.detail(id), select })`.",
+        `Every key is an array with exactly one object (\`[{ scope, entity, kind, id }]\`): filters match it by name, so \`[{ scope: ${tsString(scope)} }]\` matches every query of the context, \`all()\` every query of the aggregate, \`details()\` every detail and \`detail(id).queryKey\` the one with that id. The options are not configurable; add \`select\`, \`staleTime\` or \`throwOnError\` at the call site: \`useQuery({ ...queries.x.detail(id), select })\`.`,
         "",
         "Create them once per API client (`createApiQueries(api)` builds every context); the client is a parameter so SSR and tests can bring their own.",
       ].join("\n"),

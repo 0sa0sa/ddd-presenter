@@ -16,8 +16,8 @@ import type {
 } from "../domain/commands.js";
 
 /**
- * Fields every query key of CleaningStaffInvitation starts with: `invalidateQueries({ queryKey: [{
- * scope: "cleaning-staff" }] })` matches every query of the CleaningStaff context.
+ * Fields every query key of CleaningStaffInvitation starts with: the context (`scope`) and the
+ * aggregate (`entity`).
  */
 const cleaningStaffInvitationKey = {
   scope: "cleaning-staff",
@@ -30,9 +30,10 @@ const cleaningStaffInvitationKey = {
  * generic to specific.
  *
  * Every key is an array with exactly one object (`[{ scope, entity, kind, id }]`): filters match it
- * by name, so `all()` matches every query of the aggregate, `details()` every detail and
- * `detail(id).queryKey` the one with that id. The options are not configurable; add `select`,
- * `staleTime` or `throwOnError` at the call site: `useQuery({ ...queries.x.detail(id), select })`.
+ * by name, so `[{ scope: "cleaning-staff" }]` matches every query of the context, `all()` every
+ * query of the aggregate, `details()` every detail and `detail(id).queryKey` the one with that id.
+ * The options are not configurable; add `select`, `staleTime` or `throwOnError` at the call site:
+ * `useQuery({ ...queries.x.detail(id), select })`.
  *
  * Create them once per API client (`createApiQueries(api)` builds every context); the client is a
  * parameter so SSR and tests can bring their own.

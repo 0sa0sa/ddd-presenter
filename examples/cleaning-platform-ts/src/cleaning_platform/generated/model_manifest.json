@@ -39,7 +39,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/queries.ts",
-      "sha256": "445832d8d8df8d634cea353f90204e77fd98cc43bb0b138ebecef8020a598d7f"
+      "sha256": "44b8a7e8be99d2fa0c5e00dc0759370ac6e2002605f6e03742e6b905f91c01d5"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/ports.ts",
@@ -107,7 +107,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/staffing/api/queries.ts",
-      "sha256": "bc5dfd3584b913844a340708764473532a8b4caddf0aed318216f9ca372c41f9"
+      "sha256": "fc16176c22bcbac6a8beceb218cb5e55569eb6e75b36181bc74075b90ca8cc94"
     },
     {
       "path": "src/cleaning_platform/generated/staffing/application/policies.ts",
