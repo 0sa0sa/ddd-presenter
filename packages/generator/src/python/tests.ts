@@ -1,5 +1,6 @@
-import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
-import { depParams, repoAttr, resolveReturn, useCaseDeps } from "./application.ts";
+import { claimType, deriveViolations, derivedTestName, makePrincipal, otherRoles, scenarioPrincipal, type ResolvedPrincipal, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import { depParams, repoAttr, resolveReturn, useCaseAuthorization, useCaseDeps } from "./application.ts";
+import { securityModule } from "./security.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
 import { assertEquals, Code, Imports, pascal, pyString, pyType, pyValue, type ValueContext } from "./support.ts";
@@ -287,6 +288,7 @@ export function aggregateTestFile(L: Layout, ag: AggregateIR): PyFile | undefine
 
 function importError(L: Layout, imp: Imports, name: string): void {
   if (name === "ConstraintViolation" || name === "AggregateNotFound") imp.from(L.runtime, name);
+  else if (name === "NotAuthorized" || name === "Unauthenticated") imp.from(securityModule(L.model), name);
   else imp.from(L.mod("errors"), name);
 }
 
@@ -371,6 +373,7 @@ export function useCaseTestFile(L: Layout, uc: UseCaseIR): PyFile | undefined {
   const vctx: ValueContext = { imports: imp, typeModule: L.typeModule, fieldTypes: L.ca.fieldTypes };
   const c = new Code();
   for (const sc of uc.scenarios) useCaseScenario(L, c, uc, sc, imp, vctx);
+  authorizationTests(L, c, uc, imp, vctx);
   return { path: L.testPath(uc.name), content: assemble(L.model, `Scenarios of use case ${uc.name} (${L.ca.ir.name}).`, imp, c.toString(), { exports: false }) };
 }
 
@@ -432,21 +435,24 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
     c.line(`use_case = ${cls}(${params.map((p) => `${p.name}=${p.name}`).join(", ")})`);
     const cmd = construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx);
     c.line(`command = ${cmd}`);
+    const caller = principalArg(L, c, uc, sc, imp);
+    const call = `use_case.execute(command${caller})`;
     if (then.raises) {
       imp.import("pytest");
       importError(L, imp, then.raises);
       c.line(`with pytest.raises(${then.raises}):`);
-      c.indent(() => c.line("use_case.execute(command)"));
+      c.indent(() => c.line(call));
       if (deps.uow) {
         c.line("assert not unit_of_work.committed");
-        c.line("assert unit_of_work.rolled_back");
+        // Authorization may refuse before the transaction starts (nothing to roll back).
+        if (then.raises !== "NotAuthorized" && then.raises !== "Unauthenticated") c.line("assert unit_of_work.rolled_back");
       }
     } else if (info.returnType) {
-      c.line("result = use_case.execute(command)");
+      c.line(`result = ${call}`);
       if (then.hasReturns) c.line(assertEquals("result", pyValue(then.returns, info.returnType, vctx)));
       if (deps.uow) c.line("assert unit_of_work.committed");
     } else {
-      c.line("use_case.execute(command)");
+      c.line(call);
       if (deps.uow) c.line("assert unit_of_work.committed");
     }
     if (Array.isArray(then.state)) {
@@ -462,8 +468,10 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       if (deps.publisher) eventAsserts(L, c, "event_publisher.published", then, imp, vctx);
       else c.line(`# ${uc.name} publishes no events`);
     }
-    if (uc.idempotencyKey) {
-      const recorded = `idempotency_store.get(${pyString(uc.name)}, str(command.${uc.idempotencyKey}))`;
+    if (uc.idempotencyKey && caller !== ", None") {
+      // Keys of a use case that needs a principal are kept per principal.
+      const key = caller ? `f"{principal.id}:{command.${uc.idempotencyKey}}"` : `str(command.${uc.idempotencyKey})`;
+      const recorded = `idempotency_store.get(${pyString(uc.name)}, ${key})`;
       if (then.raises) {
         c.line("# A failed run is not recorded, so a retry with the same key runs again.");
         c.line(`assert ${recorded} is None`);
@@ -471,9 +479,141 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
         c.line("# Idempotency: the same command again returns the recorded result and runs no step.");
         c.line(`assert ${recorded} is not None`);
         if (deps.publisher) c.line("published = len(event_publisher.published)");
-        c.line(info.returnType ? "assert use_case.execute(command) == result" : "use_case.execute(command)");
+        c.line(info.returnType ? `assert ${call} == result` : call);
         if (deps.publisher) c.line("assert len(event_publisher.published) == published");
       }
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Authorization (docs/09 §20)
+// ---------------------------------------------------------------------------
+
+/** `Principal(id=..., roles=(...), claim=...)` of a resolved principal (claims that are None are left out). */
+export function principalPy(L: Layout, p: ResolvedPrincipal, imp: Imports): string {
+  const sec = L.model.security!;
+  imp.from(securityModule(L.model), "Principal");
+  const value = (v: unknown, type: string): string => {
+    const t = claimType(type);
+    if (Array.isArray(v)) return `(${v.map((x) => pyString(String(x))).join(", ")}${v.length === 1 ? "," : ""})`;
+    if (t?.k === "primitive" && t.name === "UUID") {
+      imp.from("uuid", "UUID");
+      return `UUID(${pyString(String(v))})`;
+    }
+    if (typeof v === "boolean") return v ? "True" : "False";
+    return typeof v === "string" ? pyString(v) : String(v);
+  };
+  const parts = [`id=${value(p.id, sec.principal.idType)}`, `roles=(${p.roles.map(pyString).join(", ")}${p.roles.length === 1 ? "," : ""})`];
+  for (const c of sec.principal.claims) {
+    const v = p.claims[c.name];
+    if (v !== null && v !== undefined) parts.push(`${c.name}=${value(v, c.type)}`);
+  }
+  return `Principal(${parts.join(", ")})`;
+}
+
+/** Declares `principal` for a scenario of a use case that needs one; returns the extra execute argument. */
+function principalArg(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: Imports): string {
+  const sec = L.model.security;
+  if (!sec || !useCaseAuthorization(L, uc)) return "";
+  const p = scenarioPrincipal(sec, uc, sc);
+  if (p.anonymous) return ", None";
+  c.line(`principal = ${principalPy(L, p, imp)}`);
+  return ", principal";
+}
+
+/** A repository class per aggregate that fails the test when the use case touches it before authorization. */
+function untouchedRepository(L: Layout, c: Code, aggregate: string, imp: Imports, done: Set<string>): string {
+  const cls = `_Untouched${aggregate}Repository`;
+  if (done.has(cls)) return cls;
+  done.add(cls);
+  const ag = L.ca.ir.aggregates.find((a) => a.name === aggregate)!;
+  imp.from("typing", "NoReturn");
+  imp.from(L.mod("aggregates"), aggregate);
+  const idType = pyType(L.fieldTypes(ag.name).get(ag.identity)!, imp, L.typeModule, { field: false });
+  c.line().line();
+  c.line(`class ${cls}:`);
+  c.indent(() => {
+    c.docstring(`A ${aggregate}Repository that fails the test when it is used: authorization comes first.`);
+    c.line();
+    c.line(`def get(self, ${ag.identity}: ${idType}) -> NoReturn:`);
+    c.indent(() => c.line('raise AssertionError("loaded before authorization")'));
+    c.line();
+    c.line(`def save(self, aggregate: ${aggregate}) -> NoReturn:`);
+    c.indent(() => c.line('raise AssertionError("saved before authorization")'));
+  });
+  return cls;
+}
+
+/**
+ * Derived authorization tests: an anonymous caller raises Unauthenticated, and (with required roles) a principal holding
+ * none of them raises NotAuthorized naming the roles, both before any repository is touched.
+ */
+function authorizationTests(L: Layout, c: Code, uc: UseCaseIR, imp: Imports, vctx: ValueContext): void {
+  const sec = L.model.security;
+  const auth = useCaseAuthorization(L, uc);
+  const sc = uc.scenarios[0];
+  if (!sec || !auth || !sc) return;
+  const deps = useCaseDeps(L, uc);
+  const cases: { name: string; doc: string; principal: string; error: string; details: string }[] = [];
+  if (!uc.scenarios.some((s) => s.given.principal?.anonymous)) {
+    cases.push({ name: "authorization_anonymous_is_unauthenticated", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "None", error: "Unauthenticated", details: `{"action": ${pyString(uc.name)}}` });
+  }
+  if (auth.roles.length) {
+    const roles = otherRoles(sec, uc.authorize!);
+    cases.push({
+      name: "authorization_missing_role_is_refused",
+      doc: `A principal with ${roles.length ? `only the other roles (${roles.join(", ")})` : "no role"} lacks ${auth.roles.join(" / ")}: ${uc.name} raises NotAuthorized naming the required roles, before it touches a repository.`,
+      principal: principalPy(L, makePrincipal(sec, { roles, claims: {} }), imp),
+      error: "NotAuthorized",
+      details: `{"action": ${pyString(uc.name)}, "required_roles": [${auth.roles.map(pyString).join(", ")}]}`,
+    });
+  }
+  const done = new Set<string>();
+  for (const k of cases) {
+    importError(L, imp, k.error);
+    imp.import("pytest");
+    const repos = new Map(deps.repos.map((r) => [r, untouchedRepository(L, c, r, imp, done)]));
+    c.line().line();
+    c.line(`def test_${k.name}() -> None:`);
+    c.indent(() => {
+      c.docstring(k.doc);
+      if (deps.uow) {
+        imp.from(L.testing, "FakeUnitOfWork");
+        c.line("unit_of_work = FakeUnitOfWork()");
+      }
+      if (deps.publisher) {
+        imp.from(L.testing, "CapturingEventPublisher");
+        c.line("event_publisher = CapturingEventPublisher()");
+      }
+      const args = depParams(deps).map((p) => {
+        const r = deps.repos.find((x) => repoAttr(x) === p.name);
+        if (r) return `${p.name}=${repos.get(r)}()`;
+        switch (p.name) {
+          case "clock":
+            imp.from(L.testing, "FixedClock");
+            return `clock=FixedClock(${pyValue("1970-01-01T00:00:00+00:00", { k: "primitive", name: "DateTime" }, vctx)})`;
+          case "ids":
+            imp.from(L.testing, "SequentialIds");
+            return "ids=SequentialIds([])";
+          case "extensions":
+            imp.from(L.testing, "StubExtensions");
+            return "extensions=StubExtensions()";
+          case "idempotency_store":
+            imp.from(L.testing, "InMemoryIdempotencyStore");
+            return "idempotency_store=InMemoryIdempotencyStore()";
+          default:
+            return `${p.name}=${p.name}`;
+        }
+      });
+      c.line(`use_case = ${pascal(uc.name)}UseCase(${args.join(", ")})`);
+      c.line(`command = ${construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx)}`);
+      if (k.principal !== "None") c.line(`principal = ${k.principal}`);
+      c.line(`with pytest.raises(${k.error}) as raised:`);
+      c.indent(() => c.line(`use_case.execute(command, ${k.principal === "None" ? "None" : "principal"})`));
+      c.line(`assert raised.value.details == ${k.details}`);
+      if (deps.uow) c.line("assert not unit_of_work.committed");
+      if (deps.publisher) c.line("assert event_publisher.published == []");
+    });
+  }
 }

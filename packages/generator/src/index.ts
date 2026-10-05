@@ -7,6 +7,8 @@ import { policiesFile, policyTestFile, translatorScaffolds } from "./python/poli
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, docstringLines, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
+import { readAccessFile, securityFiles, servedOverHttp } from "./python/security.ts";
+import { securityTestFile } from "./python/security-tests.ts";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "./output.ts";
 import { generateTypeScript } from "./typescript/index.ts";
 
@@ -36,6 +38,13 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   gen(`${src}/${pkg}/generated/__init__.py`,initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
   gen(`${src}/${pkg}/generated/_runtime.py`, `${header(model)}\n\n"""Base classes shared by the generated domain code (Pydantic v2 + stdlib only)."""\n\n${RUNTIME_PY}`);
   gen(`${src}/${pkg}/generated/adapters.py`, `${header(model)}\n\n"""Reference adapters for the clock and id ports (structurally typed; usable in every context)."""\n\n${ADAPTERS_PY}`);
+  if (model.security) {
+    const contexts = [...analysis.contexts.values()];
+    const served = { useCases: contexts.flatMap((ca) => ca.ir.useCases.filter(servedOverHttp)), aggregates: contexts.flatMap((ca) => ca.ir.aggregates) };
+    for (const f of securityFiles(model, served)) gen(f.path, f.content);
+    const t = securityTestFile(model, contexts.map((ca) => new Layout(model, ca)));
+    if (t) gen(t.path, t.content);
+  }
 
   for (const ca of analysis.contexts.values()) {
     const L = new Layout(model, ca);
@@ -59,6 +68,8 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     ]) {
       gen(f.path, f.content);
     }
+    const readAccess = readAccessFile(L);
+    if (readAccess) gen(readAccess.path, readAccess.content);
     for (const ag of ca.ir.aggregates) {
       const t = aggregateTestFile(L, ag);
       if (t) gen(t.path, t.content);

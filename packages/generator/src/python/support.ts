@@ -33,7 +33,7 @@ export class Imports {
     const std: string[] = [];
     const third: string[] = [];
     const local: string[] = [];
-    const bucket = (m: string) => (STDLIB.has(m.split(".")[0]!) ? std : m.startsWith("pydantic") || m === "pytest" ? third : local);
+    const bucket = (m: string) => (STDLIB.has(m.split(".")[0]!) ? std : m.startsWith("pydantic") || m === "pytest" || m === "jwt" || m.split(".")[0] === "cryptography" ? third : local);
     for (const m of [...this.plain].sort(byModule)) bucket(m).push(`import ${m}`);
     for (const m of [...this.map.keys()].sort(byModule)) {
       if (m === "__future__") continue;
@@ -69,7 +69,7 @@ function nameKind(n: string): number {
   return n.length > 1 && n === n.toUpperCase() && /[A-Z]/.test(n) ? 0 : /^[A-Z]/.test(n) ? 1 : 2;
 }
 
-const STDLIB = new Set(["abc", "collections", "copy", "dataclasses", "datetime", "decimal", "enum", "json", "re", "typing", "uuid"]);
+const STDLIB = new Set(["abc", "base64", "collections", "copy", "dataclasses", "datetime", "decimal", "enum", "hashlib", "hmac", "json", "math", "re", "threading", "time", "typing", "uuid"]);
 
 /** Maximum length of a generated line (code is wrapped in layout.ts, docstrings and comments here). */
 export const MAX_LINE = 100;
