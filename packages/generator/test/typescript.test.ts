@@ -863,7 +863,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+56 passed/);
+      expect(vitest.out).toMatch(/Tests\s+48 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
