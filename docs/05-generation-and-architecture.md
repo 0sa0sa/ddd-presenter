@@ -207,15 +207,17 @@ src/<package>/generated/api/runtime.ts      # モデルに依存しない部分:
 src/<package>/generated/api/contract.ts     # 全コンテキストのエンドポイントと API_BASE_PATH
 src/<package>/generated/api/server.ts       # createApiHandler(dependencies, options?) → (request: Request) => Promise<Response>
 src/<package>/generated/api/client.ts       # createApiClient({ baseUrl, fetch, headers }) と ApiClient 型（React も TanStack Query も使わない）
-src/<package>/generated/api/react.ts        # ApiClientContext / useApiClient
+src/<package>/generated/api/queries.ts      # createApiQueries(api) / createApiMutations(api): 全コンテキストのファクトリ、ApiQueries / ApiMutations 型
 src/<package>/generated/api/register.ts     # TanStack Query の Register に defaultError: DomainError | ApiError を登録
-src/<package>/generated/api/<context>/contract.ts  # Aggregate / Entity の JSON 形のスキーマ（XJson）と、そのコンテキストのエンドポイント
-src/<package>/generated/api/<context>/queries.ts   # クエリキーのファクトリ、queryOptions、mutationOptions（React なし）
-src/<package>/generated/api/<context>/hooks.ts     # useX(id) / useUseCase() の薄いフック
+src/<package>/generated/<context>/api/contract.ts  # Aggregate / Entity の JSON 形のスキーマ（XJson）と、そのコンテキストのエンドポイント
+src/<package>/generated/<context>/api/queries.ts   # create<Context>Queries(api)（Aggregate ごとにキー + queryOptions）、create<Context>Mutations(api)
 tests/generated/<context>-api.test.ts
 ```
 
-`generated/index.ts` とコンテキストの `index.ts` は `api/` を再 export しない（ドメインだけを使うバックエンドが React や TanStack Query を読み込まないように）。
+- **縦の配置**: コンテキストごとの API のファイルは、そのコンテキストのドメインと同じディレクトリ（`generated/<context>/api/`）に置く（一緒に変わるものを一緒に置く。docs/09 §18）。コンテキストをまたぐもの（runtime・全体の contract・server・client・register・全体の queries）は `generated/api/` に残す。
+- `generated/index.ts` とコンテキストの `index.ts` は `api/` を再 export しない（ドメインだけを使うバックエンドが TanStack Query を読み込まないように）。API はファイルを直接 import する（`generated/api/queries.js` など）。
+- 生成したファイルは React の API（フック・Context）を使わない。`queryOptions` / `mutationOptions` / `skipToken` は `@tanstack/react-query` から import するので、依存としての React は残る（`@tanstack/react-query` の peer）。
+- `Api` という名前のコンテキストは `generated/api/` を共有のファイルと分け合う（ファイル名は重ならないが紛らわしい）。避けることを勧める。
 
 #### 契約（サーバーとクライアントで共有、フレームワーク非依存）
 
@@ -255,38 +257,69 @@ tests/generated/<context>-api.test.ts
 - エラーのレスポンスは `code` からそのコンテキストの Domain Error のクラス（`InvitationNotFound` など、runtime の `ConstraintViolation` / `AggregateNotFound` を含む）を作って reject する。知らないコード・JSON でない本文・通信の失敗（`network_error`、status 0）は `ApiError`（`status`・`code`・`details`）。中断（`signal`）はそのまま投げ直すので、TanStack Query がキャンセルとして扱う。
 - `baseUrl`（既定 `""` = ページと同じオリジン。サーバー・SSR・テストでは絶対 URL）、`fetch`（`(request: Request) => Promise<Response>`。テストでは生成したハンドラをそのまま渡せる）、`headers`（オブジェクトか、リクエストごとの関数）。
 
-#### TanStack Query（`<context>/queries.ts`・`hooks.ts`）
+#### TanStack Query（`<context>/api/queries.ts`・`api/queries.ts`）
 
-- **クエリキー**: Aggregate ごとに `<aggregate>Keys = { all: ["<context>", "<aggregate>"], lists(), details(), detail(id) }`（kebab-case の文字列、汎用 → 具体の配列）。`detail(id)` は UUID の ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。String の識別子はそのまま、Integer の識別子は `number`（キーも引数も数値。パスの `:id` は数字の並びだけ数値として読む。契約の `idType: "number"`）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞。
-- **query options**: `<aggregate>Queries.detail(api, id)`（`queryOptions`。`queryFn` は TanStack Query の `signal` を fetch に渡す。useQuery・useSuspenseQuery・`queryClient.query`・prefetch で使える）と `detailOrSkip(api, id | undefined)`（id が undefined の間は `skipToken` で無効。useSuspenseQuery には使わない）。`onSuccess` などのクエリのコールバックや `select`・`staleTime` は付けない（アプリの方針。`QueryClient` の `defaultOptions` か呼び出し側で `{ ...options, select }`）。
-- **mutation options**: `<context>Mutations.<useCase>(api)`（`mutationOptions`、`mutationKey: ["<context>", "<use-case>"]`、`mutationFn` は API クライアント）。成功時の `onSuccess` が無効化の Promise を返すので、ミューテーションは active なクエリの再取得が終わるまで pending のまま。
+アプリは API クライアントとファクトリを1回だけ作り、同じ options をどこでも使う（コンポーネント・ルートの loader・SSR・テスト）。
+
+```ts
+export const api = createApiClient({ baseUrl: "" });
+export const queries = createApiQueries(api);     // queries.<context>.<aggregate>
+export const mutations = createApiMutations(api); // mutations.<context>.<useCase>
+
+useQuery(queries.cleaningStaff.cleaningStaffInvitation.detail(id));
+useSuspenseQuery(queries.cleaningStaff.cleaningStaffInvitation.detail(id));
+useQuery({ ...queries.cleaningStaff.cleaningStaffInvitation.detail(id), select: (i) => i.status });
+useQuery(queries.cleaningStaff.cleaningStaffInvitation.detailOrSkip(maybeId));
+useMutation(mutations.cleaningStaff.acceptInvitation).mutate(input, { onSuccess: () => navigate(...) });
+await queryClient.query({ ...queries.cleaningStaff.cleaningStaffInvitation.detail(id), staleTime: "static" }); // loader
+```
+
+- **クエリファクトリ**: Aggregate ごとに1つのオブジェクトに、無効化用のキーと `queryOptions` をまとめる。`create<Context>Queries(api)` が `{ <aggregate>: { all(), lists(), details(), detail(id), detailOrSkip(id) } }` を返す。`api` を引数に取るのは、SSR（リクエストごとの Cookie）とテスト（ハンドラにつなぐ `fetch`）で別のクライアントが要るため。リクエストごとに作るなら、ルーターの context などに `createApiQueries(api)` を入れる。`api` はキーに入れない（1つの QueryClient に1つの API クライアント）。
+- **キー**: どれも「オブジェクトを1つだけ持つ配列」。`all()` = `[{ scope: "<context>", entity: "<aggregate>" }]`、`lists()` = `[{ …, kind: "list" }]`、`details()` = `[{ …, kind: "detail" }]`、`detail(id).queryKey` = `[{ …, kind: "detail", id }]`（kebab-case の文字列）。フィルタは名前で部分一致する（順序に依存しない）ので、`[{ scope: "cleaning-staff" }]` はそのコンテキストのすべて、`all()` はその Aggregate のすべて、`details()` はすべての detail、`detail(id).queryKey` はその ID だけに一致する。`detail(id)` は UUID の ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。String の識別子はそのまま、Integer の識別子は `number`（キーも引数も数値。パスの `:id` は数字の並びだけ数値として読む。契約の `idType: "number"`）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞（`[{ ...queries.x.y.lists()[0], filters }]`）。
+- **query options**: `detail(id)` は `queryOptions({ queryKey, queryFn })`。`queryFn` は ID をキーから名前で取り出し（`({ queryKey: [{ id }], signal })`）、TanStack Query の `signal` を fetch に渡す。useQuery・useSuspenseQuery・`queryClient.query`・`getQueryData`（DataTag で型が付く）で使える。`detailOrSkip(id | undefined)` は id が undefined の間 `skipToken` で無効にする useQuery 用（useSuspenseQuery と `queryClient.query` の型は `skipToken` を受け付けないので、`detail` と分けた）。無効の間のキーは `id: undefined` で、ハッシュでは `details()` と同じになる（`details()` そのものはクエリにしないので衝突しない）。
+- **設定できない**: ファクトリは引数に options を取らない。`select`・`staleTime`・`throwOnError` などは呼び出し側で `{ ...options, select }` と足すか、`QueryClient` の `defaultOptions` に書く。`onSuccess` などのクエリのコールバックは付けない。
+- **mutation options**: `create<Context>Mutations(api)` が `{ <useCase>: mutationOptions({ mutationKey: [{ scope: "<context>", useCase: "<use-case>" }], mutationFn, onSuccess }) }` を返す。`onSuccess` は同じクエリファクトリのキーで無効化し、その Promise を返すので、ミューテーションは active なクエリの再取得が終わるまで pending のまま。`mutationKey` もオブジェクトなので `useIsMutating({ mutationKey: [{ scope: "cleaning-staff" }] })` で絞れる。
 - **無効化の規則**（モデルから決める。保存しない Aggregate は対象外）:
 
 | Use case の手順 | 無効化するキー |
 |---|---|
-| `load` した Aggregate を `save`（`by` が入力のフィールド） | `<aggregate>Keys.detail(input.<field>)` と `lists()` |
-| `load` した Aggregate を `save`（`by` が計算した値） | `<aggregate>Keys.details()` と `lists()` |
-| `create` した Aggregate を `save` | `<aggregate>Keys.lists()`（新しい ID の detail はまだキャッシュにない） |
+| `load` した Aggregate を `save`（`by` が必須の入力のフィールド） | `queries.<aggregate>.detail(input.<field>).queryKey` と `lists()` |
+| `load` した Aggregate を `save`（`by` が計算した値か省略可能な入力） | `queries.<aggregate>.details()` と `lists()` |
+| `create` した Aggregate を `save` | `queries.<aggregate>.lists()`（新しい ID の detail はまだキャッシュにない） |
 | 保存しない | なし（`onSuccess` を付けない） |
 
   `setQueryData` で結果を書き込むことはしない（Use case の戻り値は多くが ID や真偽値で、Aggregate の新しい状態ではない）。楽観的更新も生成しない。ポリシーがコミット後に別のコンテキストを変える影響（例: 招待の受諾 → Staffing がスタッフを登録）は結果整合なので無効化しない。必要ならアプリが `mutate(input, { onSuccess })` で無効化する。
-- **フック**: `use<Aggregate>(id | undefined)` = `useQuery(<aggregate>Queries.detailOrSkip(useApiClient(), id))`、`use<UseCase>()` = `useMutation(<context>Mutations.<useCase>(useApiClient()))`。結果をそのまま返す（分割代入や独自の状態を挟まない）。UI の反応は `mutate(input, { onSuccess })` に書き、`useMutation` の `onSuccess` を上書きしない（無効化が消える）。
-- **QueryClient はアプリが作る**（`QueryClientProvider`）。API クライアントは `ApiClientContext` で渡す。`register.ts` をアプリのプログラムに含める（このパッケージの `tsconfig` の対象なら自動で、別のパッケージからは `import "<package>/generated/api/register.js"`）と、`error` の型が `DomainError | ApiError` になる。
+- **フックは生成しない**: `useQuery(queries.x.y.detail(id))`・`useMutation(mutations.x.y)` と、TanStack Query のフックに生成した options をそのまま渡す。フックはコンポーネントの中でしか使えず、`useQuery` / `useSuspenseQuery` の選択を固定し、設定を共有するだけでロジックを足さないため（docs/09 §18）。UI の反応は `mutate(input, { onSuccess })` に書き、`useMutation` の `onSuccess` を上書きしない（無効化が消える）。
+- **ルーター（TanStack Router など）**: loader は同じ options でキャッシュを満たすだけにし、コンポーネントは useSuspenseQuery / useQuery で購読する（observer をコンポーネントに置くので、フォーカス時の再取得や GC が働く）。TanStack Query 5.104 で `ensureQueryData` / `fetchQuery` は非推奨になったので、loader は `queryClient.query({ ...options, staleTime: "static" })`（`ensureQueryData` と同じく、キャッシュにあれば取得しない）か `queryClient.query(options)` を使う。それより前の版では `ensureQueryData(options)`。
+- **QueryClient はアプリが作る**（`QueryClientProvider`）。`register.ts` をアプリのプログラムに含める（このパッケージの `tsconfig` の対象なら自動で、別のパッケージからは `import "<package>/generated/api/register.js"`）と、`error` の型が `DomainError | ApiError` になる。
 
 #### 生成テスト（`tests/generated/<context>-api.test.ts`）
 
 DOM もネットワークも使わない。クライアントの `fetch` を生成したハンドラにつなぎ（`connect()`）、`QueryClient`（再試行なし）と生成したインメモリのテストダブルで動かす。
 
 - ルーティング: 未知のパスと渡していない Use case は 404、メソッド違いは 405（`Allow`）、不正な ID は 400、JSON でない本文は 400、予期しない例外は 500（メッセージを返さず `onError` に渡る）。
-- Aggregate ごと: `queryClient.query(<aggregate>Queries.detail(api, id))` のキー（ID の小文字化を含む）、取得したデータが保存した Aggregate の JSON と同じこと、未知の ID が `AggregateNotFound`（404）で reject され、クエリの `error` がそのインスタンスであること。
-- Use case ごと（成功するシナリオと失敗するシナリオを1つずつ）: シナリオの前提をテストダブルに入れ、保存済みの Aggregate を `queryClient.query` で取得し、一覧とほかの ID の detail のプローブを置いてから `new MutationObserver(queryClient, <context>Mutations.<useCase>(api)).mutate(input)`。戻り値・ステータス（200 / 204、失敗はエラーの一覧のステータス）・`observer.getCurrentResult().error` が復元した Domain Error であること、無効化されたキーがちょうど上の規則どおりであること（失敗時は何も無効化しない）、再取得したデータが保存された状態と同じことを確かめる。
+- アプリと同じく `createApiQueries(api)` / `createApiMutations(api)` を1回作り、`queries.<context>.<aggregate>` を使う。
+- Aggregate ごと: `queryClient.query(queries.<context>.<aggregate>.detail(id))` のキー（`[{ scope, entity, kind: "detail", id }]`、ID の小文字化を含む）、取得したデータが保存した Aggregate の JSON と同じこと、未知の ID が `AggregateNotFound`（404）で reject され、クエリの `error` がそのインスタンスであること。
+- Aggregate ごと: オブジェクトのキーの部分一致。`detail(id).queryKey` の無効化はその ID だけ、`details()` はすべての detail（一覧は除く）、`all()` は一覧も含むすべてに当たり、別の `scope` の同じ Aggregate・ID には当たらないこと。
+- Use case ごと（成功するシナリオと失敗するシナリオを1つずつ）: シナリオの前提をテストダブルに入れ、保存済みの Aggregate を `queryClient.query` で取得し、一覧とほかの ID の detail のプローブを置いてから `new MutationObserver(queryClient, mutations.<context>.<useCase>).mutate(input)`。戻り値・ステータス（200 / 204、失敗はエラーの一覧のステータス）・`observer.getCurrentResult().error` が復元した Domain Error であること、無効化されたキーがちょうど上の規則どおりであること（失敗時は何も無効化しない）、再取得したデータが保存された状態と同じことを確かめる。
 
 #### 移行メモ（2026-10-04、HTTP API）
 
 - 既存の TypeScript プロジェクトは何も変わらない（`typescript.api` を書いたときだけ生成する）。
 - `typescript.api` を足したら、顧客所有の `package.json` は書き換えられないので手で依存を足す: dependencies に `"@tanstack/react-query": "^5.102.0"` と `"react": "^19.0.0"`、devDependencies に `"@types/react": "^19.0.0"`（`bun add @tanstack/react-query react && bun add -d @types/react`）。ライブラリとして配布するなら `react` は peerDependencies に移す。TanStack Query は 5.102 以上が必要（`mutationOptions` 5.82、ミューテーションのコールバックの `context.client` 5.89、`queryClient.query` 5.102）。
 - 生成した API のファイルは `tsconfig.json` の `include` の中にあるので、そのまま型検査とテストの対象になる。`lib` に DOM は要らない（`fetch` / `Request` / `Response` は `@types/node` か `bun-types` の型を使う）。
-- `ddd diff` は `api` を外したとき、生成した API のファイルを stale として表示する（`--prune` で消す）。フック（`use<UseCase>` など）は export なので、Use case の削除・改名は破壊的変更として表示される。
+- `ddd diff` は `api` を外したとき、生成した API のファイルを stale として表示する（`--prune` で消す）。
+
+#### 移行メモ（2026-10-06、TanStack Query のファクトリを TkDodo の最近の記事に合わせた。破壊的変更）
+
+`typescript.api` を使っているプロジェクトだけが対象（理由は docs/09 §18）。`ddd diff` は次の変更を破壊的変更（`module removed` など）として表示する。
+
+- **フックを削除**: `use<Aggregate>(id)` と `use<UseCase>()`（`api/<context>/hooks.ts`）、`ApiClientContext` / `useApiClient`（`api/react.ts`）はなくなった。`use<Aggregate>(id)` → `useQuery(queries.<context>.<aggregate>.detailOrSkip(id))`（id が必ずあるなら `detail(id)`）、`use<UseCase>()` → `useMutation(mutations.<context>.<useCase>)`。`<ApiClientContext value={api}>` は不要になり、`export const queries = createApiQueries(api)` をモジュールかルーターの context に置く。
+- **ファクトリの名前と形**: `<aggregate>Keys` と `<aggregate>Queries` は `create<Context>Queries(api).<aggregate>` の1つのオブジェクトになった（`<aggregate>Queries.detail(api, id)` → `queries.<context>.<aggregate>.detail(id)`、`<aggregate>Keys.lists()` → `queries.<context>.<aggregate>.lists()`、`<aggregate>Keys.detail(id)` → `queries.<context>.<aggregate>.detail(id).queryKey`、`<aggregate>Keys.all` → `all()`（関数））。`<context>Mutations.<useCase>(api)` → `create<Context>Mutations(api).<useCase>`（関数ではなく options）。全体は `createApiQueries(api)` / `createApiMutations(api)`。
+- **キーがオブジェクトに**: `["cleaning-staff", "cleaning-staff-invitation", "detail", id]` → `[{ scope: "cleaning-staff", entity: "cleaning-staff-invitation", kind: "detail", id }]`。`mutationKey` も `[{ scope, useCase }]`。手で書いた配列のキー（`[...xKeys.lists(), filters]` など）は `[{ ...queries.x.y.lists()[0], filters }]` に直す。永続化したキャッシュ（`persistQueryClient` など）は古いキーのエントリーを使わなくなるので、`buster` を変えて捨てる。
+- **ファイルの移動**: `generated/api/<context>/contract.ts` → `generated/<context>/api/contract.ts`、`generated/api/<context>/queries.ts` → `generated/<context>/api/queries.ts`。`generated/api/queries.ts` が増えた。`generated/api/{runtime,contract,server,client,register}.ts` はそのまま。
+- **古いファイル**: `ddd generate` は古い `generated/api/<context>/{contract,queries,hooks}.ts` と `generated/api/react.ts` を stale として残す（手を入れていなければ古いファイル同士の import は解決するので、そのままでも型検査は通る）。新しい API に書き換えたら `ddd generate --prune` で消す。
+- **依存は同じ**: `@tanstack/react-query` ^5.102、`react`、`@types/react`。生成コードは React の API を呼ばないが、`@tanstack/react-query` が React を peer に要る。
 
 ### 移行メモ（2026-10-03、ベストプラクティスの見直し）
 

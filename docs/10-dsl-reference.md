@@ -80,7 +80,8 @@ generation:
 
 生成するもの（詳細と規約は docs/05 §8、設計の理由は docs/09 §18）:
 
-- `src/<package>/generated/api/`: `contract.ts`（全エンドポイント）、`server.ts`（`createApiHandler`、Web 標準の `Request` → `Response`）、`client.ts`（`createApiClient`）、`runtime.ts`（モデルに依存しない部分）、`react.ts`（`ApiClientContext` / `useApiClient`）、`register.ts`（TanStack Query の `Register` に error の型を登録）、コンテキストごとの `<context>/{contract,queries,hooks}.ts`。
+- `src/<package>/generated/api/`（共有）: `contract.ts`（全エンドポイント）、`server.ts`（`createApiHandler`、Web 標準の `Request` → `Response`）、`client.ts`（`createApiClient`）、`queries.ts`（`createApiQueries` / `createApiMutations`: 全コンテキストのクエリファクトリと mutationOptions）、`runtime.ts`（モデルに依存しない部分）、`register.ts`（TanStack Query の `Register` に error の型を登録）。
+- `src/<package>/generated/<context>/api/`（コンテキストの隣、縦の配置）: `contract.ts`（JSON 形とエンドポイント）、`queries.ts`（`create<Context>Queries` / `create<Context>Mutations`）。カスタムフックと React の Context は生成しない。
 - エンドポイント: Use case ごとに `POST <base_path>/<context>/<use-case>`（入力はコマンドのスキーマ、出力は Use case の戻り値。戻り値がなければ 204）、Aggregate ごとに `GET <base_path>/<context>/<aggregate>/:id`（Aggregate の JSON 形）。パスの名前は kebab-case（`/api/cleaning-staff/accept-invitation`）。
 - テスト `tests/generated/<context>-api.test.ts`（ネットワークも DOM も使わず、クライアントの `fetch` を生成したハンドラにつなぐ）。
 - 依存: 新しく作る `package.json` には `@tanstack/react-query`・`react`（dependencies）と `@types/react`（devDependencies）が入る。既存のプロジェクトの `package.json` は顧客所有なので書き換えない。手で足す（docs/05 §8 の移行メモ）。

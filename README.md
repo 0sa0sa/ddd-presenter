@@ -84,7 +84,7 @@ Value Object・コマンド・イベントは Zod スキーマと推論型、Ent
 
 #### HTTP API と TanStack Query のクライアント（オプトイン）
 
-`typescript.api` を書くと、Use case ごとの `POST /api/<context>/<use-case>` と Aggregate ごとの `GET /api/<context>/<aggregate>/:id` の契約（Zod）、Web 標準のハンドラ（`Request` → `Response`）、型付きのクライアントと TanStack Query v5 の query / mutation options・フックを生成する（TkDodo のベストプラクティスに沿う。[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §18](docs/09-implementation-decisions.md)）。
+`typescript.api` を書くと、Use case ごとの `POST /api/<context>/<use-case>` と Aggregate ごとの `GET /api/<context>/<aggregate>/:id` の契約（Zod）、Web 標準のハンドラ（`Request` → `Response`）、型付きのクライアントと TanStack Query v5 のクエリファクトリ（キーと queryOptions を Aggregate ごとに1つのオブジェクトにまとめたもの）と mutationOptions を生成する。カスタムフックは生成しない（TkDodo の最近の記事に沿う。[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §18](docs/09-implementation-decisions.md)）。
 
 ```yaml
   typescript:
@@ -97,25 +97,49 @@ import { createApiHandler } from "./generated/api/server.js";
 const handler = createApiHandler({ cleaningStaff: { useCases: { acceptInvitation }, repositories: { cleaningStaffInvitationRepository } } });
 Bun.serve({ fetch: handler });
 
-// クライアント（React）: QueryClient はアプリが持ち、API クライアントを Context で渡す
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+// クライアント: API クライアントとファクトリを1回だけ作る（React の Context は不要）
+import { QueryClient } from "@tanstack/react-query";
 import { createApiClient } from "./generated/api/client.js";
-import { ApiClientContext, useApiClient } from "./generated/api/react.js";
-import { useAcceptInvitation } from "./generated/api/cleaning-staff/hooks.js";
-import { cleaningStaffInvitationQueries } from "./generated/api/cleaning-staff/queries.js";
+import { createApiMutations, createApiQueries } from "./generated/api/queries.js";
 import "./generated/api/register.js"; // error の型を DomainError | ApiError にする
 
-const queryClient = new QueryClient();
-const api = createApiClient({ baseUrl: "" }); // SSR やテストでは絶対 URL と fetch を渡す
-// <QueryClientProvider client={queryClient}><ApiClientContext value={api}>…</ApiClientContext></QueryClientProvider>
+export const queryClient = new QueryClient(); // <QueryClientProvider client={queryClient}> で渡す
+export const api = createApiClient({ baseUrl: "" }); // SSR やテストでは絶対 URL と fetch を渡す
+export const queries = createApiQueries(api); // queries.<context>.<aggregate>: キー + queryOptions
+export const mutations = createApiMutations(api); // mutations.<context>.<useCase>: mutationOptions
+
+// コンポーネント: 生成した options をそのまま、または呼び出し側で足して使う
+import { useMutation, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 
 function Invitation({ id }: { id: string }) {
-  const { data, error } = useQuery(cleaningStaffInvitationQueries.detail(useApiClient(), id));
-  const accept = useAcceptInvitation(); // 成功すると招待の detail と lists を無効化し、再取得まで pending
+  const { data, error } = useQuery(queries.cleaningStaff.cleaningStaffInvitation.detail(id));
+  const accept = useMutation(mutations.cleaningStaff.acceptInvitation); // 成功すると招待の detail と lists を無効化し、再取得まで pending
   if (data) return <button disabled={accept.isPending} onClick={() => accept.mutate({ invitationId: id })}>{data.status}</button>;
   if (error) return <p>{error.message}</p>; // InvitationNotFound などの生成した Domain Error（code で復元）
   return <p>読み込み中…</p>;
 }
+function Variants({ id, maybeId }: { id: string; maybeId?: string }) {
+  const { cleaningStaffInvitation } = queries.cleaningStaff;
+  const status = useQuery({ ...cleaningStaffInvitation.detail(id), select: (i) => i.status }); // 調整は呼び出し側で足す
+  const { data } = useSuspenseQuery(cleaningStaffInvitation.detail(id)); // Suspense でも同じ options
+  const maybe = useQuery(cleaningStaffInvitation.detailOrSkip(maybeId)); // id がまだないとき（skipToken で無効）
+  // …
+}
+
+// TanStack Router: loader で同じ options をキャッシュに入れ、コンポーネントは useSuspenseQuery で購読する
+export const Route = createFileRoute("/invitations/$id")({
+  loader: ({ context: { queryClient }, params }) =>
+    // TanStack Query 5.104 で ensureQueryData は非推奨。代わりがこの形（それ以前は ensureQueryData(options)）
+    queryClient.query({ ...queries.cleaningStaff.cleaningStaffInvitation.detail(params.id), staleTime: "static" }),
+  component: () => {
+    const { data } = useSuspenseQuery(queries.cleaningStaff.cleaningStaffInvitation.detail(Route.useParams().id));
+    return <p>{data.status}</p>;
+  },
+});
+
+// 無効化: キーは1つのオブジェクトの配列なので、名前で部分一致する
+queryClient.invalidateQueries({ queryKey: queries.cleaningStaff.cleaningStaffInvitation.all() }); // その Aggregate のすべて
+queryClient.invalidateQueries({ queryKey: [{ scope: "cleaning-staff" }] }); // そのコンテキストのすべて
 ```
 
 ### VS Code 拡張
@@ -288,6 +312,6 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 - 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
 - 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（日時はミリ秒精度の ISO 文字列 `Instant`、文字列の長さの数え方など）は docs/09 §14・§17。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
-- TypeScript の HTTP API（`typescript.api`）は Use case の POST と ID による Aggregate の GET だけ。DSL にクエリ（Read model）がないので一覧のクエリは生成しない（`<aggregate>Keys.lists()` を接頭辞に手で書く）。認証・認可はなく、ハンドラの前に置く。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
+- TypeScript の HTTP API（`typescript.api`）は Use case の POST と ID による Aggregate の GET だけ。DSL にクエリ（Read model）がないので一覧のクエリは生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可はなく、ハンドラの前に置く。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。
