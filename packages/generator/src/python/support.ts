@@ -384,6 +384,10 @@ function emit(e: TExpr, ctx: ExprContext): [string, Prec] {
       return [ctx.inputs?.has(e.name) ? `command.${e.name}` : e.name, ATOM];
     case "item":
       return ["item_", ATOM];
+    case "principal":
+      return [`principal.${e.member}`, ATOM];
+    case "hasRole":
+      return [`${pyString(e.role)} in principal.roles`, 3];
     case "enumValue":
       ctx.imports.from(ctx.typeModule("enum", e.enumName), e.enumName);
       return [`${e.enumName}.${enumMember(e.value)}`, ATOM];

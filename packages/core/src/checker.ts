@@ -59,7 +59,18 @@ export type TExpr = { type: Type } & (
   /** The current element inside a collection function; `depth` 0 is the outermost. */
   | { t: "item"; depth: number }
   | { t: "isNull"; negate: boolean; operand: TExpr }
+  /** `principal.id`, `principal.roles` or a declared claim `principal.<claim>` (authorization rules only). */
+  | { t: "principal"; member: string }
+  /** `has_role(principal, admin)`: the principal holds a declared role. */
+  | { t: "hasRole"; role: string }
 );
+
+/** What authorization rules (`allow_if`) may read about the caller (docs/09 §20). */
+export interface PrincipalEnv {
+  /** `principal.id`, `principal.roles` and the declared claims, with their types (optional claims wrapped). */
+  members: Map<string, Type>;
+  roles: string[];
+}
 
 /** A `field=value` argument; `fieldType` is the declared type of the field. */
 export interface NamedValue {
@@ -91,6 +102,8 @@ export interface ExprEnv {
   allowExtensions: boolean;
   /** Aggregate whose internal entities may be constructed (`OrderLine(...)`). Defaults to `self.aggregate`. */
   scopeAggregate?: string;
+  /** Allow `principal.*` and `has_role(principal, role)` (authorization rules). */
+  principal?: PrincipalEnv;
 }
 
 export function makeEnv(context: ContextIR, init: Partial<ExprEnv> = {}): ExprEnv {
@@ -164,6 +177,7 @@ class Checker {
     if (e.t === "param") return `param.${e.name}`;
     if (e.t === "local") return `local.${e.name}`;
     if (e.t === "item") return `item.${e.depth}`;
+    if (e.t === "principal") return `principal.${e.member}`;
     return undefined;
   }
 
@@ -327,6 +341,13 @@ class Checker {
       const g = env.self.aggregate.stateGuards.find((x) => x.name === n);
       if (g) return this.guardRef(node, env.self.aggregate, g, undefined, []);
     }
+    if (n === "principal" && env.principal) {
+      const claims = [...env.principal.members.keys()].filter((k) => k !== "id" && k !== "roles");
+      return this.fail(node, '"principal" is read through its members', `Use principal.id, principal.roles${claims.map((k) => `, principal.${k}`).join("")} or has_role(principal, ${env.principal.roles[0] ?? "role"})`);
+    }
+    if (n === "principal") {
+      return this.fail(node, '"principal" is only available in authorization rules (allow_if)', "Declare security and use it in a use case's or aggregate's authorize.allow_if");
+    }
     if (env.allowPorts && (n === "clock" || n === "ids")) {
       return this.fail(node, n === "clock" ? 'Use "clock.now"' : 'Use "ids.new"');
     }
@@ -366,6 +387,17 @@ class Checker {
             return this.fail(node, `${en.name} has no value "${node.name}"`, `Values: ${en.values.join(", ")}`);
           }
           return { t: "enumValue", enumName: en.name, value: node.name, type: { k: "enum", name: en.name } };
+        }
+        if (objName === "principal" && env.principal) {
+          const t = env.principal.members.get(node.name);
+          if (!t) {
+            const s = closest(node.name, [...env.principal.members.keys()]);
+            return this.fail(node, `The principal has no member "${node.name}"`, s ? `Did you mean "${s}"?` : `Members: ${[...env.principal.members.keys()].join(", ")} (declare more under security.principal.claims)`);
+          }
+          return this.narrow({ t: "principal", member: node.name, type: t }, narrowed);
+        }
+        if (objName === "principal") {
+          return this.fail(node, '"principal" is only available in authorization rules (allow_if)', "Declare security and use it in a use case's or aggregate's authorize.allow_if");
         }
         if (objName === "clock" || objName === "ids") {
           if (!env.allowPorts) {
@@ -441,6 +473,7 @@ class Checker {
         env.context.enums.some((e) => e.name === n);
       if (isType(name)) return this.checkConstruct(node, name, narrowed);
       if (name === "with") return this.checkWith(node, narrowed);
+      if (name === "has_role" && env.principal && !node.named) return this.checkHasRole(node, env.principal);
       if (node.named) {
         return this.fail(node, `${name}() does not take named arguments`, "Named arguments (field=value) are for building values: Money(amount=1, currency=\"JPY\") and with(entity, field=value)");
       }
@@ -516,6 +549,21 @@ class Checker {
       }
     }
     return this.fail(node, "Only named functions and state guards can be called");
+  }
+
+  /** `has_role(principal, admin)` or `has_role(principal, "admin")`: the role must be declared under security.roles. */
+  checkHasRole(node: Extract<Expr, { t: "call" }>, principal: PrincipalEnv): TExpr | undefined {
+    const usage = `has_role(principal, ${principal.roles[0] ?? "role"})`;
+    const [who, role] = node.args;
+    if (node.args.length !== 2 || !who || !role) return this.fail(node, "has_role() takes 2 arguments", `Usage: ${usage}`);
+    if (who.t !== "name" || who.name !== "principal") return this.fail(who, 'The first argument of has_role() is "principal"', `Usage: ${usage}`);
+    const name = role.t === "name" ? role.name : role.t === "lit" && role.kind === "string" ? String(role.value) : undefined;
+    if (name === undefined) return this.fail(role, "The role of has_role() is a declared role name", `Usage: ${usage}`);
+    if (!principal.roles.includes(name)) {
+      const s = closest(name, principal.roles);
+      return this.fail(role, `Unknown role "${name}"`, s ? `Did you mean "${s}"?` : `Declared roles: ${principal.roles.join(", ")}`);
+    }
+    return { t: "hasRole", role: name, type: BOOL };
   }
 
   /** Checks `field=value` arguments against a field map (used by constructors and `with`). */
@@ -901,6 +949,8 @@ export function exprChildren(e: TExpr): TExpr[] {
     case "enumValue":
     case "port":
     case "item":
+    case "principal":
+    case "hasRole":
       return [];
   }
 }

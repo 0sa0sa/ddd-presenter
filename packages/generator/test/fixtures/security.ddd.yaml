@@ -1,0 +1,241 @@
+schema_version: 1
+project: secure-hiring
+description: Authentication, authorization (roles, allow_if over inputs and loaded aggregates) and rate limiting
+generation:
+  package: secure_hiring
+
+security:
+  roles: [admin, staff, candidate]
+  principal:
+    id: UUID
+    claims:
+      - { name: company_id, type: UUID, required: false, claim: "https://example.com/company_id" }
+      - { name: email, type: String, required: false }
+  authentication:
+    scheme: bearer_jwt
+    issuer: https://auth.example.com/
+    audience: hiring-api
+    algorithms: [RS256, ES256]
+    roles_claim: roles
+    clock_tolerance: 30
+  rate_limits:
+    default: { requests: 60, per: minute, by: principal }
+
+contexts:
+  - name: Hiring
+    errors:
+      - { name: JobNotFound, code: job_not_found, message: job not found }
+      - { name: JobClosed, code: job_closed, message: the job is closed }
+    enums:
+      - { name: JobStatus, values: [open, closed] }
+      - { name: ApplicationStatus, values: [submitted, withdrawn] }
+    aggregates:
+      - name: Job
+        identity: id
+        authorize:
+          roles: [admin, staff, candidate]
+          allow_if: status == open or has_role(principal, admin) or (principal.company_id != null and principal.company_id == company_id)
+        fields:
+          - { name: id, type: UUID }
+          - { name: company_id, type: UUID }
+          - { name: title, type: String }
+          - { name: status, type: JobStatus }
+        state_guards:
+          - { name: is_open, expression: status == open, error: JobClosed }
+        factories:
+          - name: post
+            parameters: [{ name: id, type: UUID }, { name: company_id, type: UUID }, { name: title, type: String }]
+            fields: { id: id, company_id: company_id, title: title, status: open }
+            emits: [{ name: JobPosted, fields: [id, company_id] }]
+        operations:
+          - name: close
+            parameters: [{ name: at, type: DateTime }]
+            require: [is_open]
+            changes: { status: closed }
+            emits: [{ name: JobWasClosed, fields: [id, at] }]
+      - name: Application
+        identity: id
+        authorize:
+          allow_if: principal.id == candidate_id or has_role(principal, admin)
+        rate_limit: { requests: 30, per: minute, by: principal }
+        fields:
+          - { name: id, type: UUID }
+          - { name: job_id, type: UUID }
+          - { name: candidate_id, type: UUID }
+          - { name: status, type: ApplicationStatus }
+        factories:
+          - name: submit
+            parameters: [{ name: id, type: UUID }, { name: job_id, type: UUID }, { name: candidate_id, type: UUID }]
+            fields: { id: id, job_id: job_id, candidate_id: candidate_id, status: submitted }
+            emits: [{ name: ApplicationSubmitted, fields: [id, job_id, candidate_id] }]
+      - name: AuditEntry
+        identity: id
+        authorize: { roles: [admin] }
+        rate_limit: none
+        fields:
+          - { name: id, type: UUID }
+          - { name: job_id, type: UUID }
+          - { name: recorded_at, type: DateTime }
+        factories:
+          - name: record
+            parameters: [{ name: id, type: UUID }, { name: job_id, type: UUID }, { name: recorded_at, type: DateTime }]
+            fields: { id: id, job_id: job_id, recorded_at: recorded_at }
+            emits: [{ name: AuditRecorded, fields: [id, job_id] }]
+    use_cases:
+      - name: post_job
+        command: PostJob
+        idempotency_key: request_id
+        authorize:
+          roles: [admin, staff]
+          allow_if: has_role(principal, admin) or (principal.company_id != null and principal.company_id == company_id)
+        rate_limit: { requests: 5, per: minute, by: principal }
+        input:
+          - { name: request_id, type: UUID }
+          - { name: company_id, type: UUID }
+          - { name: title, type: String }
+        steps:
+          - create: { aggregate: Job, factory: post, as: job, args: { id: ids.new, company_id: company_id, title: title } }
+          - save: job
+          - publish_after_commit: JobPosted
+          - return: job.id
+        scenarios:
+          - name: staff_posts_for_own_company
+            given:
+              ids: ["00000000-0000-4000-8000-0000000000a1"]
+              principal: { id: "00000000-0000-4000-8000-000000000011", roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c1" } }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner } }
+            then:
+              returns: "00000000-0000-4000-8000-0000000000a1"
+              emits: [{ event: JobPosted, fields: { company_id: "00000000-0000-4000-8000-0000000000c1" } }]
+          - name: staff_cannot_post_for_another_company
+            given:
+              ids: ["00000000-0000-4000-8000-0000000000a1"]
+              principal: { id: "00000000-0000-4000-8000-000000000011", roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c2" } }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner } }
+            then: { raises: NotAuthorized, emits: [] }
+          - name: anonymous_caller_is_unauthenticated
+            given: { principal: null }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner } }
+            then: { raises: Unauthenticated }
+
+      - name: close_job
+        command: CloseJob
+        authorize:
+          roles: [admin, staff]
+          allow_if: has_role(principal, admin) or (principal.company_id != null and principal.company_id == job.company_id)
+        input: [{ name: job_id, type: UUID }]
+        steps:
+          - load: { aggregate: Job, by: job_id, as: job, not_found: JobNotFound }
+          - invoke: { target: job, operation: close, args: { at: clock.now } }
+          - save: job
+          - publish_after_commit: JobWasClosed
+        scenarios:
+          - name: admin_closes_any_job
+            given:
+              clock: "2026-02-01T09:00:00+00:00"
+              principal: { roles: [admin] }
+              aggregates:
+                - { type: Job, fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1" } }
+            then:
+              state: [{ aggregate: Job, id: "00000000-0000-4000-8000-0000000000a1", fields: { status: closed } }]
+              emits: [{ event: JobWasClosed }]
+          - name: staff_of_another_company_cannot_close
+            given:
+              clock: "2026-02-01T09:00:00+00:00"
+              principal: { roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c2" } }
+              aggregates:
+                - { type: Job, fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1" } }
+            then:
+              raises: NotAuthorized
+              state: [{ aggregate: Job, id: "00000000-0000-4000-8000-0000000000a1", fields: { status: open } }]
+              emits: []
+          - name: unknown_job_is_not_found
+            given: { clock: "2026-02-01T09:00:00+00:00", principal: { roles: [admin] } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000ff" } }
+            then: { raises: JobNotFound }
+
+      - name: apply_to_job
+        command: ApplyToJob
+        authorize:
+          roles: [candidate]
+          allow_if: principal.id == candidate_id and job.is_open
+        rate_limit: { requests: 3, per: hour, by: principal }
+        input:
+          - { name: job_id, type: UUID }
+          - { name: candidate_id, type: UUID }
+        steps:
+          - load: { aggregate: Job, by: job_id, as: job, not_found: JobNotFound }
+          - create: { aggregate: Application, factory: submit, as: application, args: { id: ids.new, job_id: job.id, candidate_id: candidate_id } }
+          - save: application
+          - publish_after_commit: ApplicationSubmitted
+          - return: application.id
+        scenarios:
+          - name: candidate_applies
+            given:
+              ids: ["00000000-0000-4000-8000-0000000000b1"]
+              principal: { id: "00000000-0000-4000-8000-000000000021", roles: [candidate] }
+              aggregates:
+                - { type: Job, fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1", candidate_id: "00000000-0000-4000-8000-000000000021" } }
+            then:
+              returns: "00000000-0000-4000-8000-0000000000b1"
+              state: [{ aggregate: Application, id: "00000000-0000-4000-8000-0000000000b1", fields: { status: submitted } }]
+          - name: candidate_cannot_apply_for_someone_else
+            given:
+              ids: ["00000000-0000-4000-8000-0000000000b1"]
+              principal: { id: "00000000-0000-4000-8000-000000000021", roles: [candidate] }
+              aggregates:
+                - { type: Job, fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1", candidate_id: "00000000-0000-4000-8000-000000000099" } }
+            then: { raises: NotAuthorized, emits: [] }
+
+      - name: check_job_open
+        command: CheckJobOpen
+        authorize: public
+        rate_limit: { requests: 100, per: minute, by: ip }
+        input: [{ name: job_id, type: UUID }]
+        steps:
+          - load: { aggregate: Job, by: job_id, as: job, not_found: JobNotFound }
+          - return: job.is_open
+        scenarios:
+          - name: open_job_is_open
+            given:
+              aggregates:
+                - { type: Job, fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open } }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1" } }
+            then: { returns: true }
+
+      - name: record_audit
+        command: RecordAudit
+        authorize: internal
+        input:
+          - { name: job_id, type: UUID }
+          - { name: at, type: DateTime }
+        steps:
+          - create: { aggregate: AuditEntry, factory: record, as: entry, args: { id: ids.new, job_id: job_id, recorded_at: at } }
+          - save: entry
+          - return: entry.id
+        scenarios:
+          - name: closure_is_audited
+            given: { ids: ["00000000-0000-4000-8000-0000000000e1"] }
+            when: { input: { job_id: "00000000-0000-4000-8000-0000000000a1", at: "2026-02-01T09:00:00+00:00" } }
+            then: { returns: "00000000-0000-4000-8000-0000000000e1" }
+
+      - name: who_am_i
+        command: WhoAmI
+        authorize: authenticated
+        steps:
+          - return: true
+        scenarios:
+          - name: any_principal_may_ask
+            given: { principal: { roles: [] } }
+            when: { input: {} }
+            then: { returns: true }
+
+    policies:
+      - name: audit_closures
+        when: JobWasClosed
+        run: record_audit
+        args: { job_id: event.id, at: event.at }

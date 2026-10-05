@@ -13,12 +13,25 @@ import type {
   PolicyIR,
   RelationshipIR,
   ScenarioThenIR,
+  SecurityIR,
   StepIR,
   UseCaseIR,
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
 import { parseModel, type ParseResult } from "./parse.ts";
+import { parseExpr, type Expr } from "./expr.ts";
+import {
+  checkAggregateAuthorize,
+  checkRateLimitUse,
+  checkRoles,
+  checkSecurityBlock,
+  claimType,
+  leadingLoads,
+  principalEnv,
+  requiresPrincipal,
+  SECURITY_TYPE_NAMES,
+} from "./security.ts";
 import { assignable, closest, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -232,13 +245,14 @@ class Validator {
       const snake = toSnake(ctx.name);
       if (seen.has(snake)) this.bag.error("duplicate-name", `Duplicate context "${ctx.name}"`, [...ctx.path, "name"]);
       seen.set(snake, ctx.path);
-      this.contexts.set(ctx.name, new ContextValidator(this.bag, ctx).run());
+      this.contexts.set(ctx.name, new ContextValidator(this.bag, ctx, m.security).run());
     }
     // Context map and policies need every context's events and use cases.
     this.checkRelationships();
     for (const ctx of m.contexts) this.checkPolicies(ctx);
     this.checkPolicyCycles();
     this.checkContractUsage();
+    checkSecurityBlock(this.bag, m);
     if (m.generation.target === "typescript") this.checkTypeScriptNames();
   }
 
@@ -666,6 +680,7 @@ class ContextValidator {
   constructor(
     readonly bag: DiagnosticBag,
     readonly ctx: ContextIR,
+    readonly security?: SecurityIR,
   ) {}
 
   el(...parts: (string | undefined)[]): string {
@@ -702,6 +717,9 @@ class ContextValidator {
     const reg = (name: string, kind: string, path: Path) => {
       if (!PASCAL.test(name)) {
         this.bag.error("invalid-name", `${kind} name "${name}" must be PascalCase`, path, { element: this.el(name) });
+      }
+      if (this.security && (SECURITY_TYPE_NAMES as readonly string[]).includes(name)) {
+        this.bag.error("reserved-name", `"${name}" is defined by the generated security code`, path, { element: this.el(name), hint: `Rename the ${kind}` });
       }
       if (RESERVED_TYPES.has(name)) {
         this.bag.error("reserved-name", `"${name}" is reserved by the generator`, path, { element: this.el(name), hint: `Rename the ${kind}` });
@@ -1071,6 +1089,7 @@ class ContextValidator {
 
     const selfEnv = () => makeEnv(this.ctx, { self: { name: ag.name, fields: types, aggregate: ag } });
     this.checkInvariants(ag.invariants, selfEnv(), el, types, false);
+    this.checkAggregateAccess(ag, types, el);
 
     for (const g of ag.stateGuards) {
       const gel = `${el} › ${g.name}`;
@@ -1265,6 +1284,120 @@ class ContextValidator {
     }
   }
 
+  // -- authorization (docs/09 §20) ---------------------------------------------
+
+  /** `authorize` / `rate_limit` of an aggregate (its read access); `allow_if` reads the aggregate's fields bare. */
+  checkAggregateAccess(ag: AggregateIR, types: Map<string, Type>, el: string): void {
+    const sec = this.security;
+    if (!sec) return;
+    if (!ag.authorize) {
+      this.bag.error("missing-authorize", `Aggregate ${ag.name} declares no authorize; with security declared, reading it is denied until you decide who may`, [...ag.path, "name"], {
+        element: el,
+        hint: "Add authorize: public, authenticated, or { roles: [...], allow_if: <rule over its fields> }",
+      });
+      return;
+    }
+    checkAggregateAuthorize(this.bag, ag, el);
+    checkRoles(this.bag, sec, ag.authorize, el);
+    checkRateLimitUse(this.bag, ag, el);
+    if (ag.authorize.allowIf !== undefined) {
+      const env = makeEnv(this.ctx, { self: { name: ag.name, fields: types }, principal: principalEnv(sec) });
+      this.expr(ag.authorize.allowIf, [...ag.authorize.path, "allow_if"], env, T.Boolean, el);
+    }
+  }
+
+  /**
+   * `authorize` / `rate_limit` of a use case. Deny by default: with security declared every use case states who may
+   * run it. `allow_if` may read the inputs and the variables of the leading load steps (the only steps that run before
+   * it), so no generated path changes anything before authorization.
+   */
+  checkUseCaseAccess(uc: UseCaseIR, inputTypes: Map<string, Type>, el: string): void {
+    const sec = this.security;
+    if (!sec) return;
+    const a = uc.authorize;
+    if (!a) {
+      this.bag.error("missing-authorize", `Use case ${uc.name} declares no authorize; with security declared it is denied until you decide who may run it`, [...uc.path, "name"], {
+        element: el,
+        hint: "Add authorize: public, internal (policies and jobs only), authenticated, or { roles: [...], allow_if: <rule> }",
+      });
+      return;
+    }
+    checkRoles(this.bag, sec, a, el);
+    checkRateLimitUse(this.bag, uc, el);
+    if (a.allowIf === undefined) return;
+    const leading = leadingLoads(uc.steps);
+    const locals = new Map(inputTypes);
+    for (const l of leading) {
+      if (this.ctx.aggregates.some((x) => x.name === l.aggregate)) locals.set(l.as, { k: "aggregate", name: l.aggregate });
+    }
+    const path = [...a.path, "allow_if"];
+    // A variable bound later (after a non-load step, by create / let, or inside a branch) is not available yet.
+    const later = new Set<string>();
+    const collect = (steps: StepIR[]) => {
+      for (const s of steps) {
+        if ((s.kind === "load" || s.kind === "create") && !locals.has(s.as)) later.add(s.as);
+        if (s.kind === "let" && !locals.has(s.name)) later.add(s.name);
+        if (s.kind === "if") {
+          collect(s.then);
+          collect(s.else);
+        }
+      }
+    };
+    collect(uc.steps);
+    let ast: Expr | undefined;
+    try {
+      ast = parseExpr(a.allowIf);
+    } catch {
+      ast = undefined;
+    }
+    const used = ast ? [...namesOf(ast)].filter((n) => later.has(n)) : [];
+    if (used.length) {
+      this.bag.error("authorize-too-late", `allow_if uses ${used.map((n) => `"${n}"`).join(", ")}, which a later step binds; authorization runs before every step that is not a leading load`, path, {
+        element: el,
+        hint: "Move the load steps it needs to the start of steps, or check the condition with an if + fail step instead",
+      });
+      return;
+    }
+    this.expr(a.allowIf, path, makeEnv(this.ctx, { locals, allowReceiverGuards: true, principal: principalEnv(sec) }), T.Boolean, el);
+  }
+
+  /** `given.principal` of a use case scenario: declared roles, an id and claims of the declared types. */
+  checkScenarioPrincipal(uc: UseCaseIR, sc: UseCaseScenarioIR, el: string): void {
+    const sec = this.security;
+    if (!sec) return;
+    const p = sc.given.principal;
+    const needs = requiresPrincipal(uc);
+    if (sc.then.raises === "Unauthenticated" && !p?.anonymous) {
+      this.bag.error("invalid-scenario", "Only an anonymous caller (given.principal: null) is Unauthenticated", [...sc.then.path, "raises"], { element: el });
+    }
+    if (!p) return;
+    if (!needs) {
+      this.bag.warning("unused-principal", `Use case ${uc.name} is ${uc.authorize?.kind ?? "not authorized"}: it runs without a principal, so given.principal is ignored`, p.path, { element: el });
+      return;
+    }
+    if (p.anonymous) {
+      if (sc.then.raises !== "Unauthenticated") {
+        this.bag.error("invalid-scenario", `${uc.name} needs an authenticated principal; an anonymous caller raises Unauthenticated`, [...sc.then.path], { element: el, hint: "Expect raises: Unauthenticated" });
+      }
+      return;
+    }
+    if (p.id !== undefined) this.checkValue(p.id, sec.principal.idType === "UUID" ? T.UUID : T.String, [...p.path, "id"], el);
+    p.roles.forEach((r, i) => {
+      if (!sec.roles.includes(r)) {
+        const s = closest(r, sec.roles);
+        this.bag.error("unknown-role", `Unknown role "${r}"`, [...p.path, "roles", i], { element: el, hint: s ? `Did you mean "${s}"?` : `Declared roles: ${sec.roles.join(", ")}` });
+      }
+    });
+    for (const [k, v] of Object.entries(p.claims)) {
+      const c = sec.principal.claims.find((x) => x.name === k);
+      const t = c ? claimType(c.type) : undefined;
+      if (!c) {
+        const s = closest(k, sec.principal.claims.map((x) => x.name));
+        this.bag.error("unknown-field", `The principal has no claim "${k}"`, [...p.path, "claims", k], { element: el, hint: s ? `Did you mean "${s}"?` : "Declare it under security.principal.claims" });
+      } else if (t) this.checkValue(v, c.required ? t : { k: "optional", inner: t }, [...p.path, "claims", k], el);
+    }
+  }
+
   // -- extension points -----------------------------------------------------
 
   checkExtensionPoints(): void {
@@ -1274,6 +1407,9 @@ class ContextValidator {
       this.checkSnake(x.name, "Extension point name", [...x.path, "name"], el);
       if ((BUILTIN_FUNCTIONS as readonly string[]).includes(x.name)) {
         this.bag.error("reserved-name", `"${x.name}" is a built-in rule function`, [...x.path, "name"], { element: el });
+      }
+      if (this.security && x.name === "has_role") {
+        this.bag.error("reserved-name", '"has_role" is the built-in role check of authorization rules', [...x.path, "name"], { element: el });
       }
       this.params(x.parameters, el);
       const rt = this.resolve(x.returns, [...x.path, "returns"], undefined, el);
@@ -1309,6 +1445,13 @@ class ContextValidator {
         element: el,
         hint: "Add an input the caller repeats on retry (e.g. request_id: UUID) and name it in idempotency_key",
       });
+    }
+    if (this.security) {
+      for (const f of uc.input) {
+        if (f.name === "principal") {
+          this.bag.error("reserved-name", '"principal" is the caller of the use case once security is declared', [...f.path, "name"], { element: el, hint: "Rename the input (e.g. principal_id)" });
+        }
+      }
     }
     if (uc.steps.length === 0) this.bag.warning("empty-use-case", `Use case ${uc.name} has no steps`, [...uc.path, "steps"], { element: el });
 
@@ -1359,6 +1502,7 @@ class ContextValidator {
         hint: "Aggregates are consistency boundaries; prefer one aggregate per transaction and domain events for the rest",
       });
     }
+    this.checkUseCaseAccess(uc, inputTypes, el);
     info.repositories = uniqSorted(info.repositories);
     info.extensions = uniqSorted(info.extensions);
     info.publishes = uniqSorted(info.publishes);
@@ -1596,6 +1740,7 @@ class ContextValidator {
     }
     state.declared.add(name);
     if (name === "clock" || name === "ids") this.bag.error("reserved-name", `"${name}" is reserved for ports`, path, { element: el });
+    else if (name === "principal" && this.security) this.bag.error("reserved-name", '"principal" is the caller of the use case once security is declared', path, { element: el });
     else if (USE_CASE_RESERVED.has(name)) this.bag.error("reserved-name", `"${name}" is reserved by the generated use case code`, path, { element: el });
     else this.checkLocalName(name, "Variable name", path, el);
     return true;
@@ -1691,8 +1836,9 @@ class ContextValidator {
     }
   }
 
-  checkThenCommon(then: ScenarioThenIR, el: string): void {
-    if (then.raises !== undefined && !["ConstraintViolation", "AggregateNotFound"].includes(then.raises)) this.checkErrorRef(then.raises, [...then.path, "raises"], el);
+  checkThenCommon(then: ScenarioThenIR, el: string, securityErrors = false): void {
+    const builtin = ["ConstraintViolation", "AggregateNotFound", ...(securityErrors ? ["NotAuthorized", "Unauthenticated"] : [])];
+    if (then.raises !== undefined && !builtin.includes(then.raises)) this.checkErrorRef(then.raises, [...then.path, "raises"], el);
     const empty = then.raises === undefined && then.state === undefined && then.emits === undefined && !then.hasReturns;
     if (empty) {
       this.bag.error("ambiguous-scenario", "then states no expected result", then.path, {
@@ -1793,7 +1939,8 @@ class ContextValidator {
     }
     this.checkRecord(sc.when.input, this.fieldTypes.get(uc.command) ?? new Map(), sc.when.path, el, uc.command, true);
     const then = sc.then;
-    this.checkThenCommon(then, el);
+    this.checkThenCommon(then, el, !!this.security && requiresPrincipal(uc));
+    this.checkScenarioPrincipal(uc, sc, el);
     if (then.hasReturns) {
       if (!info?.returnType) this.bag.error("invalid-scenario", `Use case ${uc.name} returns nothing`, [...then.path, "returns"], { element: el });
       else if (then.raises) this.bag.error("invalid-scenario", "A failing scenario cannot also expect a return value", [...then.path, "returns"], { element: el });
@@ -1840,6 +1987,37 @@ interface StepState {
   aggregatesTouched?: Map<string, string>;
   /** Every variable name declared so far in the use case (shared by all branches). */
   declared: Set<string>;
+}
+
+/** Bare names an expression refers to (not member names, not named-argument keys). */
+function namesOf(e: Expr, out = new Set<string>()): Set<string> {
+  switch (e.t) {
+    case "name":
+      out.add(e.name);
+      break;
+    case "member":
+      namesOf(e.object, out);
+      break;
+    case "call":
+      namesOf(e.callee, out);
+      e.args.forEach((a) => namesOf(a, out));
+      e.named?.forEach((a) => namesOf(a.value, out));
+      break;
+    case "not":
+    case "neg":
+      namesOf(e.operand, out);
+      break;
+    case "list":
+      e.items.forEach((a) => namesOf(a, out));
+      break;
+    case "binary":
+      namesOf(e.left, out);
+      namesOf(e.right, out);
+      break;
+    case "lit":
+      break;
+  }
+  return out;
 }
 
 function cloneState(s: StepState): StepState {

@@ -24,6 +24,10 @@ export class TsPaths {
   get adapters(): string {
     return `${this.generated}/adapters`;
   }
+  /** Roles, the principal and the authorization checks (`security`, docs/09 §20). */
+  get security(): string {
+    return `${this.generated}/security`;
+  }
   contextBase(context: string): string {
     return `${this.generated}/${kebab(context)}`;
   }
@@ -72,6 +76,10 @@ export class TsLayout extends TsPaths {
   }
   get policies(): string {
     return `${this.base}/application/policies`;
+  }
+  /** Authorized loading of aggregates by identity (`authorize` on aggregates). */
+  get readAccess(): string {
+    return `${this.base}/application/read-access`;
   }
   get contextTesting(): string {
     return `${this.base}/testing`;

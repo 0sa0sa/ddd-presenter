@@ -3,6 +3,7 @@ import { DiagnosticBag, type Diagnostic, type Path } from "./diagnostics.ts";
 import type {
   AggregateIR,
   AggregateScenarioIR,
+  AuthorizeIR,
   CheckTiming,
   Constraints,
   ContextIR,
@@ -21,14 +22,17 @@ import type {
   PolicyIR,
   RelationshipIR,
   RelationshipPattern,
+  RateLimitIR,
+  ScenarioPrincipalIR,
   ScenarioThenIR,
+  SecurityIR,
   StateGuardIR,
   StepIR,
   UseCaseIR,
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
-import { API_CLIENTS, GENERATION_TARGETS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
+import { API_CLIENTS, AUTH_SCHEMES, GENERATION_TARGETS, RATE_LIMIT_KEYS, RATE_LIMIT_UNITS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -373,7 +377,7 @@ function readAggregateScenario(r: Reader, value: unknown, path: Path): Aggregate
 function readAggregate(r: Reader, value: unknown, path: Path): AggregateIR | undefined {
   const o = r.obj(value, path, "aggregate");
   if (!o) return undefined;
-  const base = readEntity(r, o, path, ["entities", "state_guards", "factories", "operations", "scenarios"]);
+  const base = readEntity(r, o, path, ["entities", "state_guards", "factories", "operations", "scenarios", "authorize", "rate_limit"]);
   if (!base) return undefined;
   const entities = r.list(o, "entities", path).flatMap(({ value: ev, path: ep }) => {
     const eo = r.obj(ev, ep, "entity");
@@ -426,7 +430,7 @@ function readAggregate(r: Reader, value: unknown, path: Path): AggregateIR | und
     ];
   });
   const scenarios = r.list(o, "scenarios", path).flatMap(({ value: sv, path: sp }) => readAggregateScenario(r, sv, sp) ?? []);
-  return { ...base, entities, stateGuards, factories, operations, scenarios };
+  return { ...base, entities, stateGuards, factories, operations, scenarios, ...readAccess(r, o, path) };
 }
 
 function readSteps(r: Reader, items: { value: unknown; path: Path }[]): StepIR[] {
@@ -535,7 +539,8 @@ function readUseCaseScenario(r: Reader, value: unknown, path: Path): UseCaseScen
   if (!name) return undefined;
   const gpath = [...path, "given"];
   const go = o.given === undefined ? {} : r.obj(o.given, gpath, "given") ?? {};
-  r.keys(go, ["clock", "ids", "aggregates", "extensions"], gpath, "given");
+  r.keys(go, ["clock", "ids", "aggregates", "extensions", "principal"], gpath, "given");
+  const principal = readScenarioPrincipal(r, go, gpath);
   const aggregates = r.list(go, "aggregates", gpath).flatMap(({ value: av, path: ap }) => {
     const ao = r.obj(av, ap, "given aggregate");
     if (!ao) return [];
@@ -560,6 +565,7 @@ function readUseCaseScenario(r: Reader, value: unknown, path: Path): UseCaseScen
       ids: r.strList(go, "ids", gpath),
       aggregates,
       extensions: r.dataMap(go, "extensions", gpath),
+      ...(principal ? { principal } : {}),
       path: gpath,
     },
     when: { input: r.dataMap(wo, "input", wpath), path: [...wpath, "input"] },
@@ -573,7 +579,7 @@ function readUseCase(r: Reader, value: unknown, path: Path): UseCaseIR | undefin
   if (!o) return undefined;
   r.keys(
     o,
-    ["name", "description", "actor", "command", "input", "transaction", "idempotency_key", "retry", "steps", "scenarios"],
+    ["name", "description", "actor", "command", "input", "transaction", "idempotency_key", "retry", "authorize", "rate_limit", "steps", "scenarios"],
     path,
     "use case",
   );
@@ -595,6 +601,7 @@ function readUseCase(r: Reader, value: unknown, path: Path): UseCaseIR | undefin
     retry: r.bool(o, "retry", path, false),
     steps: readSteps(r, r.list(o, "steps", path)),
     scenarios: r.list(o, "scenarios", path).flatMap(({ value: sv, path: sp }) => readUseCaseScenario(r, sv, sp) ?? []),
+    ...readAccess(r, o, path),
     path,
   };
 }
@@ -735,6 +742,169 @@ function readApiSettings(r: Reader, bag: DiagnosticBag, value: unknown): ApiSett
     bag.error("invalid-value", `Unknown API client "${client}"`, [...path, "client"], { hint: `Use one of ${API_CLIENTS.join(", ")} (default tanstack-query)` });
   }
   return { basePath, client: "tanstack-query" };
+}
+
+// ---------------------------------------------------------------------------
+// Security (docs/09 §20): shapes only; meaning is checked by validate.ts / security.ts
+// ---------------------------------------------------------------------------
+
+function readSecurity(r: Reader, value: unknown): SecurityIR | undefined {
+  if (value === undefined || value === null) return undefined;
+  const path = ["security"];
+  const o = r.obj(value, path, "security");
+  if (!o) return undefined;
+  r.keys(o, ["roles", "principal", "authentication", "rate_limits"], path, "security");
+  const ppath = [...path, "principal"];
+  const po = o.principal === undefined || o.principal === null ? {} : r.obj(o.principal, ppath, "security.principal") ?? {};
+  r.keys(po, ["id", "claims"], ppath, "security.principal");
+  const idType = r.str(po, "id", ppath, false) ?? "String";
+  if (idType !== "String" && idType !== "UUID") {
+    r.bag.error("invalid-value", `principal.id must be String or UUID, got "${idType}"`, [...ppath, "id"], {
+      hint: "The JWT subject (sub) is a string; declare UUID when your identity provider issues UUIDs",
+    });
+  }
+  const claims = r.list(po, "claims", ppath).flatMap(({ value: cv, path: cp }) => {
+    const co = r.obj(cv, cp, "principal claim");
+    if (!co) return [];
+    r.keys(co, ["name", "type", "required", "claim", "description"], cp, "principal claim");
+    const name = r.str(co, "name", cp, true);
+    const type = r.str(co, "type", cp, true);
+    if (!name || !type) return [];
+    const claim = r.str(co, "claim", cp, false);
+    const description = r.str(co, "description", cp, false);
+    return [
+      {
+        name,
+        type,
+        required: r.bool(co, "required", cp, true),
+        ...(claim !== undefined ? { claim } : {}),
+        ...(description !== undefined ? { description } : {}),
+        path: cp,
+      },
+    ];
+  });
+  let authentication: SecurityIR["authentication"];
+  if (o.authentication !== undefined && o.authentication !== null) {
+    const apath = [...path, "authentication"];
+    const ao = r.obj(o.authentication, apath, "security.authentication");
+    if (ao) {
+      r.keys(ao, ["scheme", "issuer", "audience", "algorithms", "roles_claim", "clock_tolerance"], apath, "security.authentication");
+      const scheme = r.str(ao, "scheme", apath, false) ?? "bearer_jwt";
+      if (!(AUTH_SCHEMES as readonly string[]).includes(scheme)) {
+        r.bag.error("invalid-value", `Unknown authentication scheme "${scheme}"`, [...apath, "scheme"], {
+          hint: `Use one of ${AUTH_SCHEMES.join(", ")} (custom: implement the Authenticator port yourself)`,
+        });
+      }
+      const tolerance = ao.clock_tolerance ?? 30;
+      if (typeof tolerance !== "number" || !Number.isInteger(tolerance) || tolerance < 0 || tolerance > 300) {
+        r.bag.error("invalid-value", "clock_tolerance must be a whole number of seconds between 0 and 300", [...apath, "clock_tolerance"], {
+          hint: "RFC 8725 recommends a small leeway; 30 seconds is the default",
+        });
+      }
+      const issuer = r.str(ao, "issuer", apath, false);
+      const audience = r.str(ao, "audience", apath, false);
+      authentication = {
+        scheme: scheme === "custom" ? "custom" : "bearer_jwt",
+        ...(issuer !== undefined ? { issuer } : {}),
+        ...(audience !== undefined ? { audience } : {}),
+        algorithms: ao.algorithms === undefined ? ["RS256"] : r.strList(ao, "algorithms", apath),
+        rolesClaim: r.str(ao, "roles_claim", apath, false) ?? "roles",
+        clockTolerance: typeof tolerance === "number" && Number.isInteger(tolerance) ? tolerance : 30,
+        path: apath,
+      };
+    }
+  }
+  const rateLimits: SecurityIR["rateLimits"] = {};
+  if (o.rate_limits !== undefined && o.rate_limits !== null) {
+    const rpath = [...path, "rate_limits"];
+    const ro = r.obj(o.rate_limits, rpath, "security.rate_limits");
+    if (ro) {
+      r.keys(ro, ["default"], rpath, "security.rate_limits");
+      if (ro.default !== undefined && ro.default !== null) {
+        const d = readRateLimit(r, ro.default, [...rpath, "default"]);
+        if (d === "none") r.bag.error("invalid-value", 'rate_limits.default cannot be "none"; leave it out for no default limit', [...rpath, "default"]);
+        else if (d) rateLimits.default = d;
+      }
+    }
+  }
+  return {
+    roles: r.strList(o, "roles", path),
+    principal: { idType: idType === "UUID" ? "UUID" : "String", claims, path: ppath },
+    ...(authentication ? { authentication } : {}),
+    rateLimits,
+    path,
+  };
+}
+
+/** `authorize` and `rate_limit` of a use case or aggregate (only the keys that are present). */
+function readAccess(r: Reader, o: Obj, path: Path): { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" } {
+  const out: { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" } = {};
+  if (o.authorize !== undefined && o.authorize !== null) {
+    const a = readAuthorize(r, o.authorize, [...path, "authorize"]);
+    if (a) out.authorize = a;
+  }
+  if (o.rate_limit !== undefined && o.rate_limit !== null) {
+    const l = readRateLimit(r, o.rate_limit, [...path, "rate_limit"]);
+    if (l) out.rateLimit = l;
+  }
+  return out;
+}
+
+function readAuthorize(r: Reader, value: unknown, path: Path): AuthorizeIR | undefined {
+  if (typeof value === "string") {
+    if (value === "public" || value === "internal") return { kind: value, roles: [], path };
+    if (value === "authenticated") return { kind: "principal", roles: [], path };
+    r.bag.error("invalid-value", `Unknown authorize value "${value}"`, path, { hint: "Use public, internal, authenticated, or { roles: [...], allow_if: <rule> }" });
+    return undefined;
+  }
+  const o = r.obj(value, path, "authorize");
+  if (!o) return undefined;
+  r.keys(o, ["roles", "allow_if"], path, "authorize");
+  const allowIf = r.expr(o, "allow_if", path, false);
+  if (o.roles === undefined && allowIf === undefined) {
+    r.bag.error("invalid-value", "authorize needs roles or allow_if", path, { hint: 'Write "authorize: authenticated" for any authenticated principal' });
+    return undefined;
+  }
+  return { kind: "principal", roles: r.strList(o, "roles", path), ...(allowIf !== undefined ? { allowIf } : {}), path };
+}
+
+function readRateLimit(r: Reader, value: unknown, path: Path): RateLimitIR | "none" | undefined {
+  if (value === "none") return "none";
+  if (typeof value === "string") {
+    r.bag.error("invalid-value", `Unknown rate_limit value "${value}"`, path, { hint: 'Use { requests: 5, per: minute, by: principal } or "none"' });
+    return undefined;
+  }
+  const o = r.obj(value, path, "rate_limit");
+  if (!o) return undefined;
+  r.keys(o, ["requests", "per", "by"], path, "rate_limit");
+  const requests = o.requests;
+  if (typeof requests !== "number" || !Number.isInteger(requests) || requests < 1 || requests > 1_000_000_000) {
+    r.bag.error("invalid-value", "rate_limit.requests must be a whole number of requests (at least 1)", requests === undefined ? path : [...path, "requests"]);
+    return undefined;
+  }
+  const per = r.str(o, "per", path, true);
+  if (per === undefined) return undefined;
+  if (!(RATE_LIMIT_UNITS as readonly string[]).includes(per)) {
+    r.bag.error("invalid-value", `Unknown rate limit unit "${per}"`, [...path, "per"], { hint: `Use one of ${RATE_LIMIT_UNITS.join(", ")}` });
+    return undefined;
+  }
+  const by = r.str(o, "by", path, false) ?? "principal";
+  if (!(RATE_LIMIT_KEYS as readonly string[]).includes(by)) {
+    r.bag.error("invalid-value", `Unknown rate limit key "${by}"`, [...path, "by"], { hint: `Use one of ${RATE_LIMIT_KEYS.join(", ")}` });
+    return undefined;
+  }
+  return { requests, per: per as RateLimitIR["per"], by: by as RateLimitIR["by"], path };
+}
+
+/** `given.principal`: `{ id, roles, claims }`, or `null` for an anonymous caller. */
+function readScenarioPrincipal(r: Reader, go: Obj, gpath: Path): ScenarioPrincipalIR | undefined {
+  if (!("principal" in go)) return undefined;
+  const path = [...gpath, "principal"];
+  if (go.principal === null) return { anonymous: true, roles: [], claims: {}, path };
+  const o = r.obj(go.principal, path, "given.principal");
+  if (!o) return undefined;
+  r.keys(o, ["id", "roles", "claims"], path, "given.principal");
+  return { anonymous: false, ...(o.id !== undefined ? { id: o.id } : {}), roles: r.strList(o, "roles", path), claims: r.dataMap(o, "claims", path), path };
 }
 
 function readRelationship(r: Reader, value: unknown, path: Path): RelationshipIR | undefined {
@@ -891,7 +1061,7 @@ export function parseModel(text: string): ParseResult {
   const root = r.obj(data, [], "model");
   let model: ModelIR | undefined;
   if (root) {
-    r.keys(root, ["schema_version", "project", "description", "generation", "contexts", "relationships"], [], "model");
+    r.keys(root, ["schema_version", "project", "description", "generation", "security", "contexts", "relationships"], [], "model");
     const version = root.schema_version;
     if (version === undefined) {
       bag.error("missing-key", 'Missing required key "schema_version"', []);
@@ -929,6 +1099,8 @@ export function parseModel(text: string): ParseResult {
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
       relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),
     };
+    const security = readSecurity(r, root.security);
+    if (security) model.security = security;
   }
 
   for (const d of bag.items) {

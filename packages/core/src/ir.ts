@@ -14,6 +14,83 @@ export interface ModelIR {
   contexts: ContextIR[];
   /** Context map: how bounded contexts depend on each other (top level, between contexts). */
   relationships: RelationshipIR[];
+  /** Authentication, authorization and rate limiting (`security`); absent → none is generated (docs/09 §20). */
+  security?: SecurityIR;
+}
+
+// ---------------------------------------------------------------------------
+// Security (docs/09 §20)
+// ---------------------------------------------------------------------------
+
+export const AUTH_SCHEMES = ["bearer_jwt", "custom"] as const;
+export type AuthScheme = (typeof AUTH_SCHEMES)[number];
+/** JWS algorithms a bearer JWT may be signed with (RFC 7518; `none` is never accepted, RFC 8725 §3.1). */
+export const JWT_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA", "HS256", "HS384", "HS512"] as const;
+export const RATE_LIMIT_UNITS = ["second", "minute", "hour", "day"] as const;
+export type RateLimitUnit = (typeof RATE_LIMIT_UNITS)[number];
+export const RATE_LIMIT_UNIT_SECONDS: Record<RateLimitUnit, number> = { second: 1, minute: 60, hour: 3600, day: 86400 };
+/** What a rate limit counts per: the authenticated principal, the client IP, or all callers together. */
+export const RATE_LIMIT_KEYS = ["principal", "ip", "global"] as const;
+export type RateLimitKey = (typeof RATE_LIMIT_KEYS)[number];
+/** Types a principal claim may have (claims are shared by every context, so only context-free types). */
+export const PRINCIPAL_CLAIM_TYPES = ["String", "UUID", "Integer", "Boolean", "List[String]"] as const;
+export const PRINCIPAL_ID_TYPES = ["String", "UUID"] as const;
+/** Errors every context can raise once `security` is declared (`then.raises` may name them). */
+export const SECURITY_ERRORS = ["NotAuthorized", "Unauthenticated"] as const;
+
+export interface SecurityIR extends Located {
+  /** Declared roles (snake_case); `authorize.roles` and `has_role` may only name these. */
+  roles: string[];
+  principal: {
+    /** Type of `principal.id` (the JWT `sub`): String (default) or UUID. */
+    idType: "String" | "UUID";
+    /** Claims rules may read as `principal.<name>`, besides `id` and `roles`. */
+    claims: PrincipalClaimIR[];
+    path: Path;
+  };
+  authentication?: AuthenticationIR;
+  rateLimits: { default?: RateLimitIR };
+}
+
+export interface PrincipalClaimIR extends Located {
+  name: string;
+  /** One of PRINCIPAL_CLAIM_TYPES. */
+  type: string;
+  required: boolean;
+  /** Name of the JWT claim it is read from (default: `name`), e.g. `https://example.com/company_id`. */
+  claim?: string;
+  description?: string;
+}
+
+export interface AuthenticationIR extends Located {
+  scheme: AuthScheme;
+  /** Expected `iss` (the generated authenticator's default; overridable at runtime). */
+  issuer?: string;
+  /** Expected `aud` (default; overridable at runtime). */
+  audience?: string;
+  /** Accepted JWS algorithms (an allow-list; never `none`). */
+  algorithms: string[];
+  /** JWT claim holding the roles (a list of strings, or one space-separated string). Default `roles`. */
+  rolesClaim: string;
+  /** Allowed clock skew in seconds when checking `exp` / `nbf` / `iat` (default 30, at most 300). */
+  clockTolerance: number;
+}
+
+export interface RateLimitIR extends Located {
+  requests: number;
+  per: RateLimitUnit;
+  by: RateLimitKey;
+}
+
+/**
+ * Who may run a use case (or read an aggregate through the generated read access): `public` (anyone, no principal),
+ * `internal` (in-process only, e.g. a policy; never served over HTTP; use cases only), or `principal` (an
+ * authenticated principal with any of `roles` — every role when `roles` is empty — for whom `allowIf` holds).
+ */
+export interface AuthorizeIR extends Located {
+  kind: "public" | "internal" | "principal";
+  roles: string[];
+  allowIf?: string;
 }
 
 export const GENERATION_TARGETS = ["python", "typescript"] as const;
@@ -130,6 +207,10 @@ export interface AggregateIR extends EntityIR {
   factories: FactoryIR[];
   operations: OperationIR[];
   scenarios: AggregateScenarioIR[];
+  /** Who may read it by identity (the generated read access / GET endpoint); required once `security` is declared. */
+  authorize?: AuthorizeIR;
+  /** Rate limit of its GET endpoint; `"none"` opts out of the default. */
+  rateLimit?: RateLimitIR | "none";
 }
 
 export type CheckTiming = "construct" | "transition";
@@ -207,6 +288,10 @@ export interface UseCaseIR extends Located {
   retry: boolean;
   steps: StepIR[];
   scenarios: UseCaseScenarioIR[];
+  /** Who may run it (`authorize`); required once `security` is declared. */
+  authorize?: AuthorizeIR;
+  /** Rate limit of its HTTP endpoint (`rate_limit`); `"none"` opts out of `security.rate_limits.default`. */
+  rateLimit?: RateLimitIR | "none";
 }
 
 export interface PolicyIR extends Located {
@@ -275,6 +360,8 @@ export interface UseCaseScenarioIR extends Located {
     ids: string[];
     aggregates: { type: string; fields: Record<string, ScenarioValue>; path: Path }[];
     extensions: Record<string, ScenarioValue>;
+    /** Who runs the use case (`given.principal`); `anonymous` for `principal: null`. Absent → a default principal. */
+    principal?: ScenarioPrincipalIR;
     path: Path;
   };
   when: { input: Record<string, ScenarioValue>; path: Path };
@@ -288,4 +375,11 @@ export interface ScenarioThenIR extends Located {
   emits?: { event: string; fields: Record<string, ScenarioValue>; path: Path }[];
   hasReturns: boolean;
   returns?: ScenarioValue;
+}
+
+export interface ScenarioPrincipalIR extends Located {
+  anonymous: boolean;
+  id?: ScenarioValue;
+  roles: string[];
+  claims: Record<string, ScenarioValue>;
 }

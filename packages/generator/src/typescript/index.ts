@@ -18,6 +18,7 @@ import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
 import { tsType } from "./types.ts";
+import { readAccessFile, securityFile } from "./security.ts";
 
 /** Versions written into the scaffolded package.json (customer-owned afterwards). */
 export const TS_DEPENDENCIES = {
@@ -61,6 +62,10 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
 
   const contexts = [...analysis.contexts.values()];
   gen(P.file(`${P.generated}/index`), rootIndex(model, P, contexts.map((c) => c.ir.name)));
+  if (model.security) {
+    const f = securityFile(model, P);
+    gen(f.path, f.content);
+  }
   scaffold(P.file(`${P.root}/index`), `${SCAFFOLD_HEADER}\n\n${docLines(`${model.project}${model.description ? ` — ${model.description.trim()}` : ""}`, "").join("\n")}\n\nexport * from "./generated/index.js";\n`);
 
   const layouts: TsLayout[] = [];
@@ -68,6 +73,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     const L = new TsLayout(model, ca);
     layouts.push(L);
     const policies = policiesFile(L);
+    const readAccess = readAccessFile(L);
+    if (readAccess) gen(readAccess.path, readAccess.content);
     for (const f of [
       errorsFile(L),
       enumsFile(L),
@@ -81,7 +88,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       useCasesFile(L),
       testingFile(L),
       contextReadme(L, analysis),
-      contextIndex(L, !!policies),
+      contextIndex(L, !!policies, !!readAccess),
     ]) {
       gen(f.path, f.content);
     }
@@ -141,11 +148,12 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
 function rootIndex(model: ModelIR, P: TsPaths, contexts: string[]): string {
   const self = `${P.generated}/index`;
   const lines = [`export * from "${relativeSpecifier(self, P.runtime)}";`];
+  if (model.security) lines.push(`export * from "${relativeSpecifier(self, P.security)}";`);
   for (const ctx of [...contexts].sort()) lines.push(`export * as ${ident(toSnake(ctx))} from "${relativeSpecifier(self, `${P.contextBase(ctx)}/index`)}";`);
   return `${header(model)}\n\n${docLines(`Code generated from model "${model.project}": the runtime, plus one namespace per bounded context.`, "").join("\n")}\n\n${lines.join("\n")}\n`;
 }
 
-function contextIndex(L: TsLayout, policies: boolean): { path: string; content: string } {
+function contextIndex(L: TsLayout, policies: boolean, readAccess = false): { path: string; content: string } {
   const mods = [
     L.mod("errors"),
     L.mod("enums"),
@@ -158,6 +166,7 @@ function contextIndex(L: TsLayout, policies: boolean): { path: string; content: 
     L.ports,
     L.useCases,
     ...(policies ? [L.policies] : []),
+    ...(readAccess ? [L.readAccess] : []),
   ];
   const body = mods.map((m) => `export * from "${relativeSpecifier(L.index, m)}";`).join("\n");
   const doc = `Bounded context ${L.ca.ir.name}.${L.ca.ir.description ? ` ${L.ca.ir.description.trim()}` : ""}\n\nTest doubles are in testing.ts (not exported here).`;

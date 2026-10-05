@@ -297,6 +297,11 @@ function emit(e: TExpr, ctx: ExprContext): Out {
     }
     case "item":
       return ["item", P.atom];
+    case "principal":
+      return [`principal.${prop(e.member)}`, P.atom];
+    case "hasRole":
+      ctx.imports.value(ctx.L.security, "hasRole");
+      return [`hasRole(principal, ${tsString(e.role)})`, P.atom];
     case "enumValue": {
       ctx.imports.value(ctx.L.typeModule("enum"), e.enumName);
       const member = /^[A-Za-z_$][\w$]*$/.test(e.value) ? `.${e.value}` : `[${tsString(e.value)}]`;

@@ -1,9 +1,10 @@
-import { formatPath, type StepIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
+import { formatPath, leadingLoads, requiresPrincipal, walkExpr, type StepIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
 import { Code, relativeSpecifier, TsImports, tsString, unparen } from "./code.ts";
 import { entry, file, type TsFile } from "./domain.ts";
 import { emitAs, emitExpr, type ExprContext } from "./expr.ts";
 import type { TsLayout } from "./layout.ts";
 import { camel, ident, pascal, prop, toSnake } from "./names.ts";
+import { rolesLiteral, rolesText } from "./security.ts";
 import { tsType } from "./types.ts";
 
 export function repoName(aggregate: string): string {
@@ -174,6 +175,7 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
     if (s.kind === "invoke") invoked.add(s.target);
   });
   if (emits || afterCommitSteps) imp.type(L.runtime, "DomainEvent");
+  const auth = useCaseAuthorization(L, uc);
 
   c.line();
   const d = [uc.description ?? `Use case ${uc.name}.`, ""];
@@ -181,6 +183,9 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
   d.push(`Transaction: ${uc.transaction}`);
   if (uc.idempotencyKey) d.push(`Idempotency key: ${uc.idempotencyKey} (a repeated key returns the recorded result)`);
   if (uc.retry) d.push("Retried by callers: safe, because a retry with the same key does not run the steps again.");
+  if (auth) d.push(...authorizationDoc(uc, auth));
+  else if (L.model.security && uc.authorize?.kind === "public") d.push("Authorize: public (no principal needed)");
+  else if (L.model.security && uc.authorize?.kind === "internal") d.push("Authorize: internal (run in-process, e.g. by a policy; never served over HTTP)");
   d.push("", "Steps:", ...describeSteps(uc.steps));
   c.doc(d.join("\n"));
   c.block(`export class ${cls}`, () => {
@@ -200,7 +205,13 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
     if (uc.idempotencyKey) {
       doc.push(
         "",
-        `Idempotent by command.${prop(uc.idempotencyKey)}: a key that already succeeded returns the recorded result without running the steps, saving or publishing again. Failed runs are not recorded.`,
+        `Idempotent by command.${prop(uc.idempotencyKey)}: a key that already succeeded returns the recorded result without running the steps, saving or publishing again. Failed runs are not recorded.${auth ? " Keys are kept per principal, and authorization runs before the lookup." : ""}`,
+      );
+    }
+    if (auth) {
+      doc.push(
+        "",
+        "`principal` is checked first: Unauthenticated without one, NotAuthorized without a required role (before anything is loaded) or when allow_if does not hold.",
       );
     }
     c.doc(doc.join("\n"));
@@ -214,16 +225,41 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
       inputs: L.fieldTypes(uc.command),
       ports: { clock: "this.#clock", ids: "this.#ids", extensions: "this.#extensions" },
     };
-    emitSteps(L, run, uc.steps, ctx, { n: 0 }, bindings(uc.steps), invoked, info.returnType);
+    // allow_if runs right after the last leading load it reads (or first thing, when it reads only the inputs).
+    const afterStep = (s: StepIR, code: Code) => {
+      if (auth?.rule && s === auth.after) emitAllowIf(code, uc, auth.rule, ctx);
+    };
+    emitSteps(L, run, uc.steps, ctx, { n: 0 }, bindings(uc.steps), invoked, info.returnType, afterStep);
     const runBody = run.toString();
     const runUsesCommand = /\bcommand\b/.test(runBody.replace(/^\s*\/\/.*$/gm, ""));
+    const runUsesPrincipal = !!auth && /\bprincipal\b/.test(runBody.replace(/^\s*\/\/.*$/gm, ""));
     const runIsAsync = /\bawait\b/.test(runBody);
-    const runArgs = [...(runUsesCommand ? ["command"] : []), ...(afterCommitSteps ? ["afterCommit"] : [])];
-    const runParams = [...(runUsesCommand ? [`command: ${uc.command}`] : []), ...(afterCommitSteps ? ["afterCommit: DomainEvent[]"] : [])];
+    const runArgs = [...(runUsesCommand ? ["command"] : []), ...(runUsesPrincipal ? ["principal"] : []), ...(afterCommitSteps ? ["afterCommit"] : [])];
+    const runParams = [
+      ...(runUsesCommand ? [`command: ${uc.command}`] : []),
+      ...(runUsesPrincipal ? ["principal: Principal"] : []),
+      ...(afterCommitSteps ? ["afterCommit: DomainEvent[]"] : []),
+    ];
     const executeAwaits = runIsAsync || !!uc.idempotencyKey || deps.uow || (afterCommitSteps && deps.publisher);
+    const authorizeFirst = () => {
+      if (!auth) return;
+      imp.value(L.security, "authorize");
+      c.line(`authorize(principal, ${tsString(uc.name)}, ${rolesLiteral(auth.roles)});`);
+      if (auth.rule && !auth.after) emitAllowIf(c, uc, auth.rule, ctx);
+    };
+    const executeUsesCommand = runUsesCommand || !!uc.idempotencyKey || (!!auth?.rule && !auth.after && /\bcommand\b/.test(emitExpr(auth.rule, ctx)));
     // `_command`: no step reads the (empty) command; the parameter stays for a uniform execute(command).
-    const commandParam = `${runUsesCommand || uc.idempotencyKey ? "" : "_"}command: ${uc.command}`;
-    if (!executeAwaits) {
+    const commandParam = `${executeUsesCommand ? "" : "_"}command: ${uc.command}${auth ? ", principal: Principal | null" : ""}`;
+    if (auth) imp.type(L.security, "Principal");
+    if (!executeAwaits && auth) {
+      // Nothing to await: authorization and the steps run inside the promise, so their errors reject it.
+      c.block(`execute(${commandParam}): Promise<${ret}>`, () => {
+        c.block("return Promise.resolve().then(() =>", () => {
+          authorizeFirst();
+          c.line(`return this.#run(${runArgs.join(", ")});`);
+        }, ");");
+      });
+    } else if (!executeAwaits) {
       // Nothing to await: errors thrown by the steps still reject the returned promise.
       c.block(`execute(${commandParam}): Promise<${ret}>`, () => {
         c.line(`return Promise.resolve().then(() => this.#run(${runArgs.join(", ")}));`);
@@ -231,7 +267,12 @@ function useCase(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
     }
     if (executeAwaits) c.block(`async execute(${commandParam}): Promise<${ret}>`, () => {
       const useCaseName = tsString(uc.name);
-      if (uc.idempotencyKey) {
+      authorizeFirst();
+      if (uc.idempotencyKey && auth) {
+        c.line(`const key = \`\${principal.id}:\${String(command.${prop(uc.idempotencyKey)})}\`;`);
+        c.line(`const recorded = await this.#idempotencyStore.get(${useCaseName}, key);`);
+        c.line(`if (recorded !== null) return${ret === "void" ? "" : ` recorded.value as ${ret}`};`);
+      } else if (uc.idempotencyKey) {
         c.line(`const key = String(command.${prop(uc.idempotencyKey)});`);
         c.line(`const recorded = await this.#idempotencyStore.get(${useCaseName}, key);`);
         c.line(`if (recorded !== null) return${ret === "void" ? "" : ` recorded.value as ${ret}`};`);
@@ -278,6 +319,7 @@ function emitSteps(
   vars: Map<string, string>,
   invoked: Set<string>,
   returnType: Type | undefined,
+  afterStep?: (s: StepIR, c: Code) => void,
 ): void {
   const aggregateOf = (v: string) => L.aggregate(vars.get(v) ?? "");
   const T_ = (p: (string | number)[]): TExpr => {
@@ -320,6 +362,7 @@ function emitSteps(
           c.line(`const ${v} = await this.#${repoName(ag.name)}.get(${key});`);
           c.line(`if (${v} === null) ${notFound()}`);
         }
+        afterStep?.(s, c);
         break;
       }
       case "create": {
@@ -382,6 +425,43 @@ function emitSteps(
       }
     }
   }
+}
+
+/** How a use case is authorized (only when `security` is declared and it needs a principal). */
+export interface UseCaseAuthorization {
+  roles: string[];
+  /** The typed `allow_if`, if any. */
+  rule?: TExpr;
+  /** The leading load after which `allow_if` runs; undefined → first, before any step. */
+  after?: StepIR;
+}
+
+export function useCaseAuthorization(L: TsLayout | { model: TsLayout["model"]; ca: TsLayout["ca"] }, uc: UseCaseIR): UseCaseAuthorization | undefined {
+  if (!L.model.security || !requiresPrincipal(uc)) return undefined;
+  const a = uc.authorize!;
+  if (a.allowIf === undefined) return { roles: a.roles };
+  const rule = L.ca.exprs.get(formatPath([...a.path, "allow_if"]));
+  if (!rule) throw new Error(`missing typed allow_if of ${uc.name}`);
+  const used = new Set<string>();
+  walkExpr(rule, (n) => {
+    if (n.t === "local") used.add(n.name);
+  });
+  const leading = leadingLoads(uc.steps);
+  let after: StepIR | undefined;
+  for (const l of leading) if (used.has(l.as)) after = l;
+  return { roles: a.roles, rule, ...(after ? { after } : {}) };
+}
+
+function authorizationDoc(uc: UseCaseIR, auth: UseCaseAuthorization): string[] {
+  const out = [`Authorize: ${rolesText(auth.roles)}`];
+  if (uc.authorize?.allowIf) out.push(`  allow_if ${uc.authorize.allowIf}${auth.after?.kind === "load" ? ` (after loading ${auth.after.as})` : ""}`);
+  return out;
+}
+
+function emitAllowIf(c: Code, uc: UseCaseIR, rule: TExpr, ctx: ExprContext): void {
+  ctx.imports.value(ctx.L.security, "allowIf");
+  c.line("// authorize: allow_if");
+  c.line(`allowIf(${emitExpr(rule, ctx)}, ${tsString(uc.name)});`);
 }
 
 /** Variable → aggregate bindings of one use case (names are unique within a use case). */

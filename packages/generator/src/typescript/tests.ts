@@ -1,5 +1,5 @@
-import { deriveViolations, derivedTestName, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
-import { depParams, repoName, useCaseClass, useCaseDeps } from "./application.ts";
+import { deriveViolations, derivedTestName, makePrincipal, otherRoles, scenarioPrincipal, type ResolvedPrincipal, type SecurityIR, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import { depParams, repoName, useCaseAuthorization, useCaseClass, useCaseDeps } from "./application.ts";
 import { assemble, Code, header, relativeSpecifier, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
@@ -108,6 +108,7 @@ function scenarioDoc(sc: { description?: string }, lines: string[]): string {
 
 export function importError(L: TsLayout, imp: TsImports, name: string): void {
   if (name === "ConstraintViolation" || name === "AggregateNotFound") imp.value(L.runtime, name);
+  else if (name === "NotAuthorized" || name === "Unauthenticated") imp.value(L.security, name);
   else imp.value(L.mod("errors"), name);
 }
 
@@ -284,6 +285,7 @@ export function useCaseTestFile(L: TsLayout, uc: UseCaseIR): TsFile | undefined 
       if (i) c.line();
       useCaseScenario(L, c, uc, sc, imp);
     });
+    authorizationTests(L, c, uc, imp);
   }, ");");
   return testFile(L, module, `Scenarios of use case ${uc.name} (${L.ca.ir.name}).`, imp, c.toString());
 }
@@ -356,17 +358,20 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
   c.block(`test(${tsString(sc.name)}, async () =>`, () => {
     useCaseSetup(L, c, uc, sc, imp);
     c.line(`const command = ${uc.command}.create(${record(uc.command, sc.when.input, imp, L)});`);
+    const caller = principalArg(L, c, uc, sc, imp);
+    const call = `useCase.execute(command${caller})`;
     const needsResult = !!info.returnType && (then.hasReturns || (!!uc.idempotencyKey && !then.raises));
     if (then.raises) {
       importError(L, imp, then.raises);
       T("expectRejects");
-      c.line(`await expectRejects(() => useCase.execute(command), ${then.raises});`);
+      c.line(`await expectRejects(() => ${call}, ${then.raises});`);
       if (deps.uow) {
         c.line("expect(unitOfWork.committed).toBe(false);");
-        c.line("expect(unitOfWork.rolledBack).toBe(true);");
+        // Authorization may refuse before the transaction starts (nothing to roll back).
+        if (then.raises !== "NotAuthorized" && then.raises !== "Unauthenticated") c.line("expect(unitOfWork.rolledBack).toBe(true);");
       }
     } else {
-      c.line(needsResult ? "const result = await useCase.execute(command);" : "await useCase.execute(command);");
+      c.line(needsResult ? `const result = await ${call};` : `await ${call};`);
       if (then.hasReturns && info.returnType) c.line(expectEqual("result", then.returns, info.returnType, imp, L));
       if (deps.uow) c.line("expect(unitOfWork.committed).toBe(true);");
     }
@@ -384,8 +389,11 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
       if (deps.publisher) eventAsserts(L, c, "eventPublisher.published", then, imp);
       else c.comment(`${uc.name} publishes no events`);
     }
-    if (uc.idempotencyKey) {
-      const recorded = `idempotencyStore.get(${tsString(uc.name)}, String(command.${prop(uc.idempotencyKey)}))`;
+    if (uc.idempotencyKey && caller !== ", null") {
+      const key = `String(command.${prop(uc.idempotencyKey)})`;
+      // Keys of a use case that needs a principal are kept per principal.
+      if (caller) c.line(`const key = \`\${principal.id}:\${${key}}\`;`);
+      const recorded = `idempotencyStore.get(${tsString(uc.name)}, ${caller ? "key" : key})`;
       if (then.raises) {
         c.comment("A failed run is not recorded, so a retry with the same key runs again.");
         c.line(`expect(${recorded}).toBeNull();`);
@@ -393,9 +401,121 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
         c.comment("Idempotency: the same command again returns the recorded result and runs no step.");
         c.line(`expect(${recorded}).not.toBeNull();`);
         if (deps.publisher) c.line("const published = eventPublisher.published.length;");
-        c.line(info.returnType ? "expect(await useCase.execute(command)).toBe(result);" : "await useCase.execute(command);");
+        c.line(info.returnType ? `expect(await ${call}).toBe(result);` : `await ${call};`);
         if (deps.publisher) c.line("expect(eventPublisher.published.length).toBe(published);");
       }
     }
   }, ");");
+}
+
+// ---------------------------------------------------------------------------
+// Authorization (docs/09 §20)
+// ---------------------------------------------------------------------------
+
+/** `Principal.create({ ... })` of a resolved principal (claims that are null are left to their default). */
+export function principalLiteral(L: TsLayout, p: ResolvedPrincipal, imp: TsImports): string {
+  const sec = L.model.security!;
+  imp.value(L.security, "Principal");
+  const value = (v: unknown): string => (Array.isArray(v) ? `[${v.map(value).join(", ")}]` : typeof v === "string" ? tsString(v) : String(v));
+  const parts = [`id: ${tsString(p.id)}`, `roles: [${p.roles.map(tsString).join(", ")}]`];
+  for (const c of sec.principal.claims) {
+    const v = p.claims[c.name];
+    if (v !== null && v !== undefined) parts.push(`${prop(c.name)}: ${value(v)}`);
+  }
+  return `Principal.create({ ${parts.join(", ")} })`;
+}
+
+/** Declares `principal` for a scenario of a use case that needs one; returns the extra execute argument. */
+function principalArg(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: TsImports): string {
+  const sec = L.model.security;
+  if (!sec || !useCaseAuthorization(L, uc)) return "";
+  const p = scenarioPrincipal(sec, uc, sc);
+  if (p.anonymous) return ", null";
+  c.line(`const principal = ${principalLiteral(L, p, imp)};`);
+  return ", principal";
+}
+
+/** Test doubles of a use case whose repositories fail the test when touched (authorization must come first). */
+function untouchedSetup(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
+  const deps = useCaseDeps(L, uc);
+  const T = (p: string) => imp.value(L.contextTesting, p);
+  if (deps.repos.length) {
+    c.comment("Repositories that fail the test when the use case touches them: authorization comes first.");
+    c.block("const untouched =", () => {
+      c.block("get: (): never =>", () => c.line('throw new Error("loaded before authorization");'), ",");
+      c.block("save: (): never =>", () => c.line('throw new Error("saved before authorization");'), ",");
+    }, ";");
+  }
+  if (deps.uow) {
+    T("FakeUnitOfWork");
+    c.line("const unitOfWork = new FakeUnitOfWork();");
+  }
+  if (deps.publisher) {
+    T("CapturingEventPublisher");
+    c.line("const eventPublisher = new CapturingEventPublisher();");
+  }
+  const params = depParams(deps).map((p) => {
+    if (p.type.endsWith("Repository")) return `${p.name}: untouched`;
+    switch (p.name) {
+      case "clock":
+        T("FixedClock");
+        return 'clock: new FixedClock("1970-01-01T00:00:00+00:00")';
+      case "ids":
+        T("SequentialIds");
+        return "ids: new SequentialIds([])";
+      case "extensions":
+        T("StubExtensions");
+        return "extensions: new StubExtensions()";
+      case "idempotencyStore":
+        T("InMemoryIdempotencyStore");
+        return "idempotencyStore: new InMemoryIdempotencyStore()";
+      default:
+        return p.name;
+    }
+  });
+  c.line(`const useCase = new ${useCaseClass(uc)}({ ${params.join(", ")} });`);
+}
+
+/**
+ * Derived authorization tests of a use case that needs a principal: without a principal it raises Unauthenticated,
+ * and (when it requires roles) a principal holding none of them raises NotAuthorized — both before any repository is
+ * touched, nothing committed, nothing published.
+ */
+function authorizationTests(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
+  const sec: SecurityIR | undefined = L.model.security;
+  const auth = useCaseAuthorization(L, uc);
+  const sc = uc.scenarios[0];
+  if (!sec || !auth || !sc) return;
+  const deps = useCaseDeps(L, uc);
+  imp.value(L.contextTesting, "expectRejects");
+  const cases: { name: string; doc: string; principal: string; error: string; details: string }[] = [];
+  if (!uc.scenarios.some((s) => s.given.principal?.anonymous)) {
+    cases.push({ name: "authorization: an anonymous caller is unauthenticated before anything is loaded", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "null", error: "Unauthenticated", details: `{ action: ${tsString(uc.name)} }` });
+  }
+  if (auth.roles.length) {
+    const roles = otherRoles(sec, uc.authorize!);
+    const p = makePrincipal(sec, { roles, claims: {} });
+    cases.push({
+      name: "authorization: a principal without a required role is refused before anything is loaded",
+      doc: `A principal with ${roles.length ? `only the other roles (${roles.join(", ")})` : "no role"} lacks ${auth.roles.join(" / ")}: ${uc.name} raises NotAuthorized naming the required roles, before it touches a repository.`,
+      principal: principalLiteral(L, p, imp),
+      error: "NotAuthorized",
+      details: `{ action: ${tsString(uc.name)}, requiredRoles: [${auth.roles.map(tsString).join(", ")}] }`,
+    });
+  }
+  for (const k of cases) {
+    importError(L, imp, k.error);
+    imp.value(L.mod("commands"), uc.command);
+    c.line();
+    c.doc(k.doc);
+    c.block(`test(${tsString(k.name)}, async () =>`, () => {
+      untouchedSetup(L, c, uc, imp);
+      c.line(`const command = ${uc.command}.create(${record(uc.command, sc.when.input, imp, L)});`);
+      if (k.principal !== "null") c.line(`const principal = ${k.principal};`);
+      c.line(`const error = await expectRejects(() => useCase.execute(command, ${k.principal === "null" ? "null" : "principal"}), ${k.error});`);
+      c.line(`expect(error.details).toEqual(${k.details});`);
+      if (deps.uow) c.line("expect(unitOfWork.committed).toBe(false);");
+      if (deps.publisher) c.line("expect(eventPublisher.published).toEqual([]);");
+    }, ");");
+  }
 }

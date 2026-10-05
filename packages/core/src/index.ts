@@ -15,3 +15,4 @@ export * from "./assist.ts";
 export * from "./workshop.ts";
 export * from "./sync.ts";
 export * from "./drawio.ts";
+export * from "./security.ts";
