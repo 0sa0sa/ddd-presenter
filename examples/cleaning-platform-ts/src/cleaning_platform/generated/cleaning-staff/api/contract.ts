@@ -157,7 +157,14 @@ export const contract = {
         limit: { key: "limit", kind: "integer" },
       },
       output: SearchInvitationsPageJson,
-      errors: { constraint_violation: 400, invalid_cursor: 400 },
+      errors: {
+        constraint_violation: 400,
+        invalid_cursor: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
+      },
+      auth: { kind: "principal", roles: ["admin"] },
+      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "principal" },
     }),
   },
 } as const;

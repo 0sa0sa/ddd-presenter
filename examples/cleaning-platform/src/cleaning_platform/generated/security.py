@@ -134,8 +134,9 @@ RATE_LIMITS: Final[Mapping[str, RateLimit]] = {
         "principal",
     ),
     "read_staff_member": RateLimit("read_staff_member", 60, 60, "principal"),
+    "search_invitations": RateLimit("search_invitations", 60, 60, "principal"),
 }
-"""Rate limit per endpoint (use case name, or read_<aggregate>), for your web layer.
+"""Rate limit per endpoint (use case name, read_<aggregate> or query name), for your web layer.
 
 Use it as `RateLimiter().consume(RATE_LIMITS[name], subject)` (see rate_limit.py).
 """

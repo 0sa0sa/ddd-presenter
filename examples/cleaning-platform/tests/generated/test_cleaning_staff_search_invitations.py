@@ -13,7 +13,13 @@ from uuid import UUID
 
 import pytest
 
-from cleaning_platform.generated._persistence import HmacCursorCodec, InvalidCursor, Page
+from cleaning_platform.generated._persistence import (
+    HmacCursorCodec,
+    InvalidCursor,
+    Page,
+    QueryRequest,
+    QueryResult,
+)
 from cleaning_platform.generated._runtime import ConstraintViolation
 from cleaning_platform.generated.cleaning_staff.application.queries import (
     SearchInvitationsInput,
@@ -27,6 +33,7 @@ from cleaning_platform.generated.cleaning_staff.testing import (
     InMemoryCleaningStaffInvitationRepository,
     InMemorySearchInvitationsReader,
 )
+from cleaning_platform.generated.security import NotAuthorized, Principal, Unauthenticated
 
 CURSORS = HmacCursorCodec(["generated-tests-cursor-secret-0123456789"])
 
@@ -65,16 +72,24 @@ def _setup(aggregates: Sequence[CleaningStaffInvitation]) -> SearchInvitationsQu
     )
 
 
+class _UnreadableReader:
+    """A reader that fails the test when read: authorization must come first."""
+
+    def read(self, request: QueryRequest) -> QueryResult[SearchInvitationsItem]:
+        raise AssertionError("read before authorization")
+
+
 def _fetch_pages(
     query: SearchInvitationsQuery,
     params: SearchInvitationsInput,
     count: int,
+    principal: Principal | None,
 ) -> list[Page[SearchInvitationsItem]]:
     """Up to `count` pages from the first one, following `next_cursor`."""
     pages: list[Page[SearchInvitationsItem]] = []
     cursor: str | None = None
     for _ in range(count):
-        page = query.execute(params.model_copy(update={"cursor": cursor}))
+        page = query.execute(params.model_copy(update={"cursor": cursor}), principal)
         pages.append(page)
         cursor = page.next_cursor
         if cursor is None:
@@ -90,7 +105,8 @@ def test_newest_first_across_pages() -> None:
     Then: items ["00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000002",
     "00000000-0000-0000-0000-000000000001"]; next_cursor absent
     """
-    pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(limit=2), 2)
+    principal = Principal(id="test-principal", roles=("admin",))
+    pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(limit=2), 2, principal)
     items = [item for page in pages for item in page.items]
     assert [item.id for item in items] == [
         UUID("00000000-0000-0000-0000-000000000003"),
@@ -108,10 +124,12 @@ def test_pending_only() -> None:
     Then: items ["00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000001"];
     next_cursor absent
     """
+    principal = Principal(id="test-principal", roles=("admin",))
     pages = _fetch_pages(
         _setup(GIVEN_1),
         SearchInvitationsInput(status=InvitationStatus.PENDING),
         1,
+        principal,
     )
     items = [item for page in pages for item in page.items]
     assert [item.id for item in items] == [
@@ -128,7 +146,8 @@ def test_search_by_email() -> None:
     When: {"q": "staff"}, 1 page(s)
     Then: items [{"email": {"value": "staff@example.com"}, "status": "pending"}]; next_cursor absent
     """
-    pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(q="staff"), 1)
+    principal = Principal(id="test-principal", roles=("admin",))
+    pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(q="staff"), 1, principal)
     items = [item for page in pages for item in page.items]
     assert len(items) == 1
     assert items[0].email == EmailAddress(value="staff@example.com")
@@ -140,10 +159,31 @@ def test_limit_is_clamped_to_the_maximum_page_size() -> None:
     """`limit` above the maximum page size (100) is clamped, not rejected; below 1 it is a
     ConstraintViolation.
     """
-    page = _setup(GIVEN_1).execute(SearchInvitationsInput(limit=101))
+    principal = Principal(id="test-principal", roles=("admin",))
+    page = _setup(GIVEN_1).execute(SearchInvitationsInput(limit=101), principal)
     assert len(page.items) <= 100
     with pytest.raises(ConstraintViolation):
         SearchInvitationsInput(limit=0)
+
+
+def test_authorization_is_refused_before_anything_is_read() -> None:
+    """search_invitations checks the caller first: without a principal Unauthenticated, without
+    admin NotAuthorized.
+
+    Nothing is read before: the reader fails the test when called.
+    """
+    query = SearchInvitationsQuery(reader=_UnreadableReader(), cursors=CURSORS)
+    params = SearchInvitationsInput()
+    with pytest.raises(Unauthenticated) as anonymous:
+        query.execute(params, None)
+    assert anonymous.value.details == {"action": "search_invitations"}
+    lacking = Principal(id="test-principal", roles=("candidate",))
+    with pytest.raises(NotAuthorized) as refused:
+        query.execute(params, lacking)
+    assert refused.value.details == {
+        "action": "search_invitations",
+        "required_roles": ["admin"],
+    }
 
 
 def test_pages_of_one_item_cover_the_whole_result_in_order() -> None:
@@ -151,9 +191,10 @@ def test_pages_of_one_item_cover_the_whole_result_in_order() -> None:
     single-page result: same items, same order, nothing twice, nothing missing.
     """
     query = _setup(GIVEN_1)
-    whole = query.execute(SearchInvitationsInput(limit=100))
+    principal = Principal(id="test-principal", roles=("admin",))
+    whole = query.execute(SearchInvitationsInput(limit=100), principal)
     assert whole.next_cursor is None
-    pages = _fetch_pages(query, SearchInvitationsInput(limit=1), len(whole.items) + 1)
+    pages = _fetch_pages(query, SearchInvitationsInput(limit=1), len(whole.items) + 1, principal)
     assert all(len(page.items) == 1 for page in pages)
     assert pages[-1].next_cursor is None
     paged = [item for page in pages for item in page.items]
@@ -166,13 +207,14 @@ def test_a_tampered_cursor_is_rejected() -> None:
     HMAC-SHA256).
     """
     query = _setup(GIVEN_1)
-    cursor = query.execute(SearchInvitationsInput(limit=1)).next_cursor
+    principal = Principal(id="test-principal", roles=("admin",))
+    cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
     assert cursor is not None
     tampered = ("f" if cursor.startswith("e") else "e") + cursor[1:]
     resigned = cursor[:-2] + ("BB" if cursor.endswith("AA") else "AA")
     for bad in (tampered, resigned, "not-a-cursor"):
         with pytest.raises(InvalidCursor):
-            query.execute(SearchInvitationsInput(cursor=bad))
+            query.execute(SearchInvitationsInput(cursor=bad), principal)
 
 
 def test_a_cursor_reused_with_other_parameters_is_rejected() -> None:
@@ -180,8 +222,23 @@ def test_a_cursor_reused_with_other_parameters_is_rejected() -> None:
     is rejected instead of returning a wrong page.
     """
     query = _setup(GIVEN_1)
-    cursor = query.execute(SearchInvitationsInput(limit=1)).next_cursor
+    principal = Principal(id="test-principal", roles=("admin",))
+    cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
     assert cursor is not None
     with pytest.raises(InvalidCursor):
-        query.execute(SearchInvitationsInput(q="zz", cursor=cursor))
-    assert len(query.execute(SearchInvitationsInput(cursor=cursor, limit=1)).items) == 1
+        query.execute(SearchInvitationsInput(q="zz", cursor=cursor), principal)
+    assert len(query.execute(SearchInvitationsInput(cursor=cursor, limit=1), principal).items) == 1
+
+
+def test_a_cursor_is_bound_to_the_principal_it_was_issued_to() -> None:
+    """Another caller (same roles and claims, another id) gets InvalidCursor: a leaked cursor cannot
+    page through someone else's result.
+    """
+    query = _setup(GIVEN_1)
+    principal = Principal(id="test-principal", roles=("admin",))
+    cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
+    assert cursor is not None
+    other = Principal(id="other-principal", roles=("admin",))
+    with pytest.raises(InvalidCursor):
+        query.execute(SearchInvitationsInput(cursor=cursor), other)
+    assert len(query.execute(SearchInvitationsInput(cursor=cursor, limit=1), principal).items) == 1

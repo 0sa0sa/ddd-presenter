@@ -132,6 +132,8 @@ export interface FilterSpec {
   readonly param?: string;
   /** Literal compared with (always applies). */
   readonly value?: string | number | boolean;
+  /** Member of the caller's scope compared with (always applies; a missing value matches none). */
+  readonly principal?: string;
 }
 
 export interface SearchSpec {
@@ -170,6 +172,8 @@ export interface QueryRequest<P> {
   readonly after: ReadonlyArray<CursorKey> | null;
   /** Rows per page (already clamped to the query's max size). */
   readonly limit: number;
+  /** Values of the principal the rows are scoped to (`principal:` filters), by member name. */
+  readonly scope?: Readonly<Record<string, unknown>>;
 }
 
 /** What a reader returns: one page of items and, when more follow, the last item's keys. */
@@ -192,22 +196,36 @@ export function activeKeys(spec: QuerySpec, search: string | null): ReadonlyArra
 }
 
 /**
- * What a cursor is bound to: the query, its order, the search text and the parameters (canonical
- * JSON, hashed). A cursor reused with other parameters no longer matches.
+ * The caller a protected query runs for: its id and the values its `principal:` filters compare
+ * with. Cursors are bound to it, so a cursor issued to one caller is rejected for another.
+ */
+export interface QueryScope {
+  readonly principal: string;
+  readonly values: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * What a cursor is bound to: the query, its order, the search text, the parameters and, for a
+ * protected query, the caller (canonical JSON, hashed). A cursor reused with other parameters or
+ * by another principal no longer matches.
  */
 export function queryFingerprint(
   spec: QuerySpec,
   params: Readonly<Record<string, unknown>>,
   search: string | null,
+  scope?: QueryScope,
 ): string {
   const order = activeKeys(spec, search).map(
     (key) => `${key.column ?? "relevance"} ${key.direction}`,
   );
-  const values = Object.keys(params)
-    .filter((name) => params[name] !== null && params[name] !== undefined)
-    .sort()
-    .map((name) => [name, String(sqlParam(params[name]))]);
-  const canonical = JSON.stringify([spec.name, order, search, values]);
+  const canonicalValues = (values: Readonly<Record<string, unknown>>) =>
+    Object.keys(values)
+      .filter((name) => values[name] !== null && values[name] !== undefined)
+      .sort()
+      .map((name) => [name, String(sqlParam(values[name]))]);
+  const parts: unknown[] = [spec.name, order, search, canonicalValues(params)];
+  if (scope !== undefined) parts.push(scope.principal, canonicalValues(scope.values));
+  const canonical = JSON.stringify(parts);
   return createHash("sha256").update(canonical).digest("base64url").slice(0, 22);
 }
 
@@ -220,7 +238,8 @@ export interface PageInput {
 
 /**
  * Runs a query: trims the search text (blank = no search), clamps the limit to the query's maximum,
- * checks and decodes the cursor, calls the reader and encodes the cursor of the next page.
+ * checks and decodes the cursor (bound to `scope`'s caller for a protected query), calls the reader
+ * with the scope and encodes the cursor of the next page.
  */
 export async function runQuery<P extends Readonly<Record<string, unknown>>, T>(
   spec: QuerySpec,
@@ -228,11 +247,12 @@ export async function runQuery<P extends Readonly<Record<string, unknown>>, T>(
   params: P,
   input: PageInput,
   read: (request: QueryRequest<P>) => Awaitable<QueryResult<T>>,
+  scope?: QueryScope,
 ): Promise<Page<T>> {
   const text = input.search?.trim() ?? "";
   const search = spec.search !== null && text !== "" ? text : null;
   const limit = Math.min(input.limit ?? spec.size, spec.maxSize);
-  const fingerprint = queryFingerprint(spec, params, search);
+  const fingerprint = queryFingerprint(spec, params, search, scope);
   let after: ReadonlyArray<CursorKey> | null = null;
   if (input.cursor) {
     after = codec.decode(input.cursor, fingerprint);
@@ -240,7 +260,11 @@ export async function runQuery<P extends Readonly<Record<string, unknown>>, T>(
       throw new InvalidCursor({ reason: "mismatch" });
     }
   }
-  const result = await read({ params, search, after, limit });
+  const request: QueryRequest<P> =
+    scope === undefined
+      ? { params, search, after, limit }
+      : { params, search, after, limit, scope: scope.values };
+  const result = await read(request);
   const nextCursor = result.last === null ? null : codec.encode(result.last, fingerprint);
   return { items: result.items, nextCursor };
 }
@@ -432,12 +456,23 @@ const FILTER_OPS: Readonly<Record<FilterOp, (c: number) => boolean>> = {
   gte: (c) => c >= 0,
 };
 
-/** Like SQL: NULL matches nothing; an absent optional parameter disables its filter. */
+/**
+ * Like SQL: NULL matches nothing; an absent optional parameter disables its filter; a filter by the
+ * caller always applies (a missing scope value matches nothing).
+ */
 function matches(
   filter: FilterSpec,
   row: SqlRow,
   params: Readonly<Record<string, unknown>>,
+  scope: Readonly<Record<string, unknown>>,
 ): boolean {
+  if (filter.principal !== undefined) {
+    const value = scope[filter.principal];
+    if (value === null || value === undefined) return false;
+    const cell = row[filter.column];
+    if (cell === null || cell === undefined) return false;
+    return FILTER_OPS[filter.op](compareValues(filter.kind, cell, value));
+  }
   const value = filter.param === undefined ? filter.value : sqlParam(params[filter.param]);
   if (value === null || value === undefined) return filter.param !== undefined;
   const cell = row[filter.column];
@@ -476,8 +511,9 @@ export function readRows<P extends Readonly<Record<string, unknown>>, T>(
 ): QueryResult<T> {
   const keys = activeKeys(spec, request.search);
   const candidates: { row: SqlRow; key: CursorKey[] }[] = [];
+  const scope = request.scope ?? {};
   for (const row of rows) {
-    if (!spec.filters.every((filter) => matches(filter, row, request.params))) continue;
+    if (!spec.filters.every((filter) => matches(filter, row, request.params, scope))) continue;
     let relevance = 0;
     if (spec.search !== null && request.search !== null) {
       const s = score(spec.search, row, request.search);
@@ -507,6 +543,7 @@ export function readRows<P extends Readonly<Record<string, unknown>>, T>(
 export type SqlArg =
   | { readonly param: string }
   | { readonly value: string | number | boolean }
+  | { readonly principal: string }
   | { readonly search: true }
   | { readonly key: number }
   | { readonly limit: true };
@@ -545,6 +582,7 @@ export async function readSql<P extends Readonly<Record<string, unknown>>, T>(
   const values = statement.args.map((arg): unknown => {
     if ("param" in arg) return sqlParam(request.params[arg.param]);
     if ("value" in arg) return arg.value;
+    if ("principal" in arg) return sqlParam(request.scope?.[arg.principal]);
     if ("search" in arg) return request.search;
     if ("key" in arg) return after?.[arg.key] ?? null;
     return request.limit + 1;

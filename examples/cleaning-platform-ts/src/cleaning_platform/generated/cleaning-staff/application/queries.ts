@@ -16,6 +16,7 @@ import {
   runQuery,
 } from "../../persistence.js";
 import { type Awaitable, idSchema, type Instant, InstantSchema, parseWith } from "../../runtime.js";
+import { authorize, type Principal } from "../../security.js";
 import { type InvitationStatus, InvitationStatusSchema } from "../domain/enums.js";
 import { EmailAddressSchema } from "../domain/value-objects.js";
 
@@ -100,9 +101,13 @@ export interface SearchInvitationsReader {
  *
  * Query search_invitations (reads CleaningStaffInvitation).
  *
+ * Authorize: the role admin. `principal` is checked first, before the input and before anything is
+ * read: Unauthenticated without one, NotAuthorized without a required role. Cursors are bound to
+ * the principal.
+ *
  * Validates the input (ConstraintViolation), clamps `limit` to 100, checks the cursor
- * (InvalidCursor: tampered, expired, or made for other parameters) and returns a page whose
- * `nextCursor` is null at the end.
+ * (InvalidCursor: tampered, expired, or made for other parameters or another principal) and returns
+ * a page whose `nextCursor` is null at the end.
  */
 export class SearchInvitationsQuery {
   readonly #reader: SearchInvitationsReader;
@@ -113,15 +118,25 @@ export class SearchInvitationsQuery {
     this.#cursors = deps.cursors;
   }
 
-  async execute(input: SearchInvitationsInput = {}): Promise<SearchInvitationsPage> {
+  async execute(
+    input: SearchInvitationsInput,
+    principal: Principal | null,
+  ): Promise<SearchInvitationsPage> {
+    authorize(principal, "search_invitations", ["admin"]);
     const { q, cursor, limit, ...params } = parseWith(
       SearchInvitationsInputSchema,
       input,
       "SearchInvitationsInput",
     );
     const page = { search: q, cursor, limit };
-    return await runQuery(SEARCH_INVITATIONS_SPEC, this.#cursors, params, page, (request) =>
-      this.#reader.read(request),
+    const scope = { principal: principal.id, values: {} };
+    return await runQuery(
+      SEARCH_INVITATIONS_SPEC,
+      this.#cursors,
+      params,
+      page,
+      (request) => this.#reader.read(request),
+      scope,
     );
   }
 }

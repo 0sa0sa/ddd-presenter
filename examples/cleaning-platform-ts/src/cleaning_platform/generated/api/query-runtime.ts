@@ -10,8 +10,10 @@ import { z } from "zod";
 
 import { ConstraintViolation, parseWith } from "../runtime.js";
 import {
+  type EndpointAuth,
   type ErrorRegistry,
   type ErrorStatuses,
+  type RateLimitPolicy,
   type RequestOptions,
   type Route,
   send,
@@ -34,6 +36,9 @@ export interface QueryEndpoint<I extends z.ZodType, O extends z.ZodType> {
   >;
   readonly output: O;
   readonly errors: ErrorStatuses;
+  readonly auth: EndpointAuth;
+  /** Token bucket of the endpoint (`rate_limit`), or null for none. */
+  readonly rateLimit: RateLimitPolicy | null;
 }
 
 export function queryEndpoint<I extends z.ZodType, O extends z.ZodType>(
@@ -42,9 +47,12 @@ export function queryEndpoint<I extends z.ZodType, O extends z.ZodType>(
   return Object.freeze(endpoint);
 }
 
-/** Anything with the query's `execute` (the generated query classes). */
-export interface Runs<I> {
-  execute(input: I): Promise<unknown>;
+/**
+ * Anything with the query's `execute` (the generated query classes): a protected query takes the
+ * principal as the second argument, a public one ignores it.
+ */
+export interface Runs<I, P> {
+  execute(input: I, principal: P | null): Promise<unknown>;
 }
 
 /**
@@ -75,21 +83,27 @@ function readQueryString(
   return input;
 }
 
-export function queryRoute<D, I extends z.ZodType, O extends z.ZodType>(
+/**
+ * The route of a query. The handler authenticates (401) and rate-limits (429) it from `auth` and
+ * `rateLimit` before `handle`; the query authorizes the principal (403) before reading anything.
+ */
+export function queryRoute<D, P, I extends z.ZodType, O extends z.ZodType>(
   endpoint: QueryEndpoint<I, O>,
-  dependency: (dependencies: D) => Runs<z.input<I>> | undefined,
-): Route<D> {
+  dependency: (dependencies: D) => Runs<z.input<I>, P> | undefined,
+): Route<D, P> {
   return {
     method: endpoint.method,
     path: endpoint.path,
     errors: endpoint.errors,
-    async handle(request, dependencies) {
+    auth: endpoint.auth,
+    rateLimit: endpoint.rateLimit,
+    async handle(request, dependencies, _id, principal) {
       const query = dependency(dependencies);
       if (query === undefined) return undefined;
       const url = new URL(request.url);
       const input = readQueryString(url.searchParams, endpoint.params, endpoint.name);
       // The query checks the input (ConstraintViolation) and the cursor (InvalidCursor): both 400.
-      const page = await query.execute(input as z.input<I>);
+      const page = await query.execute(input as z.input<I>, principal);
       return new Response(JSON.stringify(page), {
         status: 200,
         headers: { "content-type": "application/json" },

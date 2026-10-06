@@ -51,8 +51,8 @@ export interface ApiDependencies {
  *
  * Inputs are parsed with the command schemas (400 with the issues). Endpoints that need a principal
  * authenticate the request with `options.authenticate` (401 with `WWW-Authenticate: Bearer` without
- * valid credentials); the use cases and read access authorize it (403 NotAuthorized). Rate limits
- * answer the RateLimit headers and 429 with Retry-After when used up (`options.rateLimiter`,
+ * valid credentials); the use cases, queries and read access authorize it (403 NotAuthorized). Rate
+ * limits answer the RateLimit headers and 429 with Retry-After when used up (`options.rateLimiter`,
  * `options.clientIp`). Domain errors answer `{ code, message, details }` with the endpoint's status
  * (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without
  * details and go to `options.onError`. Internal use cases (`authorize: internal`) have no endpoint.

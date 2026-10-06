@@ -29,6 +29,11 @@ import {
   InvalidCursor,
 } from "../../src/cleaning_platform/generated/persistence.js";
 import { ConstraintViolation } from "../../src/cleaning_platform/generated/runtime.js";
+import {
+  NotAuthorized,
+  Principal,
+  Unauthenticated,
+} from "../../src/cleaning_platform/generated/security.js";
 
 const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
 
@@ -72,11 +77,12 @@ async function fetchPages(
   query: SearchInvitationsQuery,
   input: SearchInvitationsInput,
   count: number,
+  principal: Principal | null,
 ): Promise<SearchInvitationsPage[]> {
   const pages: SearchInvitationsPage[] = [];
   let cursor: string | null = null;
   for (let i = 0; i < count; i++) {
-    const page = await query.execute({ ...input, cursor });
+    const page = await query.execute({ ...input, cursor }, principal);
     pages.push(page);
     cursor = page.nextCursor;
     if (cursor === null) break;
@@ -95,7 +101,8 @@ describe("search_invitations", () => {
    */
   test("newest_first_across_pages", async () => {
     const query = setup(GIVEN_1);
-    const pages = await fetchPages(query, { limit: 2 }, 2);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const pages = await fetchPages(query, { limit: 2 }, 2, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items.map((item) => String(item.id))).toEqual([
       "00000000-0000-0000-0000-000000000003",
@@ -115,7 +122,8 @@ describe("search_invitations", () => {
    */
   test("pending_only", async () => {
     const query = setup(GIVEN_1);
-    const pages = await fetchPages(query, { status: "pending" }, 1);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const pages = await fetchPages(query, { status: "pending" }, 1, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items.map((item) => String(item.id))).toEqual([
       "00000000-0000-0000-0000-000000000003",
@@ -134,7 +142,8 @@ describe("search_invitations", () => {
    */
   test("search_by_email", async () => {
     const query = setup(GIVEN_1);
-    const pages = await fetchPages(query, { q: "staff" }, 1);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const pages = await fetchPages(query, { q: "staff" }, 1, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items).toHaveLength(1);
     expect(plain(items[0]?.email)).toEqual(
@@ -150,9 +159,30 @@ describe("search_invitations", () => {
    */
   test("limit is clamped to the maximum page size", async () => {
     const query = setup(GIVEN_1);
-    const page = await query.execute({ limit: 101 });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const page = await query.execute({ limit: 101 }, principal);
     expect(page.items.length).toBeLessThanOrEqual(100);
-    await expectRejects(() => query.execute({ limit: 0 }), ConstraintViolation);
+    await expectRejects(() => query.execute({ limit: 0 }, principal), ConstraintViolation);
+  });
+
+  /**
+   * search_invitations checks the caller first: without a principal Unauthenticated, without admin
+   * NotAuthorized.
+   * Nothing is read before: the reader fails the test when called.
+   */
+  test("authorization: refused before anything is read", async () => {
+    const reader = {
+      read: (): never => {
+        throw new Error("read before authorization");
+      },
+    };
+    const query = new SearchInvitationsQuery({ reader, cursors });
+    const input = {};
+    const anonymous = await expectRejects(() => query.execute(input, null), Unauthenticated);
+    expect(anonymous.details).toEqual({ action: "search_invitations" });
+    const lacking = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const refused = await expectRejects(() => query.execute(input, lacking), NotAuthorized);
+    expect(refused.details).toEqual({ action: "search_invitations", requiredRoles: ["admin"] });
   });
 
   /**
@@ -162,9 +192,10 @@ describe("search_invitations", () => {
    */
   test("pages of one item cover the whole result in order", async () => {
     const query = setup(GIVEN_1);
-    const whole = await query.execute({ limit: 100 });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const whole = await query.execute({ limit: 100 }, principal);
     expect(whole.nextCursor).toBeNull();
-    const pages = await fetchPages(query, { limit: 1 }, whole.items.length + 1);
+    const pages = await fetchPages(query, { limit: 1 }, whole.items.length + 1, principal);
     expect(pages.every((page) => page.items.length === 1)).toBe(true);
     expect(pages.at(-1)?.nextCursor).toBeNull();
     expect(plain(pages.flatMap((page) => page.items))).toEqual(plain(whole.items));
@@ -177,13 +208,14 @@ describe("search_invitations", () => {
    */
   test("a tampered cursor is rejected", async () => {
     const query = setup(GIVEN_1);
-    const first = await query.execute({ limit: 1 });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const first = await query.execute({ limit: 1 }, principal);
     const cursor = expectPresent(first.nextCursor, "nextCursor");
     const tampered = (cursor.startsWith("e") ? "f" : "e") + cursor.slice(1);
-    await expectRejects(() => query.execute({ cursor: tampered }), InvalidCursor);
+    await expectRejects(() => query.execute({ cursor: tampered }, principal), InvalidCursor);
     const resigned = cursor.slice(0, -2) + (cursor.endsWith("AA") ? "BB" : "AA");
-    await expectRejects(() => query.execute({ cursor: resigned }), InvalidCursor);
-    await expectRejects(() => query.execute({ cursor: "not-a-cursor" }), InvalidCursor);
+    await expectRejects(() => query.execute({ cursor: resigned }, principal), InvalidCursor);
+    await expectRejects(() => query.execute({ cursor: "not-a-cursor" }, principal), InvalidCursor);
   });
 
   /**
@@ -192,10 +224,27 @@ describe("search_invitations", () => {
    */
   test("a cursor reused with other parameters is rejected", async () => {
     const query = setup(GIVEN_1);
-    const first = await query.execute({ limit: 1 });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const first = await query.execute({ limit: 1 }, principal);
     const cursor = expectPresent(first.nextCursor, "nextCursor");
-    await expectRejects(() => query.execute({ q: "zz", cursor }), InvalidCursor);
-    const next = await query.execute({ cursor, limit: 1 });
+    await expectRejects(() => query.execute({ q: "zz", cursor }, principal), InvalidCursor);
+    const next = await query.execute({ cursor, limit: 1 }, principal);
+    expect(next.items).toHaveLength(1);
+  });
+
+  /**
+   * A cursor only continues the query for the principal it was issued to: another caller (same
+   * roles and claims, another id) gets InvalidCursor, so a leaked cursor cannot page through
+   * someone else's result.
+   */
+  test("a cursor is bound to the principal it was issued to", async () => {
+    const query = setup(GIVEN_1);
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const first = await query.execute({ limit: 1 }, principal);
+    const cursor = expectPresent(first.nextCursor, "nextCursor");
+    const other = Principal.create({ id: "other-principal", roles: ["admin"] });
+    await expectRejects(() => query.execute({ cursor }, other), InvalidCursor);
+    const next = await query.execute({ cursor, limit: 1 }, principal);
     expect(next.items).toHaveLength(1);
   });
 });

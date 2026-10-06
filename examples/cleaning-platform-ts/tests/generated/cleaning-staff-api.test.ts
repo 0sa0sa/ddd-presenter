@@ -310,6 +310,113 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
   });
 
   /**
+   * `GET /api/cleaning-staff/queries/search-invitations` needs a principal: without credentials it
+   * answers 401 with `WWW-Authenticate: Bearer`, with an invalid token 401 with
+   * `error="invalid_token"`; the infinite query rejects with Unauthenticated. Nothing is read.
+   */
+  test("search_invitations: 401 without or with an invalid token", async () => {
+    const badToken = new Unauthenticated({ error: "invalid_token" }, "The token is invalid");
+    const handler = createApiHandler(
+      {},
+      {
+        authenticate: (request) =>
+          request.headers.get("authorization") === "Bearer bad"
+            ? Promise.reject(badToken)
+            : Promise.resolve(null),
+      },
+    );
+    const missing = await handler(
+      new Request("http://localhost/api/cleaning-staff/queries/search-invitations"),
+    );
+    expect(missing.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toBe("Bearer");
+    expect(await responseJson(missing)).toMatchObject({ code: "unauthenticated" });
+    const invalid = await handler(
+      new Request("http://localhost/api/cleaning-staff/queries/search-invitations", {
+        headers: { authorization: "Bearer bad" },
+      }),
+    );
+    expect(invalid.status).toBe(401);
+    expect(invalid.headers.get("www-authenticate")).toBe('Bearer error="invalid_token"');
+    const reader = {
+      read: (): never => {
+        throw new Error("read before authorization");
+      },
+    };
+    const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
+    const searchInvitations = new SearchInvitationsQuery({ reader, cursors });
+    const { queries, queryClient, statuses } = connect(
+      { cleaningStaff: { queries: { searchInvitations } } },
+      null,
+    );
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
+    const options = cleaningStaffInvitationQueries.searchInvitations({});
+    await expectRejects(() => queryClient.infiniteQuery(options), Unauthenticated);
+    expect(statuses).toEqual([401]);
+  });
+
+  /**
+   * A principal without admin is refused by search_invitations before anything is read: 403, and
+   * the infinite query rejects with NotAuthorized.
+   */
+  test("search_invitations: without a required role is 403", async () => {
+    const reader = {
+      read: (): never => {
+        throw new Error("read before authorization");
+      },
+    };
+    const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
+    const searchInvitations = new SearchInvitationsQuery({ reader, cursors });
+    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const { queries, queryClient, statuses } = connect(
+      { cleaningStaff: { queries: { searchInvitations } } },
+      principal,
+    );
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
+    const options = cleaningStaffInvitationQueries.searchInvitations({});
+    const error = await expectRejects(() => queryClient.infiniteQuery(options), NotAuthorized);
+    expect(error.details).toMatchObject({ requiredRoles: ["admin"] });
+    expect(statuses).toEqual([403]);
+  });
+
+  /**
+   * `GET /api/cleaning-staff/queries/search-invitations` allows 60 request(s) per 60 s (by
+   * principal): then 429 with Retry-After and the IETF RateLimit headers, until a token has
+   * refilled. The endpoint is not wired, so allowed requests answer 404 after taking their token.
+   */
+  test("rate limit: search_invitations answers 429 when used up, then refills", async () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const handler = createApiHandler(
+      {},
+      {
+        authenticate: () => Promise.resolve(everyone),
+        rateLimiter: new RateLimiter({ now: () => now }),
+        clientIp: () => "203.0.113.7",
+      },
+    );
+    const send = () =>
+      handler(new Request("http://localhost/api/cleaning-staff/queries/search-invitations"));
+    const first = await send();
+    expect(first.status).toBe(404);
+    expect(first.headers.get("ratelimit-policy")).toBe('"search_invitations";q=60;w=60');
+    expect(first.headers.get("ratelimit")).toMatch(/^"search_invitations";r=59;t=\d+$/);
+    for (let i = 1; i < 60; i++) {
+      expect((await send()).status).toBe(404);
+    }
+    const refused = await send();
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("1");
+    expect(refused.headers.get("ratelimit")).toBe('"search_invitations";r=0;t=1');
+    expect(await responseJson(refused)).toMatchObject({
+      code: "rate_limited",
+      details: { retryAfter: 1 },
+    });
+    now += 1000;
+    expect((await send()).status).toBe(404);
+    expect((await send()).status).toBe(429);
+  });
+
+  /**
    * `queries.cleaningStaff.cleaningStaffInvitation.detail(id)` loads a stored
    * CleaningStaffInvitation through `GET /api/cleaning-staff/cleaning-staff-invitation/:id`: an
    * object key (`{ scope, entity, kind, id }`, the id lower-cased), the JSON form validated by its
@@ -431,9 +538,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       reader: new InMemorySearchInvitationsReader(repository),
       cursors,
     });
-    const { handler, queries, queryClient, statuses } = connect({
-      cleaningStaff: { queries: { searchInvitations } },
-    });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const { handler, queries, queryClient, statuses } = connect(
+      { cleaningStaff: { queries: { searchInvitations } } },
+      principal,
+    );
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     const options = cleaningStaffInvitationQueries.searchInvitations({ limit: 1 });
     expect([...options.queryKey]).toEqual([
@@ -445,7 +554,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
         params: { limit: 1 },
       },
     ]);
-    const whole = await searchInvitations.execute({ limit: 100 });
+    const whole = await searchInvitations.execute({ limit: 100 }, principal);
     const data = await queryClient.infiniteQuery({ ...options, pages: whole.items.length + 1 });
     expect(jsonOf(data.pages.flatMap((page) => page.items))).toEqual(jsonOf(whole.items));
     expect(data.pages.at(-1)?.nextCursor).toBeNull();
@@ -457,10 +566,14 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     expect(queryClient.getQueryState(options.queryKey)?.isInvalidated).toBe(true);
     const path = "http://localhost/api/cleaning-staff/queries/search-invitations";
     const query = new URLSearchParams({ cursor: "not-a-cursor" });
-    const badCursor = await handler(new Request(`${path}?${query.toString()}`));
+    const badCursor = await handler(
+      new Request(`${path}?${query.toString()}`, { headers: AUTHORIZATION }),
+    );
     expect(badCursor.status).toBe(400);
     expect(await responseJson(badCursor)).toMatchObject({ code: "invalid_cursor" });
-    const unknown = await handler(new Request(path + "?no_such_parameter=1"));
+    const unknown = await handler(
+      new Request(path + "?no_such_parameter=1", { headers: AUTHORIZATION }),
+    );
     expect(unknown.status).toBe(400);
     expect(await responseJson(unknown)).toMatchObject({ code: "constraint_violation" });
   });

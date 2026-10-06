@@ -38,6 +38,7 @@ __all__ = [
     "PostgresStore",
     "QueryRequest",
     "QueryResult",
+    "QueryScope",
     "QuerySpec",
     "QueryStatements",
     "SearchSpec",
@@ -135,13 +136,16 @@ CursorKey: TypeAlias = str | int | float | bool
 
 @dataclass(frozen=True, slots=True)
 class FilterSpec:
-    """`column <op> param` (an absent parameter disables the filter) or `column <op> value`."""
+    """`column <op> param` (an absent parameter disables the filter), `column <op> value` or
+    `column <op> principal` (the caller's scope; always applies, a missing value matches nothing).
+    """
 
     column: str
     kind: str
     op: str
     param: str | None = None
     value: object = None
+    principal: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +187,7 @@ class QueryRequest:
     search: str | None
     after: tuple[CursorKey, ...] | None
     limit: int
+    scope: Mapping[str, object] | None = None
 
 
 T = TypeVar("T")
@@ -210,11 +215,34 @@ def active_keys(spec: QuerySpec, search: str | None) -> tuple[KeySpec, ...]:
     return tuple(k for k in spec.keys if k.column is not None or searching)
 
 
-def query_fingerprint(spec: QuerySpec, params: Mapping[str, object], search: str | None) -> str:
-    """What a cursor is bound to: the query, its order, the search text and the parameters."""
+@dataclass(frozen=True, slots=True)
+class QueryScope:
+    """The caller a protected query runs for: its id and the values its `principal` filters
+    compare with. Cursors are bound to it, so a cursor issued to one caller is rejected for another.
+    """
+
+    principal: str
+    values: Mapping[str, object]
+
+
+def _canonical(values: Mapping[str, object]) -> list[list[str]]:
+    return [[n, str(sql_param(values[n]))] for n in sorted(values) if values[n] is not None]
+
+
+def query_fingerprint(
+    spec: QuerySpec,
+    params: Mapping[str, object],
+    search: str | None,
+    scope: QueryScope | None = None,
+) -> str:
+    """What a cursor is bound to: the query, its order, the search text, the parameters and, for
+    a protected query, the caller.
+    """
     order = [f"{k.column or 'relevance'} {k.direction}" for k in active_keys(spec, search)]
-    values = [[n, str(sql_param(params[n]))] for n in sorted(params) if params[n] is not None]
-    canonical = json.dumps([spec.name, order, search, values], separators=(",", ":"))
+    parts: list[object] = [spec.name, order, search, _canonical(params)]
+    if scope is not None:
+        parts += [scope.principal, _canonical(scope.values)]
+    canonical = json.dumps(parts, separators=(",", ":"))
     return _b64(hashlib.sha256(canonical.encode()).digest())[:22]
 
 
@@ -235,20 +263,25 @@ def run_query(
     cursor: str | None,
     limit: int | None,
     read: Callable[[QueryRequest], QueryResult[T]],
+    scope: QueryScope | None = None,
 ) -> Page[T]:
     """Runs a query: trims the search text (blank = no search), clamps the limit to the
     query's maximum, checks and decodes the cursor, reads and encodes the next cursor.
+    A protected query passes its caller as `scope`: the cursor is bound to it.
     """
     text = (search or "").strip()
     searching = text if spec.search is not None and text else None
     size = min(limit if limit is not None else spec.size, spec.max_size)
-    fingerprint = query_fingerprint(spec, params, searching)
+    fingerprint = query_fingerprint(spec, params, searching, scope)
     after: tuple[CursorKey, ...] | None = None
     if cursor:
         after = codec.decode(cursor, fingerprint)
         if len(after) != len(active_keys(spec, searching)):
             raise InvalidCursor(reason="mismatch")
-    result = read(QueryRequest(params=params, search=searching, after=after, limit=size))
+    values = None if scope is None else scope.values
+    result = read(
+        QueryRequest(params=params, search=searching, after=after, limit=size, scope=values)
+    )
     next_cursor = None if result.last is None else codec.encode(result.last, fingerprint)
     return Page(items=result.items, next_cursor=next_cursor)
 
@@ -407,7 +440,16 @@ _OPS: dict[str, Callable[[int], bool]] = {
 }
 
 
-def _matches(f: FilterSpec, row: Mapping[str, object], params: Mapping[str, object]) -> bool:
+def _matches(
+    f: FilterSpec,
+    row: Mapping[str, object],
+    params: Mapping[str, object],
+    scope: Mapping[str, object],
+) -> bool:
+    if f.principal is not None:
+        scoped = scope.get(f.principal)
+        cell = row.get(f.column)
+        return scoped is not None and cell is not None and _OPS[f.op](_compare(cell, scoped))
     value = f.value if f.param is None else sql_param(params.get(f.param))
     if value is None:
         return f.param is not None
@@ -447,8 +489,9 @@ def read_rows(
     """
     keys = active_keys(spec, request.search)
     candidates: list[_Candidate] = []
+    scope = request.scope or {}
     for row in rows:
-        if not all(_matches(f, row, request.params) for f in spec.filters):
+        if not all(_matches(f, row, request.params, scope) for f in spec.filters):
             continue
         relevance = 0.0
         if spec.search is not None and request.search is not None:
@@ -525,6 +568,8 @@ def read_sql(
                 return sql_param(request.params.get(str(arg)))
             case "value":
                 return arg
+            case "principal":
+                return sql_param((request.scope or {}).get(str(arg)))
             case "search":
                 return request.search
             case "key":
