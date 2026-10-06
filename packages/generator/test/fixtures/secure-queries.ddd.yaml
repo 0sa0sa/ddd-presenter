@@ -1,0 +1,136 @@
+schema_version: 1
+project: secure-board
+description: Protected queries (roles, rows scoped to the caller by a claim and by principal.id, cursors bound to the caller) next to a public one
+generation:
+  package: secure_board
+
+security:
+  roles: [admin, staff, candidate]
+  principal:
+    id: UUID
+    claims:
+      - { name: company_id, type: UUID, required: false, claim: "https://example.com/company_id" }
+  authentication:
+    scheme: bearer_jwt
+    issuer: https://auth.example.com/
+    audience: board-api
+    algorithms: [RS256]
+  rate_limits:
+    default: { requests: 60, per: minute, by: principal }
+
+contexts:
+  - name: Board
+    enums:
+      - { name: JobStatus, values: [open, closed] }
+    aggregates:
+      - name: Job
+        identity: id
+        authorize: { roles: [admin, staff] }
+        fields:
+          - { name: id, type: UUID }
+          - { name: company_id, type: UUID }
+          - { name: title, type: String }
+          - { name: status, type: JobStatus }
+          - { name: posted_at, type: DateTime }
+        factories:
+          - name: post
+            parameters: [{ name: id, type: UUID }, { name: company_id, type: UUID }, { name: title, type: String }, { name: at, type: DateTime }]
+            fields: { id: id, company_id: company_id, title: title, status: open, posted_at: at }
+      - name: Application
+        identity: id
+        authorize: { roles: [admin] }
+        fields:
+          - { name: id, type: UUID }
+          - { name: job_id, type: "Ref[Job]" }
+          - { name: candidate_id, type: UUID }
+          - { name: submitted_at, type: DateTime }
+        factories:
+          - name: submit
+            parameters: [{ name: id, type: UUID }, { name: job_id, type: "Ref[Job]" }, { name: candidate_id, type: UUID }, { name: at, type: DateTime }]
+            fields: { id: id, job_id: job_id, candidate_id: candidate_id, submitted_at: at }
+    use_cases:
+      - name: post_job
+        command: PostJob
+        authorize: { roles: [admin, staff] }
+        input:
+          - { name: company_id, type: UUID }
+          - { name: title, type: String }
+        steps:
+          - create: { aggregate: Job, factory: post, as: job, args: { id: ids.new, company_id: company_id, title: title, at: clock.now } }
+          - save: job
+          - return: job.id
+        scenarios:
+          - name: staff_posts_a_job
+            given:
+              clock: "2026-03-01T09:00:00+00:00"
+              ids: ["00000000-0000-4000-8000-0000000000a9"]
+            when: { input: { company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner } }
+            then: { returns: "00000000-0000-4000-8000-0000000000a9" }
+    queries:
+      # Staff see the jobs of their own company only: the rows are filtered in SQL by the token's company_id.
+      - name: company_jobs
+        description: Jobs of the caller's company, newest first
+        from: Job
+        authorize: { roles: [admin, staff] }
+        rate_limit: { requests: 10, per: minute, by: principal }
+        params:
+          - { name: status, type: JobStatus }
+        where:
+          - { field: company_id, op: eq, principal: company_id }
+          - { field: status, op: eq, param: status }
+        order_by:
+          - { field: posted_at, direction: desc }
+        page: { size: 10, max_size: 50 }
+        scenarios:
+          - name: own_company_only
+            given:
+              principal: { roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c1" } }
+              aggregates: &jobs
+                - fields: { id: "00000000-0000-4000-8000-0000000000a1", company_id: "00000000-0000-4000-8000-0000000000c1", title: Cleaner, status: open, posted_at: "2026-03-01T09:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-0000000000a2", company_id: "00000000-0000-4000-8000-0000000000c2", title: Driver, status: open, posted_at: "2026-03-02T09:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-0000000000a3", company_id: "00000000-0000-4000-8000-0000000000c1", title: Manager, status: closed, posted_at: "2026-03-03T09:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-0000000000a4", company_id: "00000000-0000-4000-8000-0000000000c1", title: Helper, status: open, posted_at: "2026-03-04T09:00:00+00:00" }
+            when: { limit: 1, pages: 3 }
+            then:
+              items: ["00000000-0000-4000-8000-0000000000a4", "00000000-0000-4000-8000-0000000000a3", "00000000-0000-4000-8000-0000000000a1"]
+              next_cursor: absent
+          - name: other_company_with_status
+            given:
+              principal: { roles: [admin], claims: { company_id: "00000000-0000-4000-8000-0000000000c2" } }
+              aggregates: *jobs
+            when: { params: { status: open } }
+            then:
+              items: ["00000000-0000-4000-8000-0000000000a2"]
+              next_cursor: absent
+      # A candidate sees their own applications: rows scoped by principal.id (the JWT sub).
+      - name: my_applications
+        from: Application
+        authorize: authenticated
+        where:
+          - { field: candidate_id, op: eq, principal: id }
+        order_by: [submitted_at]
+        scenarios:
+          - name: own_applications
+            given:
+              principal: { id: "00000000-0000-4000-8000-0000000000e1", roles: [candidate] }
+              aggregates:
+                - fields: { id: "00000000-0000-4000-8000-0000000000b1", job_id: "00000000-0000-4000-8000-0000000000a1", candidate_id: "00000000-0000-4000-8000-0000000000e1", submitted_at: "2026-03-05T09:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-0000000000b2", job_id: "00000000-0000-4000-8000-0000000000a1", candidate_id: "00000000-0000-4000-8000-0000000000e2", submitted_at: "2026-03-06T09:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-0000000000b3", job_id: "00000000-0000-4000-8000-0000000000a4", candidate_id: "00000000-0000-4000-8000-0000000000e1", submitted_at: "2026-03-07T09:00:00+00:00" }
+            then:
+              items: ["00000000-0000-4000-8000-0000000000b1", "00000000-0000-4000-8000-0000000000b3"]
+              next_cursor: absent
+      # Anyone may list open jobs (counted per client IP).
+      - name: open_jobs
+        from: Job
+        authorize: public
+        rate_limit: { requests: 30, per: minute, by: ip }
+        where:
+          - { field: status, op: eq, value: open }
+        order_by: [title]
+        scenarios:
+          - name: open_jobs_by_title
+            given: { aggregates: *jobs }
+            then:
+              items: ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2", "00000000-0000-4000-8000-0000000000a4"]
+              next_cursor: absent

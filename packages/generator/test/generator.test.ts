@@ -223,6 +223,7 @@ const SECURITY = readFileSync(join(import.meta.dir, "fixtures/security.ddd.yaml"
 
 /** Queries (read side) and the PostgreSQL adapters (their SQL is exercised on PGlite by queries.test.ts). */
 const QUERIES = readFileSync(join(import.meta.dir, "fixtures/queries.ddd.yaml"), "utf8");
+const SECURE_QUERIES = readFileSync(join(import.meta.dir, "fixtures/secure-queries.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -239,6 +240,7 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the security model (roles, allow_if, public / internal use cases, PyJWT authenticator, rate limiter)", SECURITY],
 
     ["the queries model (trigram / prefix / exact search, keyset paging, cursors, PostgreSQL mapping without a database)", QUERIES],
+    ["the secure-queries model (protected queries: roles, rows scoped by a claim and by principal.id, cursors bound to the caller)", SECURE_QUERIES],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -296,6 +298,7 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
     ["the security model", SECURITY],
 
     ["the queries model", QUERIES],
+    ["the secure-queries model", SECURE_QUERIES],
     ["a model reflected from the discovery board", FROM_BOARD],
   ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));

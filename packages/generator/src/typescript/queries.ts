@@ -10,15 +10,31 @@
  *
  * Contract: docs/05 §9; decisions: docs/09 §19.
  */
-import { planQuery, queryParamsOwner, type ColumnIR, type QueryPlan, type QueryScenarioIR, type TableIR, tableOf, type Type } from "@ddd/core";
+import {
+  makePrincipal,
+  otherRoles,
+  planQuery,
+  queryParamsOwner,
+  queryScope,
+  requiresPrincipal,
+  scenarioPrincipal,
+  type ColumnIR,
+  type QueryPlan,
+  type QueryScenarioIR,
+  type SecurityIR,
+  type TableIR,
+  tableOf,
+  type Type,
+} from "@ddd/core";
 import { Code, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { camel, ident, pascal, prop, toSnake } from "./names.ts";
 import { activeKeys, itemColumns, queryStatements, repositorySql, type SqlArg, type SqlStatement } from "../sql.ts";
-import { testFile } from "./tests.ts";
+import { principalLiteral, testFile } from "./tests.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { tsType, zodSchema } from "./types.ts";
+import { rolesLiteral, rolesText } from "./security.ts";
 
 /** `name(params): result {` at class-member depth, broken like Prettier when it does not fit. */
 function method(c: Code, name: string, params: string[], result: string, body: () => void): void {
@@ -68,6 +84,18 @@ const columnsName = (aggregate: string) => `${toSnake(aggregate).toUpperCase()}_
 const tableName = (aggregate: string) => `${toSnake(aggregate).toUpperCase()}_TABLE`;
 const toJsonName = (type: string) => `${lower(type)}ToJson`;
 const fromJsonName = (type: string) => `${lower(type)}FromJson`;
+/** Whether running the query needs an authenticated principal (`security` with authorize roles / authenticated). */
+export function protectedQuery(L: TsLayout, plan: QueryPlan): boolean {
+  return !!L.model.security && requiresPrincipal(plan.query);
+}
+
+/** Principal members the query's rows are scoped to, with whether the claim may be missing (optional). */
+export function scopeMembers(L: TsLayout, plan: QueryPlan): { member: string; optional: boolean }[] {
+  const sec = L.model.security;
+  if (!sec) return [];
+  return queryScope(plan.query).map((member) => ({ member, optional: member !== "id" && !sec.principal.claims.find((c) => c.name === member)?.required }));
+}
+
 /** The search parameter's property in the input (`q`). */
 const searchProp = (plan: QueryPlan) => prop(plan.search!.ir.param);
 
@@ -145,7 +173,8 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
     c.block(`export const ${specName(plan)}: QuerySpec =`, () => {
       c.line(`name: ${tsString(q.name)},`);
       const filters = plan.filters.map(({ filter, column }) => {
-        const target = filter.param !== undefined ? `param: ${tsString(prop(filter.param))}` : `value: ${encodedLiteral(filter.value, column)}`;
+        const target =
+          filter.param !== undefined ? `param: ${tsString(prop(filter.param))}` : filter.principal !== undefined ? `principal: ${tsString(prop(filter.principal))}` : `value: ${encodedLiteral(filter.value, column)}`;
         return `{ column: ${tsString(column.name)}, kind: ${tsString(valueKind(column))}, op: ${tsString(filter.op)}, ${target} }`;
       });
       // Prettier: an array of one object stays on one line when it fits; several objects break one per line.
@@ -184,15 +213,26 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
     imp.type(L.persistenceRuntime, "CursorCodec");
     imp.value(L.persistenceRuntime, "runQuery");
     imp.value(L.runtime, "parseWith");
-    const required = plan.params.some((p) => p.type.k !== "optional");
+    const secured = protectedQuery(L, plan);
+    const scope = scopeMembers(L, plan);
+    const required = secured || plan.params.some((p) => p.type.k !== "optional");
     const rest = [...(plan.search ? [searchProp(plan)] : []), "cursor", "limit"];
     c.line();
+    const auth = q.authorize;
     c.doc(
       [
         ...(q.description ? [q.description, ""] : []),
         `Query ${q.name} (reads ${ag.name}).`,
+        ...(secured
+          ? [
+              "",
+              `Authorize: ${rolesText(auth!.roles)}. \`principal\` is checked first, before the input and before anything is read: Unauthenticated without one${[...(auth!.roles.length ? ["without a required role"] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${prop(m.member)}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${prop(m.member)}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal.`,
+            ]
+          : L.model.security && auth?.kind === "public"
+            ? ["", "Authorize: public (no principal needed)."]
+            : []),
         "",
-        `Validates the input (ConstraintViolation), clamps \`limit\` to ${q.page.maxSize}, checks the cursor (InvalidCursor: tampered, expired, or made for other parameters) and returns a page whose \`nextCursor\` is null at the end.`,
+        `Validates the input (ConstraintViolation), clamps \`limit\` to ${q.page.maxSize}, checks the cursor (InvalidCursor: tampered, expired, or made for other parameters${secured ? " or another principal" : ""}) and returns a page whose \`nextCursor\` is null at the end.`,
       ].join("\n"),
     );
     c.block(`export class ${queryClass(plan)}`, () => {
@@ -204,17 +244,59 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
         c.line("this.#cursors = deps.cursors;");
       });
       c.line();
-      c.block(`async execute(input: ${inputName(plan)}${required ? "" : " = {}"}): Promise<${pageName(plan)}>`, () => {
+      if (secured) imp.type(L.security, "Principal");
+      const signature = `async execute(input: ${inputName(plan)}${required ? "" : " = {}"}${secured ? ", principal: Principal | null" : ""}): Promise<${pageName(plan)}>`;
+      const body = () => {
+        if (secured) {
+          imp.value(L.security, "authorize");
+          c.line(`authorize(principal, ${tsString(q.name)}, ${rolesLiteral(auth!.roles)});`);
+          for (const m of scope.filter((x) => x.optional)) {
+            imp.value(L.security, "NotAuthorized");
+            const v = ident(m.member);
+            c.line(`const ${v} = principal.${prop(m.member)};`);
+            c.block(`if (${v} === null)`, () => c.line(`throw new NotAuthorized({ action: ${tsString(q.name)}, missingClaim: ${tsString(m.member)} });`));
+          }
+        }
         const head = `const { ${rest.join(", ")}${plan.params.length ? ", ...params" : ""} } = parseWith(`;
         const args = [`${inputName(plan)}Schema`, "input", tsString(inputName(plan))];
         if (strWidth(`    ${head}${args.join(", ")});`) <= PRINT_WIDTH) c.line(`${head}${args.join(", ")});`);
         else c.open(head, () => args.forEach((a) => c.line(`${a},`)), ");");
         const search = plan.search ? `search: ${searchProp(plan)}, ` : "";
         c.line(`const page = { ${search}cursor, limit };`);
-        c.line(`return await runQuery(${specName(plan)}, this.#cursors, ${plan.params.length ? "params" : "{}"}, page, (request) =>`);
-        c.indent(() => c.line("this.#reader.read(request),"));
+        if (!secured) {
+          c.line(`return await runQuery(${specName(plan)}, this.#cursors, ${plan.params.length ? "params" : "{}"}, page, (request) =>`);
+          c.indent(() => c.line("this.#reader.read(request),"));
+          c.line(");");
+          return;
+        }
+        const values = scope.map((m) => (m.optional ? (prop(m.member) === ident(m.member) ? prop(m.member) : `${prop(m.member)}: ${ident(m.member)}`) : `${prop(m.member)}: principal.${prop(m.member)}`));
+        const one = `const scope = { principal: principal.id, values: ${values.length ? `{ ${values.join(", ")} }` : "{}"} };`;
+        if (strWidth(`    ${one}`) <= PRINT_WIDTH) c.line(one);
+        else c.block("const scope =", () => {
+          c.line("principal: principal.id,");
+          c.block("values:", () => values.forEach((v) => c.line(`${v},`)), ",");
+        }, ";");
+        c.line("return await runQuery(");
+        c.indent(() => {
+          c.line(`${specName(plan)},`);
+          c.line("this.#cursors,");
+          c.line(`${plan.params.length ? "params" : "{}"},`);
+          c.line("page,");
+          c.line("(request) => this.#reader.read(request),");
+          c.line("scope,");
+        });
         c.line(");");
-      });
+      };
+      if (strWidth(`  ${signature} {`) <= PRINT_WIDTH) c.block(signature, body);
+      else {
+        // Prettier: parameters one per line when the signature does not fit.
+        c.line("async execute(");
+        c.indent(() => {
+          c.line(`input: ${inputName(plan)}${required ? "" : " = {}"},`);
+          if (secured) c.line("principal: Principal | null,");
+        });
+        c.block(`): Promise<${pageName(plan)}>`, body);
+      }
     });
   }
   return file(L, mod, `Queries (read side) of the ${L.ca.ir.name} context: inputs, items, reader ports and query services.`, imp, c.toString());
@@ -414,6 +496,8 @@ function argLiteral(a: SqlArg): string {
       return `{ param: ${tsString(prop(a.name))} }`;
     case "value":
       return `{ value: ${encodedLiteral(a.value, a.column)} }`;
+    case "principal":
+      return `{ principal: ${tsString(prop(a.name))} }`;
     case "search":
       return "{ search: true }";
     case "key":
@@ -626,6 +710,14 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
   imp.type(L.queries, pageName(plan), inputName(plan));
   const body = new Code();
   const idProjected = plan.returns.includes(ag.identity);
+  const sec = L.model.security;
+  const secured = protectedQuery(L, plan);
+  /** `query.execute(input)`, plus the test's principal for a protected query. */
+  const exec = (input: string) => `query.execute(${input}${secured ? ", principal" : ""})`;
+  /** Declares `principal` (the caller of a scenario) for a protected query. */
+  const caller = (sc: QueryScenarioIR | undefined) => {
+    if (secured) body.line(`const principal = ${principalLiteral(L, scenarioPrincipal(sec!, q, sc ?? { given: {} }), imp)};`);
+  };
   body.line();
   body.block(`describe(${tsString(q.name)}, () =>`, () => {
     q.scenarios.forEach((sc, i) => {
@@ -637,8 +729,9 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
       body.doc([sc.description ?? "Scenario generated from the model.", "", `Given: ${sc.given.aggregates.length} ${ag.name}`, `When: ${spaced(sc.when.params)}${sc.when.limit ? `, limit ${sc.when.limit}` : ""}, ${sc.when.pages} page(s)`, `Then: ${then.join("; ")}`].join("\n"));
       body.block(`test(${tsString(sc.name)}, async () =>`, () => {
         body.line(`const query = setup(${data});`);
+        caller(sc);
         const extra = sc.when.limit !== undefined ? [`limit: ${sc.when.limit}`] : [];
-        body.line(`const pages = await fetchPages(query, ${inputObject(L, plan, sc.when.params, imp, extra)}, ${sc.when.pages});`);
+        body.line(`const pages = await fetchPages(query, ${inputObject(L, plan, sc.when.params, imp, extra)}, ${sc.when.pages}${secured ? ", principal" : ""});`);
         body.line("const items = pages.flatMap((page) => page.items);");
         if (sc.then.items) {
           const items = sc.then.items;
@@ -666,12 +759,14 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
       const data = given.name(sample?.given.aggregates ?? q.scenarios[0]?.given.aggregates ?? []);
       const params = sample?.when.params ?? q.scenarios[0]?.when.params ?? {};
       body.line(`const query = setup(${data});`);
-      body.line(`const page = await query.execute(${inputObject(L, plan, params, imp, [`limit: ${q.page.maxSize + 1}`])});`);
+      caller(sample ?? q.scenarios[0]);
+      body.line(`const page = await ${exec(inputObject(L, plan, params, imp, [`limit: ${q.page.maxSize + 1}`]))};`);
       body.line(`expect(page.items.length).toBeLessThanOrEqual(${q.page.maxSize});`);
       imp.value(L.contextTesting, "expectRejects");
       imp.value(L.runtime, "ConstraintViolation");
-      body.line(`await expectRejects(() => query.execute(${inputObject(L, plan, params, imp, ["limit: 0"])}), ConstraintViolation);`);
+      body.line(`await expectRejects(() => ${exec(inputObject(L, plan, params, imp, ["limit: 0"]))}, ConstraintViolation);`);
     }, ");");
+    if (secured) authorizationTests(L, plan, body, imp, q.scenarios[0]);
     if (!sample) {
       body.comment("No scenario expects two or more items: the cursor tests need at least two results.");
       return;
@@ -687,9 +782,10 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
     body.block(`test("pages of one item cover the whole result in order", async () =>`, () => {
       imp.value(L.contextTesting, "plain");
       body.line(`const query = setup(${data});`);
-      body.line(`const whole = await query.execute(${inputObject(L, plan, params, imp, [`limit: ${q.page.maxSize}`])});`);
+      caller(sample);
+      body.line(`const whole = await ${exec(inputObject(L, plan, params, imp, [`limit: ${q.page.maxSize}`]))};`);
       body.line("expect(whole.nextCursor).toBeNull();");
-      body.line(`const pages = await fetchPages(query, ${inputObject(L, plan, params, imp, ["limit: 1"])}, whole.items.length + 1);`);
+      body.line(`const pages = await fetchPages(query, ${inputObject(L, plan, params, imp, ["limit: 1"])}, whole.items.length + 1${secured ? ", principal" : ""});`);
       body.line("expect(pages.every((page) => page.items.length === 1)).toBe(true);");
       body.line("expect(pages.at(-1)?.nextCursor).toBeNull();");
       body.line("expect(plain(pages.flatMap((page) => page.items))).toEqual(plain(whole.items));");
@@ -704,13 +800,14 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
       imp.value(L.contextTesting, "expectRejects", "expectPresent");
       imp.value(L.persistenceRuntime, "InvalidCursor");
       body.line(`const query = setup(${data});`);
-      body.line(`const first = await query.execute(${inputObject(L, plan, params, imp, ["limit: 1"])});`);
+      caller(sample);
+      body.line(`const first = await ${exec(inputObject(L, plan, params, imp, ["limit: 1"]))};`);
       body.line(`const cursor = expectPresent(first.nextCursor, "nextCursor");`);
       body.line(`const tampered = (cursor.startsWith("e") ? "f" : "e") + cursor.slice(1);`);
-      body.line(`await expectRejects(() => query.execute(${withCursor("tampered")}), InvalidCursor);`);
+      body.line(`await expectRejects(() => ${exec(withCursor("tampered"))}, InvalidCursor);`);
       body.line(`const resigned = cursor.slice(0, -2) + (cursor.endsWith("AA") ? "BB" : "AA");`);
-      body.line(`await expectRejects(() => query.execute(${withCursor("resigned")}), InvalidCursor);`);
-      body.line(`await expectRejects(() => query.execute(${withCursor('"not-a-cursor"')}), InvalidCursor);`);
+      body.line(`await expectRejects(() => ${exec(withCursor("resigned"))}, InvalidCursor);`);
+      body.line(`await expectRejects(() => ${exec(withCursor('"not-a-cursor"'))}, InvalidCursor);`);
     }, ");");
     // Another parameter value.
     let changed: string | undefined;
@@ -729,10 +826,29 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
         imp.value(L.contextTesting, "expectRejects", "expectPresent");
         imp.value(L.persistenceRuntime, "InvalidCursor");
         body.line(`const query = setup(${data});`);
-        body.line(`const first = await query.execute(${inputObject(L, plan, params, imp, ["limit: 1"])});`);
+        caller(sample);
+        body.line(`const first = await ${exec(inputObject(L, plan, params, imp, ["limit: 1"]))};`);
         body.line(`const cursor = expectPresent(first.nextCursor, "nextCursor");`);
-        body.line(`await expectRejects(() => query.execute(${changed}), InvalidCursor);`);
-        body.line(`const next = await query.execute(${inputObject(L, plan, params, imp, ["cursor", "limit: 1"])});`);
+        body.line(`await expectRejects(() => ${exec(changed!)}, InvalidCursor);`);
+        body.line(`const next = await ${exec(inputObject(L, plan, params, imp, ["cursor", "limit: 1"]))};`);
+        body.line("expect(next.items).toHaveLength(1);");
+      }, ");");
+    }
+    if (secured) {
+      const p = scenarioPrincipal(sec!, q, sample);
+      const other = makePrincipal(sec!, { id: otherPrincipalId(sec!, p.id), roles: p.roles, claims: p.claims });
+      imp.value(L.contextTesting, "expectRejects", "expectPresent");
+      imp.value(L.persistenceRuntime, "InvalidCursor");
+      body.line();
+      body.doc("A cursor only continues the query for the principal it was issued to: another caller (same roles and claims, another id) gets InvalidCursor, so a leaked cursor cannot page through someone else's result.");
+      body.block(`test("a cursor is bound to the principal it was issued to", async () =>`, () => {
+        body.line(`const query = setup(${data});`);
+        caller(sample);
+        body.line(`const first = await ${exec(inputObject(L, plan, params, imp, ["limit: 1"]))};`);
+        body.line(`const cursor = expectPresent(first.nextCursor, "nextCursor");`);
+        body.line(`const other = ${principalLiteral(L, other, imp)};`);
+        body.line(`await expectRejects(() => query.execute(${inputObject(L, plan, params, imp, ["cursor"])}, other), InvalidCursor);`);
+        body.line(`const next = await ${exec(inputObject(L, plan, params, imp, ["cursor", "limit: 1"]))};`);
         body.line("expect(next.items).toHaveLength(1);");
       }, ");");
     }
@@ -756,12 +872,16 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
     c.line(`query: ${queryClass(plan)},`);
     c.line(`input: ${inputName(plan)},`);
     c.line("count: number,");
+    if (secured) {
+      imp.type(L.security, "Principal");
+      c.line("principal: Principal | null,");
+    }
   });
   c.block(`): Promise<${pageName(plan)}[]>`, () => {
     c.line(`const pages: ${pageName(plan)}[] = [];`);
     c.line("let cursor: string | null = null;");
     c.block("for (let i = 0; i < count; i++)", () => {
-      c.line("const page = await query.execute({ ...input, cursor });");
+      c.line(`const page = await query.execute({ ...input, cursor }${secured ? ", principal" : ""});`);
       c.line("pages.push(page);");
       c.line("cursor = page.nextCursor;");
       c.line("if (cursor === null) break;");
@@ -770,6 +890,60 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
   });
   c.lines_(body.toString().split("\n"));
   return testFile(L, module, `Query ${q.name} (${L.ca.ir.name}): scenarios and keyset paging over the in-memory reader.`, imp, c.toString());
+}
+
+/** An id of the principal's type other than `id` (for "a cursor of another principal"). */
+export function otherPrincipalId(sec: SecurityIR, id: string): string {
+  if (sec.principal.idType === "UUID") return id === "00000000-0000-4000-8000-0000000000ff" ? "00000000-0000-4000-8000-0000000000fe" : "00000000-0000-4000-8000-0000000000ff";
+  return id === "other-principal" ? "another-principal" : "other-principal";
+}
+
+/**
+ * Derived authorization tests of a protected query: anonymous → Unauthenticated, a principal without the roles →
+ * NotAuthorized naming them, a principal without a claim the rows are scoped by → NotAuthorized naming it; all before
+ * the reader is called (it fails the test when read).
+ */
+function authorizationTests(L: TsLayout, plan: QueryPlan, c: Code, imp: TsImports, sample: QueryScenarioIR | undefined): void {
+  const sec = L.model.security!;
+  const q = plan.query;
+  const auth = q.authorize!;
+  if (!sample && plan.params.some((p) => p.type.k !== "optional")) return;
+  const base = scenarioPrincipal(sec, q, sample ?? { given: {} });
+  const action = tsString(q.name);
+  imp.value(L.contextTesting, "expectRejects");
+  imp.value(L.security, "Unauthenticated");
+  imp.value(L.queries, queryClass(plan));
+  c.line();
+  const lacking = auth.roles.length ? otherRoles(sec, auth) : undefined;
+  const missing = scopeMembers(L, plan).filter((m) => m.optional);
+  c.doc(
+    [
+      `${q.name} checks the caller first: without a principal Unauthenticated${lacking ? `, without ${auth.roles.join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${prop(m.member)}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
+      "Nothing is read before: the reader fails the test when called.",
+    ].join("\n"),
+  );
+  c.block(`test("authorization: refused before anything is read", async () =>`, () => {
+    c.block("const reader =", () => c.block("read: (): never =>", () => c.line('throw new Error("read before authorization");'), ","), ";");
+    c.line(`const query = new ${queryClass(plan)}({ reader, cursors });`);
+    c.line(`const input = ${inputObject(L, plan, sample?.when.params ?? {}, imp)};`);
+    c.line("const anonymous = await expectRejects(() => query.execute(input, null), Unauthenticated);");
+    c.line(`expect(anonymous.details).toEqual({ action: ${action} });`);
+    if (lacking || missing.length) imp.value(L.security, "NotAuthorized");
+    if (lacking) {
+      const p = makePrincipal(sec, { id: base.id, roles: lacking, claims: base.claims });
+      c.line(`const lacking = ${principalLiteral(L, p, imp)};`);
+      c.line("const refused = await expectRejects(() => query.execute(input, lacking), NotAuthorized);");
+      c.line(`expect(refused.details).toEqual({ action: ${action}, requiredRoles: ${rolesLiteral(auth.roles)} });`);
+    }
+    missing.forEach((m, i) => {
+      const claims = { ...base.claims, [m.member]: null };
+      const p = makePrincipal(sec, { id: base.id, roles: base.roles, claims });
+      const v = `unscoped${missing.length > 1 ? String(i + 1) : ""}`;
+      c.line(`const ${v} = ${principalLiteral(L, p, imp)};`);
+      c.line(`const ${v}Error = await expectRejects(() => query.execute(input, ${v}), NotAuthorized);`);
+      c.line(`expect(${v}Error.details).toEqual({ action: ${action}, missingClaim: ${tsString(m.member)} });`);
+    });
+  }, ");");
 }
 
 /** Field values of every aggregate the context's scenarios mention (for the row mapping tests). */

@@ -150,7 +150,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     }
   }
   if (layouts.some(hasQueries)) {
-    gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", PERSISTENCE_TS));
+    gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", templateSections(PERSISTENCE_TS, { security: !!model.security })));
   }
   const api = model.generation.typescript.api;
   if (api) {
@@ -175,7 +175,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       gen(P.file(P.apiModule("authentication")), template("Bearer JWT authentication of the HTTP API (RFC 6750, RFC 7519, RFC 8725) with jose.", API_AUTHENTICATION_TS));
     }
     if (queries) {
-      gen(P.file(P.apiModule("query-runtime")), template("Queries over HTTP (model-independent): `GET path?…` endpoints, the server route reading the query string, the client caller.", API_QUERIES_TS));
+      gen(P.file(P.apiModule("query-runtime")), template("Queries over HTTP (model-independent): `GET path?…` endpoints, the server route reading the query string, the client caller.", templateSections(API_QUERIES_TS, { security: secured })));
     }
     gen(P.file(P.apiModule("register")), template("Registers the client's error type as TanStack Query's default error (module augmentation).", API_REGISTER_TS));
     const served = apiContexts(layouts);

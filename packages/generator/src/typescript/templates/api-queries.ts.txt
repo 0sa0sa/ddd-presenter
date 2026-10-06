@@ -2,8 +2,14 @@ import { z } from "zod";
 
 import { ConstraintViolation, parseWith } from "../runtime.js";
 import {
+  //#if security
+  type EndpointAuth,
+  //#endif
   type ErrorRegistry,
   type ErrorStatuses,
+  //#if security
+  type RateLimitPolicy,
+  //#endif
   type RequestOptions,
   type Route,
   send,
@@ -26,6 +32,11 @@ export interface QueryEndpoint<I extends z.ZodType, O extends z.ZodType> {
   >;
   readonly output: O;
   readonly errors: ErrorStatuses;
+  //#if security
+  readonly auth: EndpointAuth;
+  /** Token bucket of the endpoint (`rate_limit`), or null for none. */
+  readonly rateLimit: RateLimitPolicy | null;
+  //#endif
 }
 
 export function queryEndpoint<I extends z.ZodType, O extends z.ZodType>(
@@ -34,10 +45,20 @@ export function queryEndpoint<I extends z.ZodType, O extends z.ZodType>(
   return Object.freeze(endpoint);
 }
 
+//#if security
+/**
+ * Anything with the query's `execute` (the generated query classes): a protected query takes the
+ * principal as the second argument, a public one ignores it.
+ */
+export interface Runs<I, P> {
+  execute(input: I, principal: P | null): Promise<unknown>;
+}
+//#else
 /** Anything with the query's `execute` (the generated query classes). */
 export interface Runs<I> {
   execute(input: I): Promise<unknown>;
 }
+//#endif
 
 /**
  * The input of a query from a URL's query string: every name must be a declared parameter, at most
@@ -67,6 +88,23 @@ function readQueryString(
   return input;
 }
 
+//#if security
+/**
+ * The route of a query. The handler authenticates (401) and rate-limits (429) it from `auth` and
+ * `rateLimit` before `handle`; the query authorizes the principal (403) before reading anything.
+ */
+export function queryRoute<D, P, I extends z.ZodType, O extends z.ZodType>(
+  endpoint: QueryEndpoint<I, O>,
+  dependency: (dependencies: D) => Runs<z.input<I>, P> | undefined,
+): Route<D, P> {
+  return {
+    method: endpoint.method,
+    path: endpoint.path,
+    errors: endpoint.errors,
+    auth: endpoint.auth,
+    rateLimit: endpoint.rateLimit,
+    async handle(request, dependencies, _id, principal) {
+//#else
 export function queryRoute<D, I extends z.ZodType, O extends z.ZodType>(
   endpoint: QueryEndpoint<I, O>,
   dependency: (dependencies: D) => Runs<z.input<I>> | undefined,
@@ -76,12 +114,17 @@ export function queryRoute<D, I extends z.ZodType, O extends z.ZodType>(
     path: endpoint.path,
     errors: endpoint.errors,
     async handle(request, dependencies) {
+//#endif
       const query = dependency(dependencies);
       if (query === undefined) return undefined;
       const url = new URL(request.url);
       const input = readQueryString(url.searchParams, endpoint.params, endpoint.name);
       // The query checks the input (ConstraintViolation) and the cursor (InvalidCursor): both 400.
+      //#if security
+      const page = await query.execute(input as z.input<I>, principal);
+      //#else
       const page = await query.execute(input as z.input<I>);
+      //#endif
       return new Response(JSON.stringify(page), {
         status: 200,
         headers: { "content-type": "application/json" },

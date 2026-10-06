@@ -24,6 +24,7 @@ const LONG_RULES = fixture("long-rules.ddd.yaml");
 const IDENTITIES = fixture("identities.ddd.yaml");
 /** Roles, a typed principal with claims, bearer JWT, rate limits; public, internal and role / rule protected use cases. */
 const SECURITY = fixture("security.ddd.yaml");
+const SECURE_QUERIES = fixture("secure-queries.ddd.yaml");
 
 /** Queries (read side): trigram search, keyset paging, PostgreSQL persistence (queries.test.ts runs its SQL on PGlite). */
 const QUERIES = fixture("queries.ddd.yaml");
@@ -562,9 +563,8 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
       "api/client.ts",
       "api/contract.ts",
       "api/queries.ts",
-      "api/rate-limit.ts",
-
       "api/query-runtime.ts",
+      "api/rate-limit.ts",
       "api/register.ts",
       "api/runtime.ts",
       "api/server.ts",
@@ -587,16 +587,19 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
   test("contract: a POST per use case (command schema in, result out, error statuses), a GET per aggregate", () => {
     const contract = file("cleaning-staff/api/contract.ts");
     expect(contract).toContain('path: "/api/cleaning-staff/accept-invitation",\n      input: AcceptInvitation.schema,\n      output: z.void(),');
+    // security: 401 / 403 for use cases that need a principal; queries: PostgreSQL repositories, so saving can lose an
+    // optimistic-locking race (409).
     expect(contract).toContain(
-      "errors: {\n        constraint_violation: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n      },",
+      "errors: {\n        constraint_violation: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n        concurrency_conflict: 409,\n      },",
     );
     expect(contract).toContain("output: uuidSchema,");
-    expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n        email_blocked: 422,\n        invalid_invitation_window: 422,\n      },");
-
-    // The example's context declares a query, so it has PostgreSQL repositories: saving can lose an optimistic-locking race (409).
-    expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        invitation_not_found: 404,\n        invitation_not_deliverable: 409,\n        invalid_invitation_window: 422,\n        concurrency_conflict: 409,\n      },");
-    expect(contract).toContain("output: uuidSchema,");
-    expect(contract).toContain("errors: {\n        constraint_violation: 400,\n        email_blocked: 422,\n        invalid_invitation_window: 422,\n        concurrency_conflict: 409,\n      },");
+    expect(contract).toContain(
+      "errors: {\n        constraint_violation: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n        email_blocked: 422,\n        invalid_invitation_window: 422,\n        concurrency_conflict: 409,\n      },",
+    );
+    // The protected query: 401 / 403 next to its 400s, and who may call it.
+    expect(contract).toContain(
+      'errors: {\n        constraint_violation: 400,\n        invalid_cursor: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n      },\n      auth: { kind: "principal", roles: ["admin"] },\n      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "principal" },',
+    );
     expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      idType: "string",\n      output: CleaningStaffInvitationJson,');
     expect(contract).toContain("acceptedAt: InstantSchema.nullable(),");
     expect(file("api/contract.ts")).toContain('export const API_BASE_PATH = "/api";');
@@ -881,9 +884,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+48 passed/);
-
-      expect(vitest.out).toMatch(/Tests\s+42 passed/);
+      expect(vitest.out).toMatch(/Tests\s+65 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -901,6 +902,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
     ["the security model without the HTTP API (authorized use cases and read access only)", SECURITY, false],
 
     ["the queries model (trigram / prefix / exact search, keyset paging, PostgreSQL adapters; HTTP API with infinite queries)", QUERIES, true],
+    ["the secure-queries model (protected queries: roles, rows scoped to the caller, cursors bound to it; 401 / 403 / 429 over HTTP)", SECURE_QUERIES, true],
     ["a model reflected from the discovery board", FROM_BOARD, false],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml, false],
   ] as [string, string, boolean][])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source, api) => {
@@ -950,6 +952,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       ["security", withApi(SECURITY)],
 
       ["queries", withApi(QUERIES)],
+      ["secure-queries", withApi(SECURE_QUERIES)],
       ["from-board", asTypeScript(FROM_BOARD)],
       ["proposed", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
     ];

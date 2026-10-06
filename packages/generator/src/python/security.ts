@@ -167,6 +167,10 @@ export function securityFiles(model: ModelIR, served: { useCases: { name: string
     const name = `read_${toSnake(ag.name)}`;
     if (l) limits.push({ name, text: `RateLimit(${pyString(name)}, ${l.requests}, ${windowSeconds(l)}, ${pyString(l.by)})` });
   }
+  for (const q of model.contexts.flatMap((ctx) => ctx.queries ?? [])) {
+    const l = effectiveRateLimit(model, q);
+    if (l) limits.push({ name: q.name, text: `RateLimit(${pyString(q.name)}, ${l.requests}, ${windowSeconds(l)}, ${pyString(l.by)})` });
+  }
   imp.from("collections.abc", "Mapping");
   imp.from(rateLimitModule(model), "RateLimit");
   c.line().line();
@@ -175,7 +179,7 @@ export function securityFiles(model: ModelIR, served: { useCases: { name: string
     c.indent(() => limits.forEach((l) => c.line(`${pyString(l.name)}: ${l.text},`)));
     c.line("}");
   }
-  c.line('\"\"\"Rate limit per endpoint (use case name, or read_<aggregate>), for your web layer.');
+  c.line(`\"\"\"Rate limit per endpoint (use case name, read_<aggregate>${model.contexts.some((ctx) => ctx.queries?.length) ? " or query name" : ""}), for your web layer.`);
   c.line();
   c.line("Use it as `RateLimiter().consume(RATE_LIMITS[name], subject)` (see rate_limit.py).");
   c.line('\"\"\"');

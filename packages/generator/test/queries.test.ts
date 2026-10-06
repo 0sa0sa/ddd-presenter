@@ -151,6 +151,68 @@ describe("queries: what the generators emit", () => {
     expect(plain.files.map((f) => f.content).join("\n")).not.toContain("concurrency_conflict");
   });
 
+  test("protected queries: the role check first, the claim the rows are scoped by, the scope bound into the cursor (both targets)", () => {
+    const secure = fixture("secure-queries.ddd.yaml");
+    const out = ts(secure);
+    const q = file(out, "src/secure_board/generated/board/application/queries.ts");
+    // Role check, then the claim, then the input: nothing is read (or even parsed) for a caller who may not run it.
+    const body = q.slice(q.indexOf("async execute(input: CompanyJobsInput, principal: Principal | null)"));
+    const order = ['authorize(principal, "company_jobs", ["admin", "staff"]);', "const companyId = principal.companyId;", "missingClaim: \"company_id\"", "parseWith(", "const scope = { principal: principal.id, values: { companyId } };", "scope,\n    );"];
+    const at = order.map((x) => body.indexOf(x));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(q).toContain('{ column: "company_id", kind: "uuid", op: "eq", principal: "companyId" },');
+    expect(q).toContain("async execute(\n    input: MyApplicationsInput,\n    principal: Principal | null,\n  ): Promise<MyApplicationsPage> {");
+    expect(q).toContain("const scope = { principal: principal.id, values: { id: principal.id } };");
+    // A public query keeps its signature.
+    expect(q).toContain("async execute(input: OpenJobsInput = {}): Promise<OpenJobsPage> {");
+    // SQL: the scoped filter always applies (no IS NULL escape); the order index leads with the scoped column.
+    const sql = file(out, "src/secure_board/generated/board/persistence/postgres.ts");
+    expect(sql).toContain("WHERE company_id = $1::uuid\n  AND ($2::text IS NULL OR status = $2::text)");
+    expect(sql).toContain('args: [{ principal: "companyId" }, { param: "status" }, { limit: true }],');
+    expect(file(out, "sql/board.sql")).toContain('CREATE INDEX IF NOT EXISTS job_company_jobs_order_idx\n  ON board.job (company_id, posted_at DESC, id DESC);');
+    // The runtime: the scope reaches the readers and the fingerprint (only in models with security).
+    const runtime = file(out, "src/secure_board/generated/persistence.ts");
+    expect(runtime).toContain("if (scope !== undefined) parts.push(scope.principal, canonicalValues(scope.values));");
+    expect(runtime).toContain('if ("principal" in arg) return sqlParam(request.scope?.[arg.principal]);');
+    expect(runtime).not.toContain("//#");
+    expect(file(ts(), "src/member_directory/generated/persistence.ts")).not.toContain("scope");
+    // HTTP: the route takes the principal; the contract records auth, rate limit and 401 / 403.
+    const route = file(out, "src/secure_board/generated/api/query-runtime.ts");
+    expect(route).toContain("): Route<D, P> {");
+    expect(route).toContain("const page = await query.execute(input as z.input<I>, principal);");
+    expect(route).not.toContain("//#");
+    expect(file(ts(), "src/member_directory/generated/api/query-runtime.ts")).toContain("): Route<D> {");
+    const contract = file(out, "src/secure_board/generated/board/api/contract.ts");
+    expect(contract).toContain('auth: { kind: "principal", roles: ["admin", "staff"] },\n      rateLimit: { name: "company_jobs", requests: 10, windowSeconds: 60, by: "principal" },');
+    expect(contract).toContain('errors: { constraint_violation: 400, invalid_cursor: 400 },\n      auth: { kind: "public" },\n      rateLimit: { name: "open_jobs", requests: 30, windowSeconds: 60, by: "ip" },');
+    // Python: the same order and the same SQL; RATE_LIMITS names the queries.
+    const p = py(secure);
+    const pq = file(p, "src/secure_board/generated/board/application/queries.py");
+    const pbody = pq.slice(pq.indexOf("class CompanyJobsQuery"));
+    const porder = ['principal = authorize(principal, "company_jobs", ("admin", "staff"))', "company_id = principal.company_id", 'raise NotAuthorized(action="company_jobs", missing_claim="company_id")', "run_query(", 'scope=QueryScope(principal=str(principal.id), values={"company_id": company_id}),'];
+    const pat = porder.map((x) => pbody.indexOf(x));
+    expect(pat.every((i) => i >= 0)).toBe(true);
+    expect([...pat].sort((a, b) => a - b)).toEqual(pat);
+    expect(pq).toContain('FilterSpec(column="company_id", kind="uuid", op="eq", principal="company_id"),');
+    expect(file(p, "src/secure_board/generated/security.py")).toContain('"company_jobs": RateLimit("company_jobs", 10, 60, "principal"),');
+    expect(file(p, "src/secure_board/generated/board/persistence/postgres.py")).toContain('("principal", "company_id")');
+    expect(file(p, "sql/board.sql")).toBe(file(out, "sql/board.sql"));
+    // Generated tests: refused before the reader is read, cursors bound to the principal, HTTP 401 / 403 / 429.
+    const t = file(out, "tests/generated/board-company-jobs.test.ts");
+    expect(t).toContain('test("authorization: refused before anything is read", async () => {');
+    expect(t).toContain('throw new Error("read before authorization");');
+    expect(t).toContain('expect(unscopedError.details).toEqual({ action: "company_jobs", missingClaim: "company_id" });');
+    expect(t).toContain('test("a cursor is bound to the principal it was issued to", async () => {');
+    const api = file(out, "tests/generated/board-api.test.ts");
+    for (const name of ["company_jobs: 401 without or with an invalid token", "company_jobs: without a required role is 403", "rate limit: company_jobs answers 429 when used up, then refills"]) {
+      expect(api).toContain(`test(${JSON.stringify(name)}, async () => {`);
+    }
+    const pt = file(p, "tests/generated/test_board_company_jobs.py");
+    expect(pt).toContain("def test_authorization_is_refused_before_anything_is_read() -> None:");
+    expect(pt).toContain("def test_a_cursor_is_bound_to_the_principal_it_was_issued_to() -> None:");
+  });
+
   test("the reader port, the query service and the Postgres adapters", () => {
     const app = file(ts(), "src/member_directory/generated/directory/application/queries.ts");
     expect(app).toContain("export interface SearchMembersReader {");
@@ -211,6 +273,25 @@ describe.skipIf(!PGLITE.dir)("generated PostgreSQL code runs on PGlite", () => {
       const out = r.stdout.toString() + r.stderr.toString();
       expect({ code: r.exitCode, fail: /(\d+) fail/.exec(out)?.[1], out: r.exitCode ? out : "" }).toEqual({ code: 0, fail: "0", out: "" });
       expect(out).toMatch(/\b3 pass/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 600_000);
+
+  test("protected queries: rows scoped to the caller in SQL equal the in-memory readers; cursors bound to the caller; the order index leads with the scoped column", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-pglite-"));
+    try {
+      const text = asTypeScript(fixture("secure-queries.ddd.yaml"));
+      for (const f of generateTypeScript(analyze(text), text).files) {
+        mkdirSync(dirname(join(dir, f.path)), { recursive: true });
+        writeFileSync(join(dir, f.path), f.content);
+      }
+      symlinkSync(join(PGLITE.dir!, "node_modules"), join(dir, "node_modules"));
+      writeFileSync(join(dir, "tests/pglite.test.ts"), fixture("secure-queries-pglite.test.ts.txt"));
+      const r = Bun.spawnSync(["bun", "test", "tests/pglite.test.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
+      const out = r.stdout.toString() + r.stderr.toString();
+      expect({ code: r.exitCode, fail: /(\d+) fail/.exec(out)?.[1], out: r.exitCode ? out : "" }).toEqual({ code: 0, fail: "0", out: "" });
+      expect(out).toMatch(/\b2 pass/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

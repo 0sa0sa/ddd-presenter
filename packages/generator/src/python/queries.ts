@@ -5,7 +5,23 @@
  *
  * Contract: docs/05 §9; decisions: docs/09 §19.
  */
-import { planQuery, queryParamsOwner, tableOf, type ColumnIR, type QueryPlan, type QueryScenarioIR, type TableIR, type Type } from "@ddd/core";
+import {
+  makePrincipal,
+  otherRoles,
+  planQuery,
+  queryParamsOwner,
+  queryScope,
+  requiresPrincipal,
+  scenarioPrincipal,
+  tableOf,
+  type ColumnIR,
+  type QueryPlan,
+  type QueryScenarioIR,
+  type TableIR,
+  type Type,
+} from "@ddd/core";
+import { rolesText, rolesTuple, securityModule } from "./security.ts";
+import { principalPy } from "./tests.ts";
 import { psycopgText, queryStatements, repositorySql, type SqlArg } from "../sql.ts";
 import { fieldLines, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
@@ -17,6 +33,24 @@ export function pyContextPlans(L: Layout): QueryPlan[] {
 
 export function pyHasQueries(L: Layout): boolean {
   return (L.ca.ir.queries ?? []).length > 0;
+}
+
+/** Whether running the query needs an authenticated principal (`security` with roles / authenticated). */
+function protectedQuery(L: Layout, plan: QueryPlan): boolean {
+  return !!L.model.security && requiresPrincipal(plan.query);
+}
+
+/** Principal members the rows are scoped to, with whether the claim may be missing. */
+function scopeMembers(L: Layout, plan: QueryPlan): { member: string; optional: boolean }[] {
+  const sec = L.model.security;
+  if (!sec) return [];
+  return queryScope(plan.query).map((member) => ({ member, optional: member !== "id" && !sec.principal.claims.find((c) => c.name === member)?.required }));
+}
+
+/** An id of the principal's type other than `id` (a cursor of another principal). */
+function otherPrincipalId(L: Layout, id: string): string {
+  if (L.model.security!.principal.idType === "UUID") return id === "00000000-0000-4000-8000-0000000000ff" ? "00000000-0000-4000-8000-0000000000fe" : "00000000-0000-4000-8000-0000000000ff";
+  return id === "other-principal" ? "another-principal" : "other-principal";
 }
 
 function tables(L: Layout): TableIR[] {
@@ -127,7 +161,8 @@ export function pyQueriesFile(L: Layout): PyFile {
         c,
         "filters=",
         plan.filters.map(({ filter, column }) => {
-          const target = filter.param !== undefined ? `param=${pyString(filter.param)}` : `value=${literal(L, filter.value, column, imp)}`;
+          const target =
+            filter.param !== undefined ? `param=${pyString(filter.param)}` : filter.principal !== undefined ? `principal=${pyString(filter.principal)}` : `value=${literal(L, filter.value, column, imp)}`;
           return `FilterSpec(column=${pyString(column.name)}, kind=${pyString(valueKind(column))}, op=${pyString(filter.op)}, ${target})`;
         }),
       );
@@ -163,7 +198,10 @@ export function pyQueriesFile(L: Layout): PyFile {
       c.line(`def read(self, request: QueryRequest) -> QueryResult[${itemName(plan)}]: ...`);
     });
     // Query service.
-    const required = plan.params.some((p) => p.type.k !== "optional");
+    const secured = protectedQuery(L, plan);
+    const scope = scopeMembers(L, plan);
+    const required = secured || plan.params.some((p) => p.type.k !== "optional");
+    const auth = q.authorize;
     c.line().line();
     c.line(`class ${queryClass(plan)}:`);
     c.indent(() => {
@@ -171,8 +209,16 @@ export function pyQueriesFile(L: Layout): PyFile {
         [
           ...(q.description ? [q.description, ""] : []),
           `Query ${q.name} (reads ${ag.name}).`,
+          ...(secured
+            ? [
+                "",
+                `Authorize: ${rolesText(auth!.roles)}. \`principal\` is checked first, before anything is read: Unauthenticated without one${[...(auth!.roles.length ? ["without a required role"] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${m.member}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${m.member}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal.`,
+              ]
+            : L.model.security && auth?.kind === "public"
+              ? ["", "Authorize: public (no principal needed)."]
+              : []),
           "",
-          `Validates the input (ConstraintViolation), clamps \`limit\` to ${q.page.maxSize}, checks the cursor (InvalidCursor: tampered, expired, or made for other parameters) and returns a page whose \`next_cursor\` is None at the end.`,
+          `Validates the input (ConstraintViolation), clamps \`limit\` to ${q.page.maxSize}, checks the cursor (InvalidCursor: tampered, expired, or made for other parameters${secured ? " or another principal" : ""}) and returns a page whose \`next_cursor\` is None at the end.`,
         ].join("\n"),
       );
       c.line();
@@ -182,8 +228,29 @@ export function pyQueriesFile(L: Layout): PyFile {
         c.line("self._cursors = cursors");
       });
       c.line();
-      c.line(`def execute(self, params: ${inputName(plan)}${required ? "" : " | None = None"}) -> Page[${itemName(plan)}]:`);
+      const sig = `def execute(self, params: ${inputName(plan)}${required ? "" : " | None = None"}${secured ? ", principal: Principal | None" : ""}) -> Page[${itemName(plan)}]:`;
+      if (secured) imp.from(securityModule(L.model), "Principal");
+      if (4 + sig.length <= 100) c.line(sig);
+      else {
+        c.line("def execute(");
+        c.indent(() => {
+          c.line("self,");
+          c.line(`params: ${inputName(plan)}${required ? "" : " | None = None"},`);
+          if (secured) c.line("principal: Principal | None,");
+        });
+        c.line(`) -> Page[${itemName(plan)}]:`);
+      }
       c.indent(() => {
+        if (secured) {
+          imp.from(securityModule(L.model), "authorize");
+          c.line(`principal = authorize(principal, ${pyString(q.name)}, ${rolesTuple(auth!.roles)})`);
+          for (const m of scope.filter((x) => x.optional)) {
+            imp.from(securityModule(L.model), "NotAuthorized");
+            c.line(`${m.member} = principal.${m.member}`);
+            c.line(`if ${m.member} is None:`);
+            c.indent(() => c.line(`raise NotAuthorized(action=${pyString(q.name)}, missing_claim=${pyString(m.member)})`));
+          }
+        }
         c.line(required ? "query = params" : `query = params if params is not None else ${inputName(plan)}()`);
         c.line("return run_query(");
         c.indent(() => {
@@ -194,6 +261,20 @@ export function pyQueriesFile(L: Layout): PyFile {
           c.line("cursor=query.cursor,");
           c.line("limit=query.limit,");
           c.line("read=self._reader.read,");
+          if (secured) {
+            imp.from(L.persistenceRuntime, "QueryScope");
+            const values = scope.map((m) => `${pyString(m.member)}: ${m.optional ? m.member : `principal.${m.member}`}`);
+            const one = `scope=QueryScope(principal=str(principal.id), values={${values.join(", ")}}),`;
+            if (12 + one.length <= 100) c.line(one);
+            else {
+              c.line("scope=QueryScope(");
+              c.indent(() => {
+                c.line("principal=str(principal.id),");
+                c.line(`values={${values.join(", ")}},`);
+              });
+              c.line("),");
+            }
+          }
         });
         c.line(")");
       });
@@ -332,6 +413,8 @@ function argLiteral(L: Layout, a: SqlArg, imp: Imports): string {
       return `("param", ${pyString(a.name)})`;
     case "value":
       return `("value", ${literal(L, a.value, a.column, imp)})`;
+    case "principal":
+      return `("principal", ${pyString(a.name)})`;
     case "search":
       return '("search", None)';
     case "key":
@@ -523,6 +606,14 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
   imp.from(L.queries, queryClass(plan), inputName(plan), itemName(plan));
   imp.from(L.testing, `InMemory${ag.name}Repository`, `InMemory${readerName(plan)}`);
   imp.from(L.mod("aggregates"), ag.name);
+  const sec = L.model.security;
+  const secured = protectedQuery(L, plan);
+  /** `query.execute(params)`, plus the test's principal for a protected query. */
+  const exec = (query: string, input: string) => `${query}.execute(${input}${secured ? ", principal" : ""})`;
+  /** Declares `principal` (the caller of a scenario) for a protected query. */
+  const caller = (sc: QueryScenarioIR | undefined) => {
+    if (secured) body.line(`principal = ${principalPy(L, scenarioPrincipal(sec!, q, sc ?? { given: {} }), imp)}`);
+  };
   for (const sc of q.scenarios) {
     const data = givens.name(sc.given.aggregates);
     body.line().line();
@@ -533,7 +624,8 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
       if (sc.then.nextCursor) then.push(`next_cursor ${sc.then.nextCursor}`);
       body.docstring([sc.description ?? "Scenario generated from the model.", "", `Given: ${sc.given.aggregates.length} ${ag.name}`, `When: ${spaced(sc.when.params)}${sc.when.limit ? `, limit ${sc.when.limit}` : ""}, ${sc.when.pages} page(s)`, `Then: ${then.join("; ")}`].join("\n"));
       const extra = sc.when.limit !== undefined ? [`limit=${sc.when.limit}`] : [];
-      body.line(`pages = _fetch_pages(_setup(${data}), ${inputCall(L, plan, sc.when.params, imp, extra)}, ${sc.when.pages})`);
+      caller(sc);
+      body.line(`pages = _fetch_pages(_setup(${data}), ${inputCall(L, plan, sc.when.params, imp, extra)}, ${sc.when.pages}${secured ? ", principal" : ""})`);
       body.line("items = [item for page in pages for item in page.items]");
       const items = sc.then.items;
       if (items) {
@@ -561,11 +653,55 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
   body.line("def test_limit_is_clamped_to_the_maximum_page_size() -> None:");
   body.indent(() => {
     body.docstring(`\`limit\` above the maximum page size (${q.page.maxSize}) is clamped, not rejected; below 1 it is a ConstraintViolation.`);
-    body.line(`page = _setup(${clampData}).execute(${inputCall(L, plan, params, imp, [`limit=${q.page.maxSize + 1}`])})`);
+    caller(sample ?? q.scenarios[0]);
+    body.line(`page = ${exec(`_setup(${clampData})`, inputCall(L, plan, params, imp, [`limit=${q.page.maxSize + 1}`]))}`);
     body.line(`assert len(page.items) <= ${q.page.maxSize}`);
     body.line("with pytest.raises(ConstraintViolation):");
     body.indent(() => body.line(`${inputCall(L, plan, params, imp, ["limit=0"])}`));
   });
+  if (secured && (q.scenarios[0] || !plan.params.some((p) => p.type.k !== "optional"))) {
+    const auth = q.authorize!;
+    const base = scenarioPrincipal(sec!, q, q.scenarios[0] ?? { given: {} });
+    const lacking = auth.roles.length ? otherRoles(sec!, auth) : undefined;
+    const missing = scopeMembers(L, plan).filter((m) => m.optional);
+    const secMod = securityModule(L.model);
+    imp.from(secMod, "Unauthenticated");
+    if (lacking || missing.length) imp.from(secMod, "NotAuthorized");
+    body.line().line();
+    body.line("def test_authorization_is_refused_before_anything_is_read() -> None:");
+    body.indent(() => {
+      body.docstring(
+        [
+          `${q.name} checks the caller first: without a principal Unauthenticated${lacking ? `, without ${auth.roles.join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${m.member}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
+          "",
+          "Nothing is read before: the reader fails the test when called.",
+        ].join("\n"),
+      );
+      body.line(`query = ${queryClass(plan)}(reader=_UnreadableReader(), cursors=CURSORS)`);
+      body.line(`params = ${inputCall(L, plan, q.scenarios[0]?.when.params ?? {}, imp)}`);
+      body.line("with pytest.raises(Unauthenticated) as anonymous:");
+      body.indent(() => body.line("query.execute(params, None)"));
+      body.line(`assert anonymous.value.details == {"action": ${pyString(q.name)}}`);
+      if (lacking) {
+        body.line(`lacking = ${principalPy(L, makePrincipal(sec!, { id: base.id, roles: lacking, claims: base.claims }), imp)}`);
+        body.line("with pytest.raises(NotAuthorized) as refused:");
+        body.indent(() => body.line("query.execute(params, lacking)"));
+        body.line(`assert refused.value.details == {`);
+        body.indent(() => {
+          body.line(`"action": ${pyString(q.name)},`);
+          body.line(`"required_roles": [${auth.roles.map(pyString).join(", ")}],`);
+        });
+        body.line("}");
+      }
+      missing.forEach((m) => {
+        const p = makePrincipal(sec!, { id: base.id, roles: base.roles, claims: { ...base.claims, [m.member]: null } });
+        body.line(`unscoped = ${principalPy(L, p, imp)}`);
+        body.line("with pytest.raises(NotAuthorized) as missing:");
+        body.indent(() => body.line("query.execute(params, unscoped)"));
+        body.line(`assert missing.value.details == {"action": ${pyString(q.name)}, "missing_claim": ${pyString(m.member)}}`);
+      });
+    });
+  }
   if (sample) {
     const data = givens.name(sample.given.aggregates);
     imp.from(L.persistenceRuntime, "InvalidCursor");
@@ -574,9 +710,10 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
     body.indent(() => {
       body.docstring(`Paging through ${sample.name}'s data one item at a time gives exactly the single-page result: same items, same order, nothing twice, nothing missing.`);
       body.line(`query = _setup(${data})`);
-      body.line(`whole = query.execute(${inputCall(L, plan, params, imp, [`limit=${q.page.maxSize}`])})`);
+      caller(sample);
+      body.line(`whole = ${exec("query", inputCall(L, plan, params, imp, [`limit=${q.page.maxSize}`]))}`);
       body.line("assert whole.next_cursor is None");
-      body.line(`pages = _fetch_pages(query, ${inputCall(L, plan, params, imp, ["limit=1"])}, len(whole.items) + 1)`);
+      body.line(`pages = _fetch_pages(query, ${inputCall(L, plan, params, imp, ["limit=1"])}, len(whole.items) + 1${secured ? ", principal" : ""})`);
       body.line("assert all(len(page.items) == 1 for page in pages)");
       body.line("assert pages[-1].next_cursor is None");
       body.line("paged = [item for page in pages for item in page.items]");
@@ -588,14 +725,15 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
     body.indent(() => {
       body.docstring("A cursor whose payload or signature was changed is rejected (it is signed with HMAC-SHA256).");
       body.line(`query = _setup(${data})`);
-      body.line(`cursor = query.execute(${inputCall(L, plan, params, imp, ["limit=1"])}).next_cursor`);
+      caller(sample);
+      body.line(`cursor = ${exec("query", inputCall(L, plan, params, imp, ["limit=1"]))}.next_cursor`);
       body.line("assert cursor is not None");
       body.line('tampered = ("f" if cursor.startswith("e") else "e") + cursor[1:]');
       body.line('resigned = cursor[:-2] + ("BB" if cursor.endswith("AA") else "AA")');
       body.line('for bad in (tampered, resigned, "not-a-cursor"):');
       body.indent(() => {
         body.line("with pytest.raises(InvalidCursor):");
-        body.indent(() => body.line(`query.execute(${inputCall(L, plan, params, imp, ["cursor=bad"])})`));
+        body.indent(() => body.line(exec("query", inputCall(L, plan, params, imp, ["cursor=bad"]))));
       });
     });
     let changed: string | undefined;
@@ -611,11 +749,29 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
       body.indent(() => {
         body.docstring("A cursor only continues the query it was made for: with other parameters (or search text) it is rejected instead of returning a wrong page.");
         body.line(`query = _setup(${data})`);
-        body.line(`cursor = query.execute(${inputCall(L, plan, params, imp, ["limit=1"])}).next_cursor`);
+        caller(sample);
+        body.line(`cursor = ${exec("query", inputCall(L, plan, params, imp, ["limit=1"]))}.next_cursor`);
         body.line("assert cursor is not None");
         body.line("with pytest.raises(InvalidCursor):");
-        body.indent(() => body.line(`query.execute(${changed})`));
-        body.line(`assert len(query.execute(${inputCall(L, plan, params, imp, ["cursor=cursor", "limit=1"])}).items) == 1`);
+        body.indent(() => body.line(exec("query", changed!)));
+        body.line(`assert len(${exec("query", inputCall(L, plan, params, imp, ["cursor=cursor", "limit=1"]))}.items) == 1`);
+      });
+    }
+    if (secured) {
+      const p = scenarioPrincipal(sec!, q, sample);
+      const other = makePrincipal(sec!, { id: otherPrincipalId(L, p.id), roles: p.roles, claims: p.claims });
+      body.line().line();
+      body.line("def test_a_cursor_is_bound_to_the_principal_it_was_issued_to() -> None:");
+      body.indent(() => {
+        body.docstring("Another caller (same roles and claims, another id) gets InvalidCursor: a leaked cursor cannot page through someone else's result.");
+        body.line(`query = _setup(${data})`);
+        caller(sample);
+        body.line(`cursor = ${exec("query", inputCall(L, plan, params, imp, ["limit=1"]))}.next_cursor`);
+        body.line("assert cursor is not None");
+        body.line(`other = ${principalPy(L, other, imp)}`);
+        body.line("with pytest.raises(InvalidCursor):");
+        body.indent(() => body.line(`query.execute(${inputCall(L, plan, params, imp, ["cursor=cursor"])}, other)`));
+        body.line(`assert len(${exec("query", inputCall(L, plan, params, imp, ["cursor=cursor", "limit=1"]))}.items) == 1`);
       });
     }
   }
@@ -636,15 +792,36 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
     c.line("repository.seed(*aggregates)");
     c.line(`return ${queryClass(plan)}(reader=InMemory${readerName(plan)}(repository), cursors=CURSORS)`);
   });
+  if (secured) {
+    imp.from(L.persistenceRuntime, "QueryRequest", "QueryResult");
+    c.line().line();
+    c.line("class _UnreadableReader:");
+    c.indent(() => {
+      c.docstring("A reader that fails the test when read: authorization must come first.");
+      c.line();
+      c.line(`def read(self, request: QueryRequest) -> QueryResult[${itemName(plan)}]:`);
+      c.indent(() => c.line('raise AssertionError("read before authorization")'));
+    });
+  }
   c.line().line();
-  c.line(`def _fetch_pages(query: ${queryClass(plan)}, params: ${inputName(plan)}, count: int) -> list[Page[${itemName(plan)}]]:`);
+  if (secured) {
+    imp.from(securityModule(L.model), "Principal");
+    c.line("def _fetch_pages(");
+    c.indent(() => {
+      c.line(`query: ${queryClass(plan)},`);
+      c.line(`params: ${inputName(plan)},`);
+      c.line("count: int,");
+      c.line("principal: Principal | None,");
+    });
+    c.line(`) -> list[Page[${itemName(plan)}]]:`);
+  } else c.line(`def _fetch_pages(query: ${queryClass(plan)}, params: ${inputName(plan)}, count: int) -> list[Page[${itemName(plan)}]]:`);
   c.indent(() => {
     c.docstring("Up to `count` pages from the first one, following `next_cursor`.");
     c.line(`pages: list[Page[${itemName(plan)}]] = []`);
     c.line("cursor: str | None = None");
     c.line("for _ in range(count):");
     c.indent(() => {
-      c.line('page = query.execute(params.model_copy(update={"cursor": cursor}))');
+      c.line(`page = query.execute(params.model_copy(update={"cursor": cursor})${secured ? ", principal" : ""})`);
       c.line("pages.append(page)");
       c.line("cursor = page.next_cursor");
       c.line("if cursor is None:");

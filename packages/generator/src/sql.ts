@@ -71,6 +71,7 @@ export type SqlArg =
   | { kind: "version" }
   | { kind: "param"; name: string }
   | { kind: "value"; value: unknown; column: ColumnIR }
+  | { kind: "principal"; name: string }
   | { kind: "search" }
   | { kind: "key"; index: number }
   | { kind: "limit" };
@@ -202,6 +203,9 @@ export function querySql(plan: QueryPlan, v: QueryVariant): SqlStatement {
       const ph = arg({ kind: "param", name: filter.param }, cast(column.sql));
       const cond = `${lhs} ${OPS[filter.op]} ${ph}`;
       where.push(p.type.k === "optional" ? `(${ph} IS NULL OR ${cond})` : cond);
+    } else if (filter.principal !== undefined) {
+      // Scoped to the caller: always applies (no IS NULL escape; the query service refuses a missing claim).
+      where.push(`${lhs} ${OPS[filter.op]} ${arg({ kind: "principal", name: filter.principal }, cast(column.sql))}`);
     } else {
       where.push(`${lhs} ${OPS[filter.op]} ${arg({ kind: "value", value: filter.value, column }, cast(column.sql))}`);
     }
@@ -329,10 +333,13 @@ export function contextDdl(header: string[], context: string, tables: TableIR[],
     // The order without the relevance key (what the query uses when it does not search). The primary key already
     // serves an order by the identity alone (scanned either way).
     const keys = p.keys.filter((k) => !k.relevance);
-    if (!(keys.length === 1 && keys[0]!.column === t.identity)) {
-      const body = `(${keys.map((k) => `${orderExpr(k.column!)} ${k.direction.toUpperCase()}`).join(", ")})`;
+    // Rows scoped to the caller by equality (`principal:` filters) lead the index: one range per caller.
+    const scoped = [...new Set(p.filters.filter(({ filter }) => filter.principal !== undefined && filter.op === "eq").map(({ column }) => column))];
+    if (scoped.length || !(keys.length === 1 && keys[0]!.column === t.identity)) {
+      const body = `(${[...scoped.map((c) => ident(c.name)), ...keys.map((k) => `${orderExpr(k.column!)} ${k.direction.toUpperCase()}`)].join(", ")})`;
       const when = p.keys[0]?.relevance ? " when it does not search (a search orders by relevance first)" : "";
-      addIndex(t, indexName(t.name, p.query.name, "order_idx"), body, `Keyset order of ${p.query.name}${when}.`);
+      const per = scoped.length ? `, per ${scoped.map((c) => c.path.join(".")).join(", ")} of the caller` : "";
+      addIndex(t, indexName(t.name, p.query.name, "order_idx"), body, `Keyset order of ${p.query.name}${per}${when}.`);
     }
   }
   if (indexes.size) out.push("", [...indexes.values()].join("\n\n"));

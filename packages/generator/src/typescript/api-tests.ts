@@ -14,7 +14,7 @@ import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { kebab, prop, toSnake } from "./names.ts";
 import { build, importError, principalLiteral, testFile, useCaseSetup } from "./tests.ts";
 import { expectEqual, record, typedValue } from "./values.ts";
-import { contextPlans, inputObject, queryClass, readerName, TEST_SECRET } from "./queries.ts";
+import { contextPlans, inputObject, protectedQuery, queryClass, readerName, TEST_SECRET } from "./queries.ts";
 import type { QueryPlan } from "@ddd/core";
 import { queryKey, queryPath } from "./api.ts";
 
@@ -150,6 +150,7 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
     };
     handlerTest(L, c, imp, sep);
     if (sec) securityTests(L, c, imp, sep);
+    if (sec) querySecurityTests(L, c, imp, sep);
     for (const ag of L.ca.ir.aggregates) {
       sep();
       readTest(L, c, ag, imp);
@@ -200,14 +201,19 @@ function queryApiTest(L: TsLayout, c: Code, plan: QueryPlan, imp: TsImports): vo
     }
     c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
     c.line(`const ${name} = new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
-    connectLine(c, "handler, queries, queryClient, statuses", key, [`queries: { ${name} }`]);
+    const secured = protectedQuery(L, plan);
+    if (secured) {
+      // The client's token stands for the scenario's caller (rows scoped to it, cursors bound to it).
+      c.line(`const principal = ${principalLiteral(L, scenarioPrincipal(L.model.security!, plan.query, sample ?? { given: {} }), imp)};`);
+    }
+    connectLine(c, "handler, queries, queryClient, statuses", key, [`queries: { ${name} }`], secured ? "principal" : undefined);
     c.line(factoryLine(L, ag));
     const input = inputObject(L, plan, params, imp, ["limit: 1"]);
     c.line(`const options = ${factory(ag)}.${name}(${input});`);
     c.line(
       `expect([...options.queryKey]).toEqual([{ scope: ${tsString(kebab(L.ca.ir.name))}, entity: ${tsString(kebab(ag.name))}, kind: "list", query: ${tsString(kebab(plan.query.name))}, params: ${input} }]);`,
     );
-    c.line(`const whole = await ${name}.execute(${inputObject(L, plan, params, imp, [`limit: ${plan.query.page.maxSize}`])});`);
+    c.line(`const whole = await ${name}.execute(${inputObject(L, plan, params, imp, [`limit: ${plan.query.page.maxSize}`])}${secured ? ", principal" : ""});`);
     c.line("const data = await queryClient.infiniteQuery({ ...options, pages: whole.items.length + 1 });");
     c.line("expect(jsonOf(data.pages.flatMap((page) => page.items))).toEqual(jsonOf(whole.items));");
     c.line("expect(data.pages.at(-1)?.nextCursor).toBeNull();");
@@ -218,10 +224,14 @@ function queryApiTest(L: TsLayout, c: Code, plan: QueryPlan, imp: TsImports): vo
     // The scenario's parameters as query-string text (model names), plus a cursor the server never issued.
     const text = Object.entries(params).map(([k, v]) => `${k}: ${tsString(String(v))}`);
     c.line(`const query = new URLSearchParams({ ${[...text, 'cursor: "not-a-cursor"'].join(", ")} });`);
-    c.line("const badCursor = await handler(new Request(`${path}?${query.toString()}`));");
+    if (secured) {
+      c.line("const badCursor = await handler(");
+      c.indent(() => c.line("new Request(`${path}?${query.toString()}`, { headers: AUTHORIZATION }),"));
+      c.line(");");
+    } else c.line("const badCursor = await handler(new Request(`${path}?${query.toString()}`));");
     c.line("expect(badCursor.status).toBe(400);");
     c.line('expect(await responseJson(badCursor)).toMatchObject({ code: "invalid_cursor" });');
-    c.line('const unknown = await handler(new Request(path + "?no_such_parameter=1"));');
+    c.line(`const unknown = await handler(new Request(path + "?no_such_parameter=1"${secured ? ", { headers: AUTHORIZATION }" : ""}));`);
     c.line("expect(unknown.status).toBe(400);");
     c.line('expect(await responseJson(unknown)).toMatchObject({ code: "constraint_violation" });');
   }, ");");
@@ -578,7 +588,11 @@ function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): v
       c.line("expect(statuses).toEqual([403]);");
     }, ");");
   }
-  const limited = limitedEndpoint(L);
+  rateLimitTest(L, c, imp, sep, limitedEndpoint(L));
+}
+
+/** `limited` allows its requests, then answers 429 with Retry-After and the RateLimit headers until a token refills. */
+function rateLimitTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void, limited: ReturnType<typeof limitedEndpoint>): void {
   if (limited) {
     const { limit } = limited;
     const w = windowSeconds(limit);
@@ -619,5 +633,96 @@ function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): v
       c.line("expect((await send()).status).toBe(404);");
       c.line("expect((await send()).status).toBe(429);");
     }, ");");
+  }
+}
+
+/**
+ * Protected queries over HTTP: 401 with the Bearer challenge without or with an invalid token, 403 for a principal
+ * without a required role (the client rejects with Unauthenticated / NotAuthorized), and 429 when a query's rate
+ * limit is used up.
+ */
+function querySecurityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): void {
+  const sec = L.model.security!;
+  const api = L.model.generation.typescript.api!;
+  const key = contextKey(L);
+  const plans = contextPlans(L);
+  const pq = plans.find((p) => protectedQuery(L, p));
+  if (pq) {
+    const ag = pq.aggregate;
+    const sample = pq.query.scenarios[0];
+    const params = sample?.when.params ?? {};
+    const required = pq.params.some((p) => p.type.k !== "optional");
+    const url = tsString(`${ORIGIN}${queryPath(api, L, pq)}`);
+    imp.value(L.security, "Unauthenticated");
+    imp.value(L.contextTesting, "expectRejects");
+    sep();
+    c.doc(
+      `\`GET ${queryPath(api, L, pq)}\` needs a principal: without credentials it answers 401 with \`WWW-Authenticate: Bearer\`, with an invalid token 401 with \`error="invalid_token"\`; the infinite query rejects with Unauthenticated. Nothing is read.`,
+    );
+    c.block(`test(${tsString(`${pq.query.name}: 401 without or with an invalid token`)}, async () =>`, () => {
+      c.line('const badToken = new Unauthenticated({ error: "invalid_token" }, "The token is invalid");');
+      c.line("const handler = createApiHandler(");
+      c.indent(() => {
+        c.line("{},");
+        c.open("{", () => {
+          c.line("authenticate: (request) =>");
+          c.indent(() => {
+            c.line('request.headers.get("authorization") === "Bearer bad"');
+            c.indent(() => {
+              c.line("? Promise.reject(badToken)");
+              c.line(": Promise.resolve(null),");
+            });
+          });
+        }, "},");
+      });
+      c.line(");");
+      c.line(`const missing = await handler(new Request(${url}));`);
+      c.line("expect(missing.status).toBe(401);");
+      c.line('expect(missing.headers.get("www-authenticate")).toBe("Bearer");');
+      c.line('expect(await responseJson(missing)).toMatchObject({ code: "unauthenticated" });');
+      c.line(`const invalid = await handler(new Request(${url}, { headers: { authorization: "Bearer bad" } }));`);
+      c.line("expect(invalid.status).toBe(401);");
+      c.line(`expect(invalid.headers.get("www-authenticate")).toBe('Bearer error="invalid_token"');`);
+      if (sample || !required) {
+        c.block("const reader =", () => c.block("read: (): never =>", () => c.line('throw new Error("read before authorization");'), ","), ";");
+        imp.value(L.persistenceRuntime, "HmacCursorCodec");
+        imp.value(L.queries, queryClass(pq));
+        c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
+        c.line(`const ${queryKey(pq)} = new ${queryClass(pq)}({ reader, cursors });`);
+        connectLine(c, "queries, queryClient, statuses", key, [`queries: { ${queryKey(pq)} }`], "null");
+        c.line(factoryLine(L, ag));
+        c.line(`const options = ${factory(ag)}.${queryKey(pq)}(${inputObject(L, pq, params, imp)});`);
+        c.line("await expectRejects(() => queryClient.infiniteQuery(options), Unauthenticated);");
+        c.line("expect(statuses).toEqual([401]);");
+      }
+    }, ");");
+    const auth = pq.query.authorize!;
+    if (auth.roles.length && (sample || !required)) {
+      const base = scenarioPrincipal(sec, pq.query, sample ?? { given: {} });
+      const lacking = makePrincipal(sec, { id: base.id, roles: otherRoles(sec, auth), claims: base.claims });
+      imp.value(L.security, "NotAuthorized");
+      sep();
+      c.doc(`A principal without ${auth.roles.join(" / ")} is refused by ${pq.query.name} before anything is read: 403, and the infinite query rejects with NotAuthorized.`);
+      c.block(`test(${tsString(`${pq.query.name}: without a required role is 403`)}, async () =>`, () => {
+        c.block("const reader =", () => c.block("read: (): never =>", () => c.line('throw new Error("read before authorization");'), ","), ";");
+        imp.value(L.persistenceRuntime, "HmacCursorCodec");
+        imp.value(L.queries, queryClass(pq));
+        c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
+        c.line(`const ${queryKey(pq)} = new ${queryClass(pq)}({ reader, cursors });`);
+        c.line(`const principal = ${principalLiteral(L, lacking, imp)};`);
+        connectLine(c, "queries, queryClient, statuses", key, [`queries: { ${queryKey(pq)} }`], "principal");
+        c.line(factoryLine(L, ag));
+        c.line(`const options = ${factory(ag)}.${queryKey(pq)}(${inputObject(L, pq, params, imp)});`);
+        c.line("const error = await expectRejects(() => queryClient.infiniteQuery(options), NotAuthorized);");
+        c.line(`expect(error.details).toMatchObject({ requiredRoles: [${auth.roles.map(tsString).join(", ")}] });`);
+        c.line("expect(statuses).toEqual([403]);");
+      }, ");");
+    }
+  }
+  for (const plan of plans) {
+    const limit = effectiveRateLimit(L.model, plan.query);
+    if (!limit) continue;
+    rateLimitTest(L, c, imp, sep, { name: plan.query.name, method: "GET", path: queryPath(api, L, plan), limit, secured: protectedQuery(L, plan) });
+    break;
   }
 }

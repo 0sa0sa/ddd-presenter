@@ -12,7 +12,7 @@ import { camel, ident, kebab, pascal, prop, toSnake } from "./names.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { zodSchema } from "./types.ts";
 import { protectedAggregates, readAccessName } from "./security.ts";
-import { contextPlans, hasQueries, inputName, itemName, pageName, queryClass } from "./queries.ts";
+import { contextPlans, hasQueries, inputName, itemName, pageName, protectedQuery, queryClass } from "./queries.ts";
 import type { QueryPlan } from "@ddd/core";
 
 /** `readonly name?: Pick<Type, "member">;` at `depth`, broken like Prettier breaks long type arguments. */
@@ -427,7 +427,9 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
             c.line(`input: ${inputName(plan)}Schema,`);
             c.block("params:", () => c.lines_(params), ",");
             c.line(`output: ${pageName(plan)}Json,`);
-            c.line("errors: { constraint_violation: 400, invalid_cursor: 400 },");
+            const secured = protectedQuery(L, plan);
+            c.line(`errors: { constraint_violation: 400, invalid_cursor: 400${secured ? ", unauthenticated: 401, not_authorized: 403" : ""} },`);
+            securityLines(c, L, plan.query, plan.query.name);
           }, "),");
         }
       }, ",");
@@ -513,7 +515,7 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
       "The API as a Web-standard handler (`Request` → `Response`): use it with Bun.serve, Deno.serve, Hono (`app.all(\"/api/*\", (c) => handler(c.req.raw))`), a Next.js route handler or any fetch-style server.",
       "",
       P.model.security
-        ? "Inputs are parsed with the command schemas (400 with the issues). Endpoints that need a principal authenticate the request with `options.authenticate` (401 with `WWW-Authenticate: Bearer` without valid credentials); the use cases and read access authorize it (403 NotAuthorized). Rate limits answer the RateLimit headers and 429 with Retry-After when used up (`options.rateLimiter`, `options.clientIp`). Domain errors answer `{ code, message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to `options.onError`. Internal use cases (`authorize: internal`) have no endpoint."
+        ? `Inputs are parsed with the command schemas (400 with the issues). Endpoints that need a principal authenticate the request with \`options.authenticate\` (401 with \`WWW-Authenticate: Bearer\` without valid credentials); the use cases${Ls.some(hasQueries) ? ", queries" : ""} and read access authorize it (403 NotAuthorized). Rate limits answer the RateLimit headers and 429 with Retry-After when used up (\`options.rateLimiter\`, \`options.clientIp\`). Domain errors answer \`{ code, message, details }\` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to \`options.onError\`. Internal use cases (\`authorize: internal\`) have no endpoint.`
         : "Inputs are parsed with the command schemas (400 with the issues). Domain errors answer `{ code, message, details }` with the endpoint's status (404 not found, 409 state conflict, 422 other rules); unexpected errors answer 500 without details and go to `options.onError`. There is no authentication or authorization: put that in front of the handler.",
       "",
       "`dependencies` is an object, or a function of the request (e.g. use cases with a unit of work per request).",

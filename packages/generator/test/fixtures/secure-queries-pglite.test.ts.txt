@@ -1,0 +1,129 @@
+// PGlite verification of protected, principal-scoped queries (copied into the generated project by the generator test).
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+
+import { Application, Job } from "../src/secure_board/generated/board/domain/aggregates.js";
+import { CompanyJobsQuery, MyApplicationsQuery } from "../src/secure_board/generated/board/application/queries.js";
+import {
+  COMPANY_JOBS_SQL,
+  PostgresApplicationRepository,
+  PostgresCompanyJobsReader,
+  PostgresJobRepository,
+  PostgresMyApplicationsReader,
+} from "../src/secure_board/generated/board/persistence/postgres.js";
+import {
+  InMemoryApplicationRepository,
+  InMemoryCompanyJobsReader,
+  InMemoryJobRepository,
+  InMemoryMyApplicationsReader,
+  plain,
+} from "../src/secure_board/generated/board/testing.js";
+import { HmacCursorCodec, InvalidCursor, type Page, type SqlClient } from "../src/secure_board/generated/persistence.js";
+import { NotAuthorized, Principal } from "../src/secure_board/generated/security.js";
+
+const cursors = new HmacCursorCodec({ secrets: ["pglite-test-secret-0123456789-0123456789"] });
+const COMPANIES = ["00000000-0000-4000-8000-0000000000c1", "00000000-0000-4000-8000-0000000000c2", "00000000-0000-4000-8000-0000000000c3"];
+const CANDIDATES = ["00000000-0000-4000-8000-0000000000e1", "00000000-0000-4000-8000-0000000000e2"];
+
+let db: PGlite;
+let client: SqlClient;
+beforeAll(async () => {
+  db = new PGlite();
+  await db.exec(readFileSync("sql/board.sql", "utf8"));
+  client = db;
+}, 120_000);
+afterAll(async () => {
+  await db.close();
+});
+
+async function all<T>(run: (cursor: string | null) => Promise<Page<T>>): Promise<T[]> {
+  const out: T[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 100; i++) {
+    const page: Page<T> = await run(cursor);
+    out.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor === null) return out;
+  }
+  throw new Error("too many pages");
+}
+
+describe("protected queries on PGlite", () => {
+  test("rows are scoped to the caller in SQL exactly as in memory; cursors are bound to the caller", async () => {
+    const jobs = new PostgresJobRepository(client);
+    const applications = new PostgresApplicationRepository(client);
+    const memJobs = new InMemoryJobRepository();
+    const memApplications = new InMemoryApplicationRepository();
+    for (let i = 0; i < 12; i++) {
+      const job = {
+        id: `00000000-0000-4000-8000-0000000001${String(i).padStart(2, "0")}`,
+        companyId: COMPANIES[i % 3]!,
+        title: `Job ${String(i)}`,
+        status: i % 4 === 0 ? ("closed" as const) : ("open" as const),
+        // Ties on purpose: the identity decides.
+        postedAt: `2026-03-0${String((i % 3) + 1)}T09:00:00+00:00`,
+      };
+      await jobs.save(Job.from(job));
+      memJobs.seed(Job.from(job));
+      const application = {
+        id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, "0")}`,
+        jobId: job.id,
+        candidateId: CANDIDATES[i % 2]!,
+        submittedAt: `2026-03-1${String(i % 5)}T09:00:00+00:00`,
+      };
+      await applications.save(Application.from(application));
+      memApplications.seed(Application.from(application));
+    }
+    const pg = {
+      company: new CompanyJobsQuery({ reader: new PostgresCompanyJobsReader(client), cursors }),
+      mine: new MyApplicationsQuery({ reader: new PostgresMyApplicationsReader(client), cursors }),
+    };
+    const mem = {
+      company: new CompanyJobsQuery({ reader: new InMemoryCompanyJobsReader(memJobs), cursors }),
+      mine: new MyApplicationsQuery({ reader: new InMemoryMyApplicationsReader(memApplications), cursors }),
+    };
+    for (const companyId of COMPANIES) {
+      const staff = Principal.create({ id: CANDIDATES[0]!, roles: ["staff"], companyId });
+      for (const limit of [1, 2, 50]) {
+        for (const input of [{}, { status: "open" as const }]) {
+          const a = await all((cursor) => pg.company.execute({ ...input, cursor, limit }, staff));
+          const b = await all((cursor) => mem.company.execute({ ...input, cursor, limit }, staff));
+          expect({ companyId, input, limit, items: plain(a) }).toEqual({ companyId, input, limit, items: plain(b) });
+          expect(a.length).toBeGreaterThan(0);
+          expect(a.every((job) => job.companyId === companyId)).toBe(true);
+        }
+      }
+    }
+    for (const id of CANDIDATES) {
+      const candidate = Principal.create({ id, roles: ["candidate"] });
+      const a = await all((cursor) => pg.mine.execute({ cursor, limit: 2 }, candidate));
+      const b = await all((cursor) => mem.mine.execute({ cursor, limit: 2 }, candidate));
+      expect(plain(a)).toEqual(plain(b));
+      expect(a.length).toBe(6);
+      expect(a.every((item) => item.candidateId === id)).toBe(true);
+    }
+    // A cursor issued to one caller does not continue for another, even with the same company.
+    const first = await pg.company.execute({ limit: 1 }, Principal.create({ id: CANDIDATES[0]!, roles: ["staff"], companyId: COMPANIES[0]! }));
+    const other = Principal.create({ id: CANDIDATES[1]!, roles: ["staff"], companyId: COMPANIES[0]! });
+    await expect(pg.company.execute({ cursor: first.nextCursor }, other)).rejects.toBeInstanceOf(InvalidCursor);
+    // Without the claim the rows are scoped by, nothing is read.
+    await expect(pg.company.execute({}, Principal.create({ id: CANDIDATES[0]!, roles: ["admin"] }))).rejects.toBeInstanceOf(NotAuthorized);
+  }, 120_000);
+
+  test("the scoped filter is a plain equality (no IS NULL escape) served by the order index", async () => {
+    const first = COMPANY_JOBS_SQL.first;
+    expect(first.text).toContain("company_id = $1::uuid");
+    expect(first.text).not.toMatch(/\$1::uuid IS NULL/);
+    // Tiny table: rule out the scans a real-sized table would not use, so the plan shows what the index can serve.
+    await db.exec("SET enable_seqscan = off; SET enable_bitmapscan = off;");
+    const values = first.args.map((arg) => ("principal" in arg ? COMPANIES[0] : "limit" in arg ? 10 : null));
+    const plan = (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${first.text}`, values)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(plan).toContain("Index Scan using job_company_jobs_order_idx");
+    expect(plan).not.toContain("Sort");
+    // A NULL scope value matches nothing in SQL as well (the service refuses it before; this is defense in depth).
+    const none = await db.query(first.text, first.args.map((arg) => ("limit" in arg ? 10 : null)));
+    expect(none.rows).toEqual([]);
+    await db.exec("RESET enable_seqscan; RESET enable_bitmapscan;");
+  }, 120_000);
+});
