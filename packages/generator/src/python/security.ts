@@ -179,7 +179,7 @@ export function securityFiles(model: ModelIR, served: { useCases: { name: string
     c.indent(() => limits.forEach((l) => c.line(`${pyString(l.name)}: ${l.text},`)));
     c.line("}");
   }
-  c.line(`\"\"\"Rate limit per endpoint (use case name, read_<aggregate>${model.contexts.some((ctx) => ctx.queries?.length) ? " or query name" : ""}), for your web layer.`);
+  c.line(`\"\"\"Rate limit per endpoint (use case name, ${model.contexts.some((ctx) => ctx.queries?.length) ? "read_<aggregate> or query name" : "or read_<aggregate>"}), for your web layer.`);
   c.line();
   c.line("Use it as `RateLimiter().consume(RATE_LIMITS[name], subject)` (see rate_limit.py).");
   c.line('\"\"\"');
