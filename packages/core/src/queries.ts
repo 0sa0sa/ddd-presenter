@@ -6,9 +6,10 @@
  * Design and sources: docs/09 §19; DSL: docs/10 §10; contract: docs/05 §9.
  */
 import type { DiagnosticBag, Path } from "./diagnostics.ts";
-import type { AggregateIR, ContextIR, FieldIR } from "./ir.ts";
+import type { AggregateIR, AuthorizeIR, ContextIR, FieldIR, RateLimitIR, ScenarioPrincipalIR, SecurityIR } from "./ir.ts";
 import type { Reader } from "./parse.ts";
 import { assignable, closest, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
+import { checkRateLimitUse, checkRoles, principalMembers, scenarioPrincipal } from "./security.ts";
 
 // ---------------------------------------------------------------------------
 // IR
@@ -50,6 +51,11 @@ export interface QueryFilterIR extends Located {
   param?: string;
   /** Literal compared with (instead of a parameter): the filter always applies. */
   value?: unknown;
+  /**
+   * Member of the authenticated principal compared with (`id` or a declared claim, `security`): the filter always
+   * applies and scopes the rows to the caller (a missing optional claim is NotAuthorized, never "no filter").
+   */
+  principal?: string;
 }
 
 export interface QuerySearchIR extends Located {
@@ -71,7 +77,7 @@ export interface QueryOrderIR extends Located {
 export interface QueryScenarioIR extends Located {
   name: string;
   description?: string;
-  given: { aggregates: { type?: string; fields: Record<string, unknown>; path: Path }[]; path: Path };
+  given: { aggregates: { type?: string; fields: Record<string, unknown>; path: Path }[]; principal?: ScenarioPrincipalIR; path: Path };
   when: { params: Record<string, unknown>; limit?: number; pages: number; path: Path };
   then: { items?: unknown[]; nextCursor?: "present" | "absent"; path: Path };
 }
@@ -91,6 +97,10 @@ export interface QueryIR extends Located {
   /** Projection (top-level fields of the aggregate); undefined = every field. */
   returns?: string[];
   scenarios: QueryScenarioIR[];
+  /** Who may run it (`authorize`: public / authenticated / roles); required once `security` is declared. */
+  authorize?: AuthorizeIR;
+  /** Rate limit of its HTTP endpoint (`rate_limit`); `"none"` opts out of `security.rate_limits.default`. */
+  rateLimit?: RateLimitIR | "none";
 }
 
 // ---------------------------------------------------------------------------
@@ -99,11 +109,17 @@ export interface QueryIR extends Located {
 
 type Obj = Record<string, unknown>;
 type ReadFields = (r: Reader, o: Obj, key: string, path: Path) => FieldIR[];
+/** The parser's readers of `authorize` / `rate_limit` and `given.principal` (shared with use cases). */
+export interface QueryReaders {
+  fields: ReadFields;
+  access: (r: Reader, o: Obj, path: Path) => { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" };
+  principal: (r: Reader, given: Obj, path: Path) => ScenarioPrincipalIR | undefined;
+}
 
-export const QUERY_KEYS = ["name", "description", "from", "params", "where", "search", "order_by", "page", "returns", "scenarios"] as const;
+export const QUERY_KEYS = ["name", "description", "from", "authorize", "rate_limit", "params", "where", "search", "order_by", "page", "returns", "scenarios"] as const;
 
-export function readQueries(r: Reader, context: Obj, path: Path, readFields: ReadFields): QueryIR[] {
-  return r.list(context, "queries", path).flatMap(({ value, path: qp }) => readQuery(r, value, qp, readFields) ?? []);
+export function readQueries(r: Reader, context: Obj, path: Path, readers: QueryReaders): QueryIR[] {
+  return r.list(context, "queries", path).flatMap(({ value, path: qp }) => readQuery(r, value, qp, readers) ?? []);
 }
 
 function intValue(r: Reader, o: Obj, key: string, path: Path, fallback: number): number {
@@ -114,7 +130,7 @@ function intValue(r: Reader, o: Obj, key: string, path: Path, fallback: number):
   return fallback;
 }
 
-function readQuery(r: Reader, value: unknown, path: Path, readFields: ReadFields): QueryIR | undefined {
+function readQuery(r: Reader, value: unknown, path: Path, readers: QueryReaders): QueryIR | undefined {
   const o = r.obj(value, path, "query");
   if (!o) return undefined;
   r.keys(o, QUERY_KEYS, path, "query");
@@ -124,7 +140,7 @@ function readQuery(r: Reader, value: unknown, path: Path, readFields: ReadFields
   const where = r.list(o, "where", path).flatMap(({ value: wv, path: wp }) => {
     const wo = r.obj(wv, wp, "filter");
     if (!wo) return [];
-    r.keys(wo, ["field", "op", "param", "value"], wp, "filter");
+    r.keys(wo, ["field", "op", "param", "value", "principal"], wp, "filter");
     const field = r.str(wo, "field", wp, true);
     const op = r.str(wo, "op", wp, false) ?? "eq";
     if (!(QUERY_OPS as readonly string[]).includes(op)) {
@@ -135,6 +151,8 @@ function readQuery(r: Reader, value: unknown, path: Path, readFields: ReadFields
     const param = r.str(wo, "param", wp, false);
     if (param !== undefined) filter.param = param;
     if ("value" in wo) filter.value = wo.value;
+    const principal = r.str(wo, "principal", wp, false);
+    if (principal !== undefined) filter.principal = principal;
     return [filter];
   });
   let search: QuerySearchIR | undefined;
@@ -186,19 +204,20 @@ function readQuery(r: Reader, value: unknown, path: Path, readFields: ReadFields
     name,
     description: r.str(o, "description", path, false),
     from,
-    params: readFields(r, o, "params", path).map((f) => ({ ...f, required: required.has(f.name) })),
+    params: readers.fields(r, o, "params", path).map((f) => ({ ...f, required: required.has(f.name) })),
     where,
     orderBy,
     page,
-    scenarios: r.list(o, "scenarios", path).flatMap(({ value: sv, path: sp }) => readQueryScenario(r, sv, sp) ?? []),
+    scenarios: r.list(o, "scenarios", path).flatMap(({ value: sv, path: sp }) => readQueryScenario(r, sv, sp, readers) ?? []),
     path,
+    ...readers.access(r, o, path),
   };
   if (search) query.search = search;
   if (o.returns !== undefined && o.returns !== null) query.returns = r.strList(o, "returns", path);
   return query;
 }
 
-function readQueryScenario(r: Reader, value: unknown, path: Path): QueryScenarioIR | undefined {
+function readQueryScenario(r: Reader, value: unknown, path: Path, readers: QueryReaders): QueryScenarioIR | undefined {
   const o = r.obj(value, path, "scenario");
   if (!o) return undefined;
   r.keys(o, ["name", "description", "given", "when", "then"], path, "scenario");
@@ -206,7 +225,8 @@ function readQueryScenario(r: Reader, value: unknown, path: Path): QueryScenario
   if (!name) return undefined;
   const gp = [...path, "given"];
   const go = o.given === undefined || o.given === null ? {} : r.obj(o.given, gp, "given") ?? {};
-  r.keys(go, ["aggregates"], gp, "given");
+  r.keys(go, ["aggregates", "principal"], gp, "given");
+  const principal = readers.principal(r, go, gp);
   const aggregates = r.list(go, "aggregates", gp).flatMap(({ value: av, path: ap }) => {
     const ao = r.obj(av, ap, "given aggregate");
     if (!ao) return [];
@@ -233,7 +253,7 @@ function readQueryScenario(r: Reader, value: unknown, path: Path): QueryScenario
     if (nc === "present" || nc === "absent") then.nextCursor = nc;
     else r.bag.error("invalid-value", 'next_cursor must be "present" or "absent"', [...tp, "next_cursor"]);
   }
-  return { name, description: r.str(o, "description", path, false), given: { aggregates, path: gp }, when, then, path };
+  return { name, description: r.str(o, "description", path, false), given: { aggregates, ...(principal ? { principal } : {}), path: gp }, when, then, path };
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +444,10 @@ export interface QueryValidationHost {
   checkValue(value: unknown, t: Type, path: Path, el: string, aggregate?: string): void;
   checkRecord(rec: Record<string, unknown>, fields: Map<string, Type>, path: Path, el: string, owner: string, complete: boolean): void;
   checkFields(ownerName: string, fields: FieldIR[], opts: { aggregate?: string; element: string }): Map<string, Type>;
+  /** `security` of the model (undefined when not declared). */
+  readonly security?: SecurityIR;
+  /** Checks a scenario's `given.principal` (declared roles, id and claim types). */
+  checkGivenPrincipal(p: ScenarioPrincipalIR, el: string): void;
 }
 
 /** Names of the generated classes / types of a query (`SearchInvitations` + suffix). */
@@ -467,6 +491,10 @@ export function checkQueries(h: QueryValidationHost): void {
     const clash = taken.get(q.name);
     if (clash) {
       h.bag.error("duplicate-name", `Query "${q.name}" has the same name as ${clash} (their generated tests would share a file)`, [...q.path, "name"], { element: el, hint: "Rename the query, e.g. search_" + q.name });
+    }
+    const readPolicy = h.security ? ctx.aggregates.find((a) => `read_${snake(a.name)}` === q.name) : undefined;
+    if (readPolicy) {
+      h.bag.error("duplicate-name", `Query "${q.name}" has the name of the rate limit of reading ${readPolicy.name} by identity (they would share a bucket)`, [...q.path, "name"], { element: el, hint: "Rename the query, e.g. list_" + snake(readPolicy.name) });
     }
     if (RESERVED_QUERY_NAMES.has(q.name)) {
       h.bag.error("reserved-name", `"${q.name}" is used by generated modules of the context`, [...q.path, "name"], { element: el, hint: "Rename the query" });
@@ -569,14 +597,18 @@ function checkQuery(h: QueryValidationHost, q: QueryIR, el: string): void {
     return { column: at.column, type: t! };
   };
 
+  // Authorization (docs/09 §21): who may run it, before the filters that scope rows to the caller.
+  const members = checkQueryAccess(h, q, el);
+
   // Filters.
   q.where.forEach((f) => {
     const r = resolvePath(f.field, [...f.path, "field"], "filter");
-    if (f.param === undefined && f.value === undefined) {
-      h.bag.error("missing-key", 'A filter needs "param" (compare with a parameter) or "value" (compare with a literal)', f.path, { element: el });
+    const sources = [f.param, f.value, f.principal].filter((x) => x !== undefined).length;
+    if (sources === 0) {
+      h.bag.error("missing-key", 'A filter needs "param" (compare with a parameter), "value" (compare with a literal) or "principal" (compare with the caller)', f.path, { element: el });
     }
-    if (f.param !== undefined && f.value !== undefined) {
-      h.bag.error("invalid-shape", 'A filter has either "param" or "value", not both', [...f.path, "value"], { element: el });
+    if (sources > 1) {
+      h.bag.error("invalid-shape", 'A filter has one of "param", "value" or "principal", not several', [...f.path, f.principal !== undefined ? "principal" : "value"], { element: el });
     }
     if (!r) return;
     const ft = baseOf(r.type);
@@ -594,6 +626,8 @@ function checkQuery(h: QueryValidationHost, q: QueryIR, el: string): void {
       }
     } else if (f.value !== undefined) {
       h.checkValue(f.value, ft, [...f.path, "value"], el);
+    } else if (f.principal !== undefined && members) {
+      checkPrincipalFilter(h, f, ft, members, el);
     }
   });
   // Unused parameters are almost always a mistake (the query ignores them).
@@ -705,6 +739,7 @@ function checkQuery(h: QueryValidationHost, q: QueryIR, el: string): void {
       if (id !== undefined && ids.has(key)) h.bag.error("invalid-scenario", `Two given aggregates have the identity ${JSON.stringify(id)}`, a.path, { element: sel });
       ids.add(key);
     }
+    checkQueryScenarioPrincipal(h, q, sc, sel);
     h.checkRecord(sc.when.params, paramTypes, [...sc.when.path, "params"], sel, `${q.name} params`, true);
     if (sc.when.limit !== undefined && (sc.when.limit < 1 || sc.when.limit > pg.maxSize)) {
       h.bag.error("invalid-value", `when.limit must be between 1 and page.max_size (${pg.maxSize}), got ${sc.when.limit}`, [...sc.when.path, "limit"], { element: sel });
@@ -720,5 +755,121 @@ function checkQuery(h: QueryValidationHost, q: QueryIR, el: string): void {
         h.bag.error("invalid-scenario", `Items of ${q.name} do not include the identity ${ag.identity}; expect partial items ({ field: value }) instead`, p, { element: sel, hint: `Or add ${ag.identity} to returns` });
       } else if (idType) h.checkValue(it, idType, p, sel);
     });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Authorization of queries (docs/09 §21)
+// ---------------------------------------------------------------------------
+
+/** The principal members a filter may compare with: `id` and the declared scalar claims (with their types). */
+function scopeMembers(sec: SecurityIR): Map<string, Type> {
+  return new Map([...principalMembers(sec)].filter(([name, t]) => name !== "roles" && baseOf(t).k !== "list"));
+}
+
+/** Members a query's filters scope rows by (`where: { principal: … }`), in declaration order without duplicates. */
+export function queryScope(q: QueryIR): string[] {
+  return [...new Set(q.where.flatMap((f) => (f.principal !== undefined ? [f.principal] : [])))];
+}
+
+/**
+ * `authorize` / `rate_limit` of a query. Deny by default like use cases: with `security` declared every query states
+ * who may run it. `internal` and `allow_if` do not apply (a query is a read endpoint; a per-row rule would break the
+ * keyset paging). Returns the members principal filters may use when they are allowed at all.
+ */
+function checkQueryAccess(h: QueryValidationHost, q: QueryIR, el: string): Map<string, Type> | undefined {
+  const sec = h.security;
+  if (!sec) return undefined;
+  const scoped = q.where.filter((f) => f.principal !== undefined);
+  const a = q.authorize;
+  if (!a) {
+    h.bag.error("missing-authorize", `Query ${q.name} declares no authorize; with security declared it is denied until you decide who may run it`, [...q.path, "name"], {
+      element: el,
+      hint: "Add authorize: public, authenticated, or { roles: [...] } (scope rows to the caller with where: { field, op: eq, principal: <id or claim> })",
+    });
+    return undefined;
+  }
+  if (a.kind === "internal") {
+    h.bag.error("invalid-authorize", "authorize: internal applies to use cases only", a.path, {
+      element: el,
+      hint: "A query is a read endpoint: limit it with roles (e.g. roles: [admin]); in-process code can call its reader directly",
+    });
+  }
+  if (a.allowIf !== undefined) {
+    h.bag.error("invalid-authorize", "allow_if does not apply to queries: a rule per row would drop rows after the page is cut, breaking the keyset paging", [...a.path, "allow_if"], {
+      element: el,
+      hint: "Scope the rows in where with the caller instead: - { field: company_id, op: eq, principal: company_id }",
+    });
+  }
+  checkRoles(h.bag, sec, a, el);
+  checkRateLimitUse(h.bag, q, el);
+  if (a.kind === "public") {
+    for (const f of scoped) {
+      h.bag.error("invalid-principal-filter", `A public query has no principal to compare ${f.field} with`, [...f.path, "principal"], { element: el, hint: "Use authorize: authenticated or { roles: [...] }" });
+    }
+    return undefined;
+  }
+  return scopeMembers(sec);
+}
+
+/** `where: { field, op, principal: <id or claim> }`: the member exists and has the field's type. */
+function checkPrincipalFilter(h: QueryValidationHost, f: QueryFilterIR, field: Type, members: Map<string, Type>, el: string): void {
+  const name = f.principal!;
+  const p = [...f.path, "principal"];
+  const t = members.get(name);
+  if (!t) {
+    const list = name === "roles" || principalMembers(h.security!).has(name);
+    const s = closest(name, [...members.keys()]);
+    h.bag.error("unknown-field", list ? `principal.${name} is a list; a filter compares with one value` : `The principal has no member "${name}"`, p, {
+      element: el,
+      hint: s && !list ? `Did you mean "${s}"?` : `Compare with id or a declared claim: ${[...members.keys()].join(", ")}`,
+    });
+    return;
+  }
+  const mt = baseOf(t);
+  // A Ref is stored as its target's identity: compare the claim with that type.
+  let target = field;
+  if (field.k === "ref") {
+    const ag = h.ctx.aggregates.find((a) => a.name === field.target);
+    const id = ag ? h.fieldTypes.get(ag.name)?.get(ag.identity) : undefined;
+    if (id) target = baseOf(id);
+  }
+  if (!assignable(mt, target) && !sameType(mt, target)) {
+    h.bag.error("type-mismatch", `principal.${name} is ${typeToString(mt)}, but ${f.field} is ${typeToString(field)}`, p, {
+      element: el,
+      hint: name === "id" ? "Declare security.principal.id: UUID (or String) to match the field" : "Declare the claim with the field's type",
+    });
+  }
+}
+
+/** `given.principal` of a query scenario: protected queries run as it (default: their roles, claims defaulted). */
+function checkQueryScenarioPrincipal(h: QueryValidationHost, q: QueryIR, sc: QueryScenarioIR, el: string): void {
+  const sec = h.security;
+  const p = sc.given.principal;
+  if (!sec || !q.authorize) return;
+  if (q.authorize.kind !== "principal") {
+    if (p) h.bag.warning("unused-principal", `Query ${q.name} is ${q.authorize.kind}: it runs without a principal, so given.principal is ignored`, p.path, { element: el });
+    return;
+  }
+  if (p?.anonymous) {
+    h.bag.error("invalid-scenario", `${q.name} needs an authenticated principal; an anonymous caller raises Unauthenticated (the generated tests check that)`, p.path, { element: el, hint: "Give a principal with a required role, or leave given.principal out" });
+    return;
+  }
+  if (p) h.checkGivenPrincipal(p, el);
+  const resolved = scenarioPrincipal(sec, q, sc);
+  const roles = q.authorize.roles;
+  if (p && roles.length && !roles.some((r) => resolved.roles.includes(r))) {
+    h.bag.error("invalid-scenario", `The principal holds none of ${roles.join(", ")}: ${q.name} raises NotAuthorized (the generated tests check that)`, [...p.path, "roles"], { element: el, hint: `Give it one of the roles ${roles.join(", ")}` });
+  }
+  const members = scopeMembers(sec);
+  for (const member of queryScope(q)) {
+    // id is always there; unknown members are reported on the filter.
+    if (member === "id" || !members.has(member)) continue;
+    if (resolved.claims[member] === null || resolved.claims[member] === undefined) {
+      h.bag.error("invalid-scenario", `${q.name} scopes rows by principal.${member}, which this scenario's principal does not have (NotAuthorized)`, p?.path ?? sc.given.path, {
+        element: el,
+        hint: `Add given: { principal: { claims: { ${member}: <value> } } }`,
+      });
+    }
   }
 }

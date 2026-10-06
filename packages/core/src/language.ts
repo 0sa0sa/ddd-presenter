@@ -134,6 +134,7 @@ type Container =
   | "data:extensions"
   | "data:nested"
   | "query"
+  | "queryAuthorize"
   | "queryFilter"
   | "querySearch"
   | "queryOrder"
@@ -201,9 +202,9 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   "then:useCase": { state: "expectedState", emits: "expectedEvent" },
   expectedState: { fields: "data:expectedState" },
   expectedEvent: { fields: "data:event" },
-  query: { params: "field", where: "queryFilter", search: "querySearch", order_by: "queryOrder", page: "queryPage", scenarios: "scenario:query" },
+  query: { authorize: "queryAuthorize", rate_limit: "rateLimit", params: "field", where: "queryFilter", search: "querySearch", order_by: "queryOrder", page: "queryPage", scenarios: "scenario:query" },
   "scenario:query": { given: "given:query", when: "when:query", then: "then:query" },
-  "given:query": { aggregates: "queryGivenAggregate" },
+  "given:query": { aggregates: "queryGivenAggregate", principal: "given:principal" },
 };
 
 function containerOf(chain: string[]): Container {
@@ -410,8 +411,10 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("name", "クエリ名（snake_case）"),
     K("description", "説明"),
     K("from", "読む Aggregate"),
+    K("authorize", "実行を許す相手: public / authenticated / { roles }（security を宣言したら必須。ロールは読む前に確かめる。行を呼び出し元に絞るのは where の principal）"),
+    K("rate_limit", "エンドポイントのレート制限: { requests, per, by } / none（既定を使わない）"),
     K("params", "型付きのパラメータ（required: true でなければ省略可能。省略するとそのフィルタは効かない）"),
-    K("where", "フィルタ: { field, op, param } か { field, op, value }"),
+    K("where", "フィルタ: { field, op, param } / { field, op, value } / { field, op, principal }（呼び出し元に絞る）"),
     K("search", "検索: { param, fields, mode: trigram | prefix | exact, min_similarity }"),
     K("order_by", "並び順（識別子が最後の決め手として自動で付く）。relevance は trigram 検索のスコア順"),
     K("page", "ページの大きさ: { size, max_size }（既定 20 / 100）"),
@@ -423,7 +426,9 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("op", "eq（既定）| ne | lt | lte | gt | gte"),
     K("param", "比べるパラメータ（省略可能なパラメータが無いときフィルタは効かない）"),
     K("value", "比べるリテラル（いつも効く）"),
+    K("principal", "比べる principal のメンバー: id か宣言したクレーム（いつも効く。クレームがなければ NotAuthorized）"),
   ],
+  queryAuthorize: [K("roles", "いずれかを持てば実行できるロール（ロールの確認は読む前。allow_if はクエリでは使えない）")],
   querySearch: [
     K("param", "検索パラメータの名前（既定 q。省略可能な String）"),
     K("fields", "検索する String のフィールド（Value Object のフィールドも可）"),
@@ -433,7 +438,10 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
   queryOrder: [K("field", "並べるフィールド（必須のスカラー）か relevance"), K("direction", "asc（既定）| desc（relevance は desc だけ）")],
   queryPage: [K("size", "既定のページの大きさ（既定 20）"), K("max_size", "limit の上限（既定 100、最大 1000）")],
   "scenario:query": [K("name", "シナリオ名（テスト関数名になる）"), K("description", "説明"), K("given", "保存済みの Aggregate"), K("when", "パラメータ・limit・pages"), K("then", "期待する items と next_cursor")],
-  "given:query": [K("aggregates", "保存済みの Aggregate（{ fields }）")],
+  "given:query": [
+    K("aggregates", "保存済みの Aggregate（{ fields }）"),
+    K("principal", "実行する principal: { id, roles, claims }（省略で authorize.roles を持つ既定の principal）"),
+  ],
   queryGivenAggregate: [K("type", "Aggregate名（省略時は from）"), K("fields", "フィールド値（必須フィールドはすべて）")],
   "when:query": [K("params", "パラメータと検索の値"), K("limit", "ページの大きさ"), K("pages", "読むページ数（既定 1、nextCursor をたどる）")],
   "then:query": [K("items", "読んだ全ページの items（順番通り）: 識別子か、一部のフィールド"), K("next_cursor", "最後のページの nextCursor: present | absent")],
@@ -908,8 +916,20 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
       ...(c === "useCase" ? [{ label: "internal", kind: "value" as const, detail: "ポリシーなど内部だけ。HTTP に出さない", sortRank: 1 }] : []),
       { label: "authenticated", kind: "value" as const, detail: "認証済みなら誰でも", sortRank: 2 },
     ];
-  if ((c === "useCase" || c === "aggregate") && key === "rate_limit") return [{ label: "none", kind: "value" as const, detail: "既定の制限を使わない" }];
-  if ((c === "authorize" && key === "roles") || (c === "given:principal" && key === "roles"))
+  if (c === "query" && key === "authorize")
+    return [
+      { label: "public", kind: "value" as const, detail: "誰でも（principal なし）", sortRank: 0 },
+      { label: "authenticated", kind: "value" as const, detail: "認証済みなら誰でも", sortRank: 1 },
+    ];
+  if ((c === "useCase" || c === "aggregate" || c === "query") && key === "rate_limit") return [{ label: "none", kind: "value" as const, detail: "既定の制限を使わない" }];
+  if (c === "queryFilter" && key === "principal" && s.model?.security) {
+    const sec = s.model.security;
+    return [
+      { label: "id", kind: "variable" as const, detail: `principal.id: ${sec.principal.idType}`, sortRank: 0 },
+      ...sec.principal.claims.filter((cl) => !cl.type.startsWith("List")).map((cl) => ({ label: cl.name, kind: "variable" as const, detail: `principal.${cl.name}: ${cl.required ? cl.type : `Optional[${cl.type}]（ないと NotAuthorized）`}`, sortRank: 1 })),
+    ];
+  }
+  if (((c === "authorize" || c === "queryAuthorize") && key === "roles") || (c === "given:principal" && key === "roles"))
     return (s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" }));
   if (c === "authorize" && key === "allow_if" && s.model?.security) {
     const sec = s.model.security;
@@ -1335,7 +1355,7 @@ function keyCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind
   }
   // authorize / rate_limit / given.principal only mean something once the model declares security.
   const securityKeys = new Set(s.model?.security ? [] : ["authorize", "rate_limit", "principal"]);
-  const keys = (KEYS[pos.container] ?? []).filter((k) => !(securityKeys.has(k.key) && ["aggregate", "useCase", "given:useCase"].includes(pos.container)));
+  const keys = (KEYS[pos.container] ?? []).filter((k) => !(securityKeys.has(k.key) && ["aggregate", "useCase", "given:useCase", "query", "queryFilter", "given:query"].includes(pos.container)));
   // Hide keys already present in the same mapping.
   const present = new Set(siblingKeys(s, pos));
   return keys.filter((k) => !present.has(k.key)).map((k, i) => ({ label: k.key, kind: "key" as const, detail: k.doc, insertText: `${k.key}: `, sortRank: i }));

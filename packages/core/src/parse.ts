@@ -710,7 +710,7 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
     extensionPoints,
     useCases: r.list(o, "use_cases", path).flatMap(({ value: uv, path: up }) => readUseCase(r, uv, up) ?? []),
     policies: r.list(o, "policies", path).flatMap(({ value: pv, path: pp }) => readPolicy(r, pv, pp) ?? []),
-    queries: readQueries(r, o, path, readFields),
+    queries: readQueries(r, o, path, { fields: readFields, access: readAccess, principal: readScenarioPrincipal }),
     path,
   };
 }

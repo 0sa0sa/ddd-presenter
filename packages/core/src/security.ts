@@ -118,7 +118,7 @@ function claimDefault(src: string): ScenarioValue {
  * The principal of a scenario. Without `given.principal`, a use case that needs one runs as a default principal with
  * every role its `authorize.roles` lists.
  */
-export function scenarioPrincipal(security: SecurityIR, owner: { authorize?: AuthorizeIR }, sc: UseCaseScenarioIR): ResolvedPrincipal {
+export function scenarioPrincipal(security: SecurityIR, owner: { authorize?: AuthorizeIR }, sc: { given: Pick<UseCaseScenarioIR["given"], "principal"> }): ResolvedPrincipal {
   const given = sc.given.principal;
   if (given?.anonymous) return { anonymous: true, id: "", roles: [], claims: {} };
   return makePrincipal(security, {
@@ -227,6 +227,17 @@ function checkUndeclaredSecurity(bag: DiagnosticBag, ctx: ContextIR): void {
   for (const uc of ctx.useCases) {
     for (const sc of uc.scenarios) {
       if (sc.given.principal) bag.error("security-not-declared", "given.principal needs a top-level security block", sc.given.principal.path, { element: `${ctx.name} › ${uc.name} › scenario ${sc.name}`, hint });
+    }
+  }
+  for (const q of ctx.queries ?? []) {
+    const element = `${ctx.name} › query ${q.name}`;
+    if (q.authorize) bag.error("security-not-declared", "authorize needs a top-level security block", q.authorize.path, { element, hint });
+    if (q.rateLimit) bag.error("security-not-declared", "rate_limit needs a top-level security block", q.rateLimit === "none" ? [...q.path, "rate_limit"] : q.rateLimit.path, { element, hint });
+    for (const f of q.where) {
+      if (f.principal !== undefined) bag.error("security-not-declared", "A filter by the principal needs a top-level security block", [...f.path, "principal"], { element, hint });
+    }
+    for (const sc of q.scenarios) {
+      if (sc.given.principal) bag.error("security-not-declared", "given.principal needs a top-level security block", sc.given.principal.path, { element: `${element} › scenario ${sc.name}`, hint });
     }
   }
 }

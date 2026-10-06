@@ -414,6 +414,8 @@ contexts:
       - name: search_invitations
         description: 招待をメールアドレスで探す（似ている順）。状態と作成日時で絞り込める
         from: CleaningStaffInvitation
+        # 招待の一覧は管理者だけ（クエリも authorize が必須。ロールは読む前に確かめる）
+        authorize: { roles: [admin] }
         params:
           - { name: status, type: InvitationStatus }
           - { name: created_after, type: DateTime }

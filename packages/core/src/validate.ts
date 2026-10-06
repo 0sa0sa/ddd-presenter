@@ -12,6 +12,7 @@ import type {
   ParameterIR,
   PolicyIR,
   RelationshipIR,
+  ScenarioPrincipalIR,
   ScenarioThenIR,
   SecurityIR,
   StepIR,
@@ -1387,6 +1388,13 @@ class ContextValidator {
       }
       return;
     }
+    this.checkGivenPrincipal(p, el);
+  }
+
+  /** A given principal: an id of the declared type, declared roles, declared claims of their types. */
+  checkGivenPrincipal(p: ScenarioPrincipalIR, el: string): void {
+    const sec = this.security;
+    if (!sec) return;
     if (p.id !== undefined) this.checkValue(p.id, sec.principal.idType === "UUID" ? T.UUID : T.String, [...p.path, "id"], el);
     p.roles.forEach((r, i) => {
       if (!sec.roles.includes(r)) {

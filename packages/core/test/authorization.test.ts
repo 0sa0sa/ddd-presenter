@@ -179,3 +179,95 @@ describe("security: completion and JSON Schema", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Queries (docs/09 §21)
+// ---------------------------------------------------------------------------
+
+const SECURE_QUERIES = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/secure-queries.ddd.yaml"), "utf8");
+const QUERIES = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/queries.ddd.yaml"), "utf8");
+
+describe("security: queries", () => {
+  test("the combined fixture is valid and reads authorize, rate_limit, principal filters and scenario principals", () => {
+    const r = validateModelText(SECURE_QUERIES);
+    expect(r.diagnostics.filter((d) => d.severity !== "info")).toEqual([]);
+    const [company, mine, open] = r.model!.contexts[0]!.queries!;
+    expect(company!.authorize).toMatchObject({ kind: "principal", roles: ["admin", "staff"] });
+    expect(company!.rateLimit).toMatchObject({ requests: 10, per: "minute", by: "principal" });
+    expect(company!.where[0]).toMatchObject({ field: "company_id", op: "eq", principal: "company_id" });
+    expect(company!.scenarios[0]!.given.principal).toMatchObject({ roles: ["staff"], claims: { company_id: "00000000-0000-4000-8000-0000000000c1" } });
+    expect(mine!.authorize).toMatchObject({ kind: "principal", roles: [] });
+    expect(mine!.where[0]!.principal).toBe("id");
+    expect(open!.authorize!.kind).toBe("public");
+    expect(effectiveRateLimit(r.model!, mine!)).toMatchObject({ requests: 60, by: "principal" });
+  });
+
+  test("deny by default: with security every query needs authorize; without it authorize and principal filters are errors", () => {
+    expect(codes(SECURE_QUERIES.replace("        authorize: authenticated\n", ""))).toEqual(["missing-authorize"]);
+    const plain = QUERIES.replace("        from: Member\n", "        from: Member\n        authorize: public\n");
+    expect(codes(plain)).toContain("security-not-declared");
+  });
+
+  test("internal and allow_if do not apply to queries; public queries have no principal to filter or count by", () => {
+    expect(codes(SECURE_QUERIES.replace("        authorize: authenticated\n", "        authorize: internal\n"))).toContain("invalid-authorize");
+    const rule = errors(SECURE_QUERIES.replace("        authorize: authenticated\n", "        authorize: { roles: [candidate], allow_if: \"principal.id != null\" }\n"));
+    expect(rule.map((d) => d.code)).toEqual(["invalid-authorize"]);
+    expect(rule[0]!.hint).toContain("principal: company_id");
+    expect(codes(SECURE_QUERIES.replace("        authorize: authenticated\n", "        authorize: public\n"))).toContain("invalid-principal-filter");
+    expect(codes(SECURE_QUERIES.replace("rate_limit: { requests: 30, per: minute, by: ip }", "rate_limit: { requests: 30, per: minute, by: principal }"))).toContain("rate-limit-without-principal");
+    expect(codes(SECURE_QUERIES.replace("        authorize: { roles: [admin, staff] }\n        rate_limit", "        authorize: { roles: [admn, staff] }\n        rate_limit"))).toContain("unknown-role");
+  });
+
+  test("principal filters: id or a declared scalar claim of the field's type; one source per filter", () => {
+    const filter = "          - { field: company_id, op: eq, principal: company_id }\n";
+    const e = errors(SECURE_QUERIES.replace(filter, "          - { field: company_id, op: eq, principal: compnay_id }\n"));
+    expect(e.map((d) => [d.code, d.hint])).toEqual([["unknown-field", 'Did you mean "company_id"?']]);
+    expect(codes(SECURE_QUERIES.replace(filter, "          - { field: company_id, op: eq, principal: roles }\n"))).toEqual(["unknown-field"]);
+    expect(codes(SECURE_QUERIES.replace(filter, "          - { field: title, op: eq, principal: company_id }\n"))).toEqual(["type-mismatch"]);
+    expect(codes(SECURE_QUERIES.replace(filter, "          - { field: company_id, op: eq, principal: company_id, param: status }\n"))).toContain("invalid-shape");
+    // A Ref compares with its target's identity type (UUID here).
+    const ref = SECURE_QUERIES.replace("          - { field: candidate_id, op: eq, principal: id }\n", "          - { field: job_id, op: eq, principal: id }\n");
+    expect(codes(ref).filter((c) => c !== "invalid-scenario")).toEqual([]);
+  });
+
+  test("scenarios run as a principal that may run the query and has the claims its rows are scoped by", () => {
+    const own = "              principal: { roles: [staff], claims: { company_id: \"00000000-0000-4000-8000-0000000000c1\" } }\n";
+    expect(codes(SECURE_QUERIES.replace(own, "              principal: { roles: [staff] }\n"))).toEqual(["invalid-scenario"]);
+    expect(codes(SECURE_QUERIES.replace(own, ""))).toEqual(["invalid-scenario"]);
+    expect(codes(SECURE_QUERIES.replace(own, "              principal: { roles: [candidate], claims: { company_id: \"00000000-0000-4000-8000-0000000000c1\" } }\n"))).toEqual(["invalid-scenario"]);
+    expect(codes(SECURE_QUERIES.replace(own, "              principal: null\n"))).toEqual(["invalid-scenario"]);
+    expect(codes(SECURE_QUERIES.replace(own, "              principal: { roles: [stuff], claims: { company_id: \"00000000-0000-4000-8000-0000000000c1\" } }\n"))).toContain("unknown-role");
+    const warnings = validateModelText(SECURE_QUERIES.replace("            given: { aggregates: *jobs }\n", "            given: { aggregates: *jobs, principal: { roles: [admin] } }\n")).diagnostics.map((d) => d.code);
+    expect(warnings).toContain("unused-principal");
+  });
+
+  test("a query cannot take the name of an aggregate's read rate limit (they would share a bucket)", () => {
+    expect(codes(SECURE_QUERIES.replace("      - name: open_jobs\n", "      - name: read_job\n"))).toContain("duplicate-name");
+  });
+
+  test("completion offers the query's authorize values, its keys and the principal members of a filter", () => {
+    const at = (text: string, marker: string) => complete(text.replace(marker, ""), text.indexOf(marker)).items.map((i) => i.label);
+    expect(at(SECURE_QUERIES.replace("        authorize: authenticated\n", "        authorize: |\n"), "|")).toEqual(["public", "authenticated"]);
+    expect(at(SECURE_QUERIES.replace("principal: company_id }", "principal: | }"), "|")).toEqual(["id", "company_id"]);
+    expect(at(SECURE_QUERIES.replace("        authorize: { roles: [admin, staff] }\n        rate_limit", "        authorize: { roles: [|] }\n        rate_limit"), "|")).toEqual(["admin", "staff", "candidate"]);
+    const keys = at(SECURE_QUERIES.replace("        authorize: authenticated\n", "        |\n"), "|");
+    expect(keys).toContain("authorize");
+    expect(keys).not.toContain("from");
+    // Without security the query does not offer authorize / rate_limit.
+    const plainKeys = at(QUERIES.replace("        from: Member\n", "        from: Member\n        |\n"), "|");
+    expect(plainKeys).not.toContain("authorize");
+  });
+
+  test("the published schema accepts protected queries and rejects internal / allow_if on them", () => {
+    const schema = JSON.parse(readFileSync(join(import.meta.dir, "../schema/model.schema.json"), "utf8"));
+    const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
+    expect(validate(parse(SECURE_QUERIES))).toBe(true);
+    for (const [from, to] of [
+      ["        authorize: authenticated\n", "        authorize: internal\n"],
+      ["        authorize: authenticated\n", '        authorize: { roles: [admin], allow_if: "true" }\n'],
+      ["principal: company_id }", "principal: Company }"],
+    ] as const) {
+      expect({ to, ok: validate(parse(SECURE_QUERIES.replace(from, to))) }).toEqual({ to, ok: false });
+    }
+  });
+});

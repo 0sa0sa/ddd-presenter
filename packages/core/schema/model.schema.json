@@ -1330,6 +1330,36 @@
           "description": "Aggregate the query reads.",
           "$ref": "#/$defs/pascal"
         },
+        "authorize": {
+          "description": "Who may run the query (required once security is declared): public, authenticated or { roles }. internal and allow_if do not apply to queries; scope rows to the caller with where: { principal }.",
+          "anyOf": [
+            {
+              "enum": [
+                "public",
+                "authenticated"
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "roles"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/snake"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "rate_limit": {
+          "description": "Rate limit of the query's HTTP endpoint (default: security.rate_limits.default); none opts out.",
+          "$ref": "#/$defs/rateLimitOrNone"
+        },
         "params": {
           "description": "Typed parameters (primitive, enum or Ref); optional unless required: true (an absent one disables its filters).",
           "type": "array",
@@ -1338,7 +1368,7 @@
           }
         },
         "where": {
-          "description": "Filters: field <op> param (optional parameter: no filter when absent) or field <op> value.",
+          "description": "Filters: field <op> param (optional parameter: no filter when absent), field <op> value, or field <op> principal (id or a claim of the caller; always applies, needs security and a non-public authorize).",
           "type": "array",
           "items": {
             "type": "object",
@@ -1365,7 +1395,11 @@
               "param": {
                 "$ref": "#/$defs/snake"
               },
-              "value": {}
+              "value": {},
+              "principal": {
+                "description": "Member of the authenticated principal compared with: id or a declared scalar claim.",
+                "$ref": "#/$defs/snake"
+              }
             }
           }
         },
@@ -1486,6 +1520,28 @@
                         "fields": {
                           "type": "object"
                         }
+                      }
+                    }
+                  },
+                  "principal": {
+                    "description": "Who runs the query (protected queries): id, roles and claims; default: the query's roles, claims defaulted.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": [
+                          "string",
+                          "integer"
+                        ]
+                      },
+                      "roles": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/$defs/snake"
+                        }
+                      },
+                      "claims": {
+                        "type": "object"
                       }
                     }
                   }
