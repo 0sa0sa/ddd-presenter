@@ -43,6 +43,17 @@ describe("published JSON Schema", () => {
     }
   });
 
+  test("accepts queries (params, where, search, order_by, page, returns, scenarios) and rejects unknown keys and values", () => {
+    const q = readFileSync(join(import.meta.dir, "../../generator/test/fixtures/queries.ddd.yaml"), "utf8");
+    const ok = validate(parse(q));
+    expect(validate.errors ?? []).toEqual([]);
+    expect(ok).toBe(true);
+    expect(validate(parse(q.replace("mode: trigram", "mode: fuzzy")))).toBe(false);
+    expect(validate(parse(q.replace("op: gte", "op: between")))).toBe(false);
+    expect(validate(parse(q.replace("page: { size: 2, max_size: 50 }", "page: { size: 2, max: 50 }")))).toBe(false);
+    expect(validate(parse(q.replace("next_cursor: absent", "next_cursor: maybe")))).toBe(false);
+  });
+
   test("rejects unknown keys and bad names like the built-in parser", () => {
     expect(validate(parse(SAMPLE.replace("    enums:", "    enumz:")))).toBe(false);
     expect(validate(parse(SAMPLE.replace("name: CleaningStaffInvitation", "name: cleaning_staff_invitation")))).toBe(false);

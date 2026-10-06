@@ -509,7 +509,7 @@ export function readCaller<K extends z.ZodType, O extends z.ZodType>(
   };
 }
 
-async function send<O extends z.ZodType>(
+export async function send<O extends z.ZodType>(
   transport: Transport,
   method: "GET" | "POST",
   path: string,

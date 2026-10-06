@@ -390,14 +390,74 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 
 ### 制限
 
-- **一覧のクエリはない**: DSL にクエリ（Read model）がなく、生成できるのは ID による Aggregate の取得だけ。一覧・検索を生成するには、DSL に `queries:`（名前、パラメータのスキーマ、返す形 = Read model のフィールド、対象の Aggregate とフィルタの式、ページング）と、それを実装するポート（`<Query>Reader`）が要る。そうすれば `list(params)` のキー（`[...lists(), params]`）、`queryOptions` / `infiniteQueryOptions`、`GET <base>/<context>/<query>?…` の契約、作成・変更時の `lists()` の無効化がそのまま当てはまる。今は `[{ ...queries.<context>.<aggregate>.lists()[0], filters }]` のように `lists()` のキーを広げて手で書けば、生成したミューテーションの無効化に乗る。
+- **一覧のクエリ**（2026-10-06 に解消）: §19 で DSL に `queries:` を足し、`infiniteQueryOptions`（キーは `[{ …, kind: "list", query, params }]` で `lists()` の下）、`GET <base>/<context>/queries/<query>?…` の契約、リーダーのポートを生成するようになった。モデルにない一覧は、これまでどおり `[{ ...queries.<context>.<aggregate>.lists()[0], filters }]` と手で書けば無効化に乗る。
 - **ポリシー経由の変更は無効化しない**: コミット後に別のコンテキストで起きる変更は結果整合で、ミューテーションの完了時にはまだ起きていないことがある。
 - **Entity を入力に持つコマンド**: Entity のスキーマはインスタンスしか受け付けないので、JSON から組み立てられない（今のモデルには例がない）。
 - **認証・レート制限・本文の大きさの制限・CORS** はホストの責務。
 
+## 19. 読み取り: 一覧・trigram 検索・トークン方式のページング（2026-10-06）
+
+一覧・検索・ページングを DSL（コンテキストの `queries:`、docs/10 §10）から両 target に生成するようにした。読み取りは書き込み（Use case）と分けた Query（CQRS）で、1つの Aggregate を読み、型付きのパラメータで絞り込み、pg_trgm の trigram で検索し、OFFSET を使わないキーセット方式で1ページずつ返す。次のページは不透明な署名付きトークン（カーソル）で指す。生成物と SQL の契約は docs/05 §9。
+
+動かすために永続化まで生成する: PostgreSQL の望ましいスキーマ（`sql/<context>.sql`）、生成したリポジトリのポートの PostgreSQL 実装（楽観ロック）、クエリのリーダー（キーセットと trigram の SQL）、同じ意味論のインメモリのリーダー（テスト用）。SQL は共通の生成器（`packages/generator/src/sql.ts`）が作り、TypeScript と Python は同じ文を埋め込む（Python はプレースホルダを `%(pN)s` にしただけ。生成器のテストが両方の文の一致を確かめる）。TypeScript の生成物は PGlite（WebAssembly の PostgreSQL 18 と pg_trgm）で実際に動かして確かめる。
+
+### 採用した設計と出典
+
+| 項目 | 決定 | 理由・出典 |
+|---|---|---|
+| ページング | キーセット（シーク）方式。前のページの最後の行の並び順のキーより後ろを `LIMIT n + 1` で読む（1行多く読んで次があるかを知る）。OFFSET は使わない | OFFSET は飛ばす行も計算するので深いページほど遅く、ページの間に行が増減すると重複・欠けが起きる（[PostgreSQL: LIMIT and OFFSET](https://www.postgresql.org/docs/current/queries-limit.html)、[Markus Winand: We need tool support for keyset pagination / No Offset](https://use-the-index-luke.com/no-offset)、[Use The Index, Luke: Fetching the next page](https://use-the-index-luke.com/sql/partial-results/fetch-next-page)） |
+| 一意な並び | 宣言したキーのあとに識別子を必ず足す（向きは最後のキーと同じ）。並び順のフィールドは必須（NULL なし）に限る | キーが一意でないと同じ値の行の境界でページが重複・欠ける（Winand）。NULL は比較で真にならず、キーセットの条件から外れる |
+| 複数列の条件 | 向きがそろえば行値の比較 `(a, b, id) < ($1, $2, $3)`、混ざれば `(a > $1) OR (a = $1 AND b < $2) OR …` に展開 | 行値の比較は辞書式で、btree の1回のシークで使える（[PostgreSQL: Row Constructor Comparison](https://www.postgresql.org/docs/current/functions-comparisons.html#ROW-WISE-COMPARISON)、Winand の「行値」）。向きが混ざると行値では表せない。PGlite で混在の展開も並び順のインデックスで Sort なしに読めることを確かめた |
+| インデックス | 並び順（relevance を除くキー）に合わせた btree の複合インデックス `(列 COLLATE "C" DESC, …, id DESC)` を DDL に出す | ORDER BY とキーセットの条件を1つのインデックスで満たす（[PostgreSQL: Indexes and ORDER BY](https://www.postgresql.org/docs/current/indexes-ordering.html)） |
+| 文字列の順 | `COLLATE "C"`（コードポイント順）で並べ、比べ、インデックスを作る | 照合順序に依存しない決定的な順で、インメモリのリーダー（JavaScript / Python でコードポイント比較）と完全に一致させられる。ロケールの順が要る画面は、クエリとインデックスの照合順序を一緒に変える（[PostgreSQL: Collation Support](https://www.postgresql.org/docs/current/collation.html)） |
+| trigram の検索 | `lower(列) % lower(q)`（GIN `gin_trgm_ops` で絞る）かつ `similarity(lower(列), lower(q)) >= min_similarity`（決め手）。複数の列は最大の類似度。スコアは `CROSS JOIN LATERAL` で1回だけ計算する | インデックスが使えるのは `%` などの演算子だけで、`similarity()` の関数呼び出しは使えない（[PostgreSQL: pg_trgm — Index Support](https://www.postgresql.org/docs/current/pgtrgm.html#PGTRGM-INDEX)）。`%` は GUC の `pg_trgm.similarity_threshold`（既定 0.3）と比べるので、明示の閾値で結果を決め、`%` は閾値が 0.3 以上のときだけ出す（下の「確かめた事実」） |
+| relevance のキー | DB が計算した float4 の類似度をそのまま並び順のキーにする。SELECT では `float8` の text（float4 の値を正確に表す）、次のページでは `$n::real` に戻す。インメモリでは float4 の割り算を再現（`Math.fround` / `struct.pack('f')`） | 丸めた値をキーにすると、DB の並びとキーの順がずれて境界で重複・欠けが起きうる。float4 → float8 は正確で、`extra_float_digits` が 0 でも float8 の15桁から float4 に一意に戻る。`count / (len1 + len2 - count)` を float4 で割る pg_trgm の計算は、倍精度で割って float4 に丸めても同じ（二重丸めは 53 ≥ 2·24 + 2 で無害） |
+| カーソルの形 | `base64url(JSON {v, keys, fp, exp?}) + "." + base64url(HMAC-SHA256)`。不透明・URL セーフ。秘密は配列で受け、先頭で署名・どれでも検証（ローテーション）。期限は任意 | Slack と Stripe はどちらも不透明なカーソル（Slack の `next_cursor`、Stripe の `starting_after` = 最後のオブジェクトの ID）で、ページの境界をサーバーが決める（[Slack: Pagination](https://docs.slack.dev/apis/web-api/pagination)、[Slack Engineering: Evolving API Pagination at Slack](https://slack.engineering/evolving-api-pagination-at-slack/)、[Stripe: Pagination](https://docs.stripe.com/api/pagination)）。キーセットの値を渡すので改ざんされると任意の位置から読めてしまう — 署名して防ぐ（[RFC 2104 HMAC](https://www.rfc-editor.org/rfc/rfc2104)、[RFC 4648 §5 base64url](https://www.rfc-editor.org/rfc/rfc4648#section-5)）。比較は定数時間 |
+| 指紋 | カーソルにクエリ名・有効な並び順・検索テキスト・パラメータ（正規 JSON）の SHA-256 を入れ、違えば `InvalidCursor`（HTTP 400 `invalid_cursor`）。`limit` は入れない | 別の条件でカーソルを使うと、エラーにならずに間違ったページが返る。ページの大きさは途中で変えてもキーセットは正しい |
+| 省略可能なパラメータ | 渡さなければそのフィルタは効かない。SQL は `($n::t IS NULL OR 列 = $n)`。検索だけは文を分ける（検索あり・なし × 最初・次で4つ） | フィルタの組み合わせごとに文を作ると数が爆発する。検索の条件を `IS NULL OR` に入れると汎用の計画で trigram のインデックスが使えないので、そこだけ分けた |
+| ドライバとの境界 | プレースホルダはすべて明示的なキャスト付き。SELECT は日時・日付・numeric・キーを text で返す。TypeScript は `{ query(text, values): Promise<{ rows }> }`、Python は psycopg 3 の同期 `Connection` の形 | node-postgres は値を型なしで送り、`int8` を文字列、`timestamptz` をミリ秒の `Date` で返す。PGlite は `int8` を bigint / number、`date` を `Date` で返す（下の「確かめた事実」）。text にそろえればドライバの違いとマイクロ秒の欠けをなくせる（[node-postgres: Pool](https://node-postgres.com/apis/pool)、[psycopg 3: Connection](https://www.psycopg.org/psycopg3/docs/api/connections.html)、[PGlite](https://pglite.dev/)） |
+| 楽観ロック | Aggregate に版を持たせず、リポジトリ（作業単位ごと）が読んだ版を識別子ごとに覚える。`UPDATE … WHERE id = $1 AND version = $n RETURNING version` / `INSERT … ON CONFLICT DO NOTHING RETURNING version` で、行が返らなければ `ConcurrencyConflict`（HTTP 409） | ドメインの不変性と生成済みのクラスを変えずに済む（Fowler の Optimistic Offline Lock の「セッションが版を覚える」形、[Martin Fowler: Optimistic Offline Lock](https://martinfowler.com/eaaCatalog/optimisticOfflineLock.html)）。`RETURNING` で判定すれば `rowCount` を返さないクライアントでも動く |
+| 行の形 | 必須の Value Object は列に展開（`email_value`）、省略可能な Value Object・List・Entity は jsonb（モデルのフィールド名） | 検索・絞り込み・並べ替えに使うのはスカラーなので列にする（関数インデックスも素直に張れる）。省略可能な Value Object は全列 NULL と「中身がすべて NULL」の区別がつかないので jsonb。jsonb のキーをモデルの名前にそろえ、両 target が同じテーブルを読み書きできるようにした |
+| スキーマ | 冪等な望ましいスキーマ（`CREATE … IF NOT EXISTS`）を生成し、マイグレーションは生成しない | 生成器は「あるべき姿」しか知らず、既存のデータの移し方（列の分割・既定値の埋め方）はモデルから決まらない。差分ツールに望ましいスキーマを渡すのが安全 |
+| TanStack Query | クエリは読む Aggregate のファクトリに `infiniteQueryOptions` で入る。キーは `[{ scope, entity, kind: "list", query, params }]`、`queryFn` はキーからパラメータを読み、`initialPageParam: null`、`getNextPageParam: (lastPage) => lastPage.nextCursor` | §18 の規則（オブジェクト1つのキー、queryFn の変数はすべてキーに、フックを生成しない）をそのまま当てた。キーが `lists()` の下なので、その Aggregate を保存するミューテーションの既存の無効化が当たる（[TanStack Query: Infinite Queries](https://tanstack.com/query/latest/docs/framework/react/guides/infinite-queries)、[TkDodo: Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys)） |
+| 認可の余地 | Query はアプリケーションサービス（`<Query>Query.execute`）で、リーダーはポート | 別の作業で足す `authorize:` は Use case と同じく `execute` の入口に付けられる（リーダーとカーソルの形は変わらない） |
+
+### 確かめた事実（PGlite 0.5 = PostgreSQL 18.3 で実測）
+
+- `show_trgm('staff@example.com')` は `{"  c","  e","  s"," co"," ex"," st",aff,amp,com,exa,"ff ","le ",mpl,"om ",ple,sta,taf,xam}`: 英数字以外（`@`・`.`・`-`・`_`）は単語の区切りで、単語ごとに前に空白2つ・後ろに1つ。非 ASCII の文字（é, ü, ß, 日本語）も単語に入り、そのトリグラムはハッシュになる（集合としては同じに数えられる）。`lower('ÜÉ')` は `üé`。インメモリの実装は「小文字にして `[\p{L}\p{N}]+` を単語とする」で一致させ、生成テストがこの値で確かめる。
+- `similarity()` の型は `real`。`'abc' % 'abd'`（類似度 0.33333334）は閾値を同じ値にすると真: `%` は「閾値以上」。`similarity(...) >= 0.3` は `real >= double precision` として比べられる。
+- `similarity(x, NULL)` は NULL、`GREATEST` は NULL を無視する。空文字列との類似度は 0。
+- `EXPLAIN` で、`(lower(display_name) % lower($1) OR lower(email_value) % lower($1))` は2つの GIN インデックスの BitmapOr になる（LATERAL のスコアは引き上げられる）。`($1 IS NULL OR …)` もパラメータの値が分かる計画では簡約されてインデックスを使う。
+- `ORDER BY joined_at` は、SELECT に `to_char(joined_at …) AS joined_at` があると**出力列（text）で**並べる（PostgreSQL は ORDER BY の素の名前を先に出力列から探す）。生成する ORDER BY は列をテーブル名で修飾する。修飾後は並び順のインデックスで Sort なしに読む。
+- PGlite の照合順序は `C`、エンコーディングは UTF8。`int8` は値によって number / bigint、`timestamptz` と `date` は `Date` で返る。
+
+### 意図して採用しなかったもの
+
+| 案 | 理由 |
+|---|---|
+| `where:` を Rule 式で書く | 式の任意の形を SQL とインメモリと両言語に翻訳し、さらに「省略可能なパラメータなら条件を外す」意味を与えるのは大きく、型検査も難しい。フィールド・演算子・パラメータ（またはリテラル）の宣言的なリストにした（`in` や OR は今は書けない） |
+| `set_limit()` / `SET pg_trgm.similarity_threshold` で閾値を合わせる | セッション単位の設定で、プールした接続では別の要求に漏れる。`SET LOCAL` はトランザクションが要り、1文の `query(text, values)` では送れない。明示の `similarity() >=` を決め手にし、`%` は閾値が既定以上のときの絞り込みにだけ使う |
+| スコアを丸めて（`round(similarity, 4)`）キーにする | 丸めた値と DB の並び（丸める前の値）の順が一致しない場合があり、境界で重複・欠けが起きる |
+| カーソルの暗号化（AES-GCM など） | キーは並び順の値で秘密ではない。必要なのは改ざん防止で、署名で足りる。並び順に秘密の値を使うモデルは避ける（docs/05 §9） |
+| 言語をまたいで使えるカーソル | パラメータの正規化（Decimal・日時の文字列の形、プロパティ名）が言語で違う。同じサービスの中で発行・検証するのが普通なので、発行した実装の中でだけ有効とした |
+| OFFSET・総件数（`count(*)`）を返す | OFFSET は上の理由で使わない。総件数は大きなテーブルで全件を数えるので、無限スクロールのページングには返さない（Slack / Stripe も `has_more` / `next_cursor` だけ） |
+| 永続化を常に生成する（クエリがなくても） | クエリのないモデルの生成物をバイト単位で変えないため。PostgreSQL のリポジトリだけが欲しいコンテキストは、今はクエリを1つ宣言する（下の「制限」） |
+| GiST の trigram インデックスと `<->` での並べ替え | KNN（上位 n 件）は速いが、閾値つきの絞り込みとキーセットの組み合わせでは GIN の `%` が素直。読み取りが多い用途で GIN を既定にした（docs/05 §9 の助言） |
+
+### 制限
+
+- 永続化（DDL・リポジトリ・リーダー）はクエリを宣言したコンテキストだけ。
+- カーソルは発行した実装（TypeScript / Python）の中でだけ有効。
+- `where` は等値と大小比較の AND だけ（`in`・OR・リストのパラメータ・部分文字列はない）。prefix / exact の検索に relevance はない。
+- trigram と非 ASCII: 単語の区切りと `lower()` はデータベースのロケールに従う。日本語のように分かち書きしない言語には向かない（pg_bigm や全文検索を検討）。インメモリの実装は Unicode の文字・数字を単語とする。
+- `%` の絞り込みは `pg_trgm.similarity_threshold` が `min_similarity` 以下であることに依存する（既定のままなら正しい。DDL のコメントに明記）。
+- マイグレーションは生成しない（望ましいスキーマだけ）。
+- Python の PostgreSQL のコードは psycopg の実物では動かしていない（mypy と偽の接続のテスト。SQL の文は TypeScript と同じで、PGlite で確かめた）。
+- psycopg の準備済みの文（5回目から）は汎用の計画になりうる（docs/05 §9 の注意）。
+
 ## 20. 認証・認可・レート制限の生成（2026-10-06）
 
-モデルに `security` を足すと、生成コードに認証・認可・レート制限が入る（DSL は docs/10 §10、生成物・契約・エラーの対応・ヘッダーは docs/05 §8「認証・認可・レート制限」）。DDD Presenter のサーバー自身の認証（packages/server、§11）とは別物で、こちらは**生成される顧客のコード**の機能。`security` を書かなければ、Python・TypeScript・HTTP API のどの生成物もバイト単位で以前と同じ（全フィクスチャで、変更前の生成器の出力と比べて確かめた）。
+モデルに `security` を足すと、生成コードに認証・認可・レート制限が入る（DSL は docs/10 §11、生成物・契約・エラーの対応・ヘッダーは docs/05 §8「認証・認可・レート制限」）。DDD Presenter のサーバー自身の認証（packages/server、§11）とは別物で、こちらは**生成される顧客のコード**の機能。`security` を書かなければ、Python・TypeScript・HTTP API のどの生成物もバイト単位で以前と同じ（全フィクスチャで、変更前の生成器の出力と比べて確かめた）。
 
 ### 参照した資料と、生成コードでの適用
 

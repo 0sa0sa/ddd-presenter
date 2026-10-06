@@ -4,6 +4,7 @@ import { assemble, Code, header, relativeSpecifier, TsImports, tsString } from "
 import { file, type TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { prop } from "./names.ts";
+import { inMemoryReaders } from "./queries.ts";
 import { tsType } from "./types.ts";
 import { expectEqual, record, typedValue } from "./values.ts";
 
@@ -37,6 +38,8 @@ export function testingFile(L: TsLayout): TsFile {
     });
     c.line("}");
   }
+  // In-memory readers of the context's queries (none without queries: the file stays as before).
+  inMemoryReaders(L, c, imp);
   const exts = L.ca.ir.extensionPoints;
   if (!exts.length) {
     return file(L, mod, `In-memory test doubles for the ports of the ${L.ca.ir.name} context.`, imp, c.toString());

@@ -412,6 +412,68 @@ contexts:
               returns: false
               emits: []
 
+    # 読み取り（一覧・検索・ページング）。宣言すると PostgreSQL のスキーマ（sql/cleaning_staff.sql）・
+    # リポジトリ・リーダーも生成する（docs/10 §10）
+    queries:
+      - name: search_invitations
+        description: 招待をメールアドレスで探す（似ている順）。状態と作成日時で絞り込める
+        from: CleaningStaffInvitation
+        params:
+          - { name: status, type: InvitationStatus }
+          - { name: created_after, type: DateTime }
+        where:
+          - { field: status, op: eq, param: status }
+          - { field: created_at, op: gt, param: created_after }
+        search: { param: q, fields: [email.value], mode: trigram, min_similarity: 0.3 }
+        # relevance（似ている順）は検索しているときだけ効く。識別子（id）は最後の決め手として自動で付く
+        order_by:
+          - relevance
+          - { field: created_at, direction: desc }
+        page: { size: 20, max_size: 100 }
+        returns: [id, email, status, created_at, expires_at]
+        scenarios:
+          - name: newest_first_across_pages
+            given:
+              aggregates: &invitations
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000002"
+                    email: { value: "stuff.manager@example.com" }
+                    status: accepted
+                    created_at: "2026-01-02T10:00:00+00:00"
+                    expires_at: "2026-01-09T10:00:00+00:00"
+                    accepted_at: "2026-01-03T10:00:00+00:00"
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000003"
+                    email: { value: "alice@example.org" }
+                    status: pending
+                    created_at: "2026-01-03T10:00:00+00:00"
+                    expires_at: "2026-01-10T10:00:00+00:00"
+            when: { limit: 2, pages: 2 }
+            then:
+              items:
+                - "00000000-0000-0000-0000-000000000003"
+                - "00000000-0000-0000-0000-000000000002"
+                - "00000000-0000-0000-0000-000000000001"
+              next_cursor: absent
+          - name: pending_only
+            given: { aggregates: *invitations }
+            when: { params: { status: pending } }
+            then:
+              items: ["00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000001"]
+              next_cursor: absent
+          - name: search_by_email
+            given: { aggregates: *invitations }
+            when: { params: { q: staff } }
+            then:
+              items: [{ email: { value: "staff@example.com" }, status: pending }]
+              next_cursor: absent
+
   - name: Staffing
     description: 招待を受諾した人をスタッフとして登録する（CleaningStaff の下流）
     glossary:

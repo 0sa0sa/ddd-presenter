@@ -225,11 +225,12 @@ tests/generated/<context>-api.test.ts
 |---|---|---|---|
 | Use case ごとに `POST <base>/<context>/<use-case>` | コマンドのスキーマ（`X.schema`）。JSON の本文 | Use case の戻り値のスキーマ（`200`、JSON）。戻り値がなければ `204`（本文なし、出力は `z.void()`） | その Use case が起こしうる Domain Error のコードと HTTP ステータス（`errors`） |
 | Aggregate ごとに `GET <base>/<context>/<aggregate>/:id` | 識別子のスキーマ（`idSchema("X")`） | Aggregate の JSON 形（`XJson`） | `constraint_violation: 400`, `aggregate_not_found: 404` |
+| クエリごとに `GET <base>/<context>/queries/<query>?…`（§9） | クエリの入力のスキーマ（`<Query>InputSchema`）。クエリ文字列（モデルの snake_case の名前） | 1ページ（`<Query>PageJson`: `{ items, nextCursor }`） | `constraint_violation: 400`, `invalid_cursor: 400` |
 
 - **JSON 形**: Aggregate を `JSON.stringify` したもの（公開フィールドだけ。Instant・LocalDate・ID は文字列、Decimal は文字列、Value Object はオブジェクト、Entity はフィールドのオブジェクト）。クライアントは `XJson`（Entity は `<Entity>Json`）で検証する。振る舞いを持たない読み取り用の形で、Invariant は評価しない（サーバーで保存できた状態だけが届く）。`z.object` なので未知のキーは捨てる（サーバーがフィールドを足しても古いクライアントが壊れない）。
 - **識別子**: Aggregate の識別子は UUID・String・Integer（core の検証）。GET の `id` は識別子のスキーマ（制約付き）で検証する。不正な percent-encoding のパスはどのエンドポイントにも一致しない（404。ハンドラは例外を投げない）。
 - **Use case の戻り値**: ドメインのスキーマで検証する（UUID は `uuidSchema`、Decimal は `decimalSchema()` で `Decimal` に戻る）。戻り値が Aggregate / Entity なら JSON 形。
-- **エラーの一覧**（`errors`）は生成器がモデルから求める: `constraint_violation` 400、load の `not_found`（なければ `aggregate_not_found`）404、invoke する操作・create するファクトリの `require` のガードのエラー 409、`fail` のエラー・変更する Aggregate（と Entity）の Invariant・入力の Value Object の Invariant 422。同じコードは先に決まったステータスを使う。一覧にないコードは 422。クライアントの復元は一覧に依存しない（コンテキストの全エラーを code で引く）。
+- **エラーの一覧**（`errors`）は生成器がモデルから求める: `constraint_violation` 400、load の `not_found`（なければ `aggregate_not_found`）404、invoke する操作・create するファクトリの `require` のガードのエラー 409、`fail` のエラー・変更する Aggregate（と Entity）の Invariant・入力の Value Object の Invariant 422。同じコードは先に決まったステータスを使う。一覧にないコードは 422。クエリ（§9）があるコンテキストでは、保存する Use case に `concurrency_conflict` 409 が加わる（PostgreSQL のリポジトリの楽観ロック）。クライアントの復元は一覧に依存しない（コンテキストの全エラーを code で引く。クエリのあるコンテキストでは `InvalidCursor`・`ConcurrencyConflict` も）。
 
 #### サーバー（`createApiHandler`）
 
@@ -240,7 +241,8 @@ tests/generated/<context>-api.test.ts
 
 | 状況 | ステータス | 本文 |
 |---|---|---|
-| 本文が JSON でない・スキーマに合わない・ID の形が違う・実行中の制約違反（`ConstraintViolation`） | 400 | `{ code: "constraint_violation", message, details: { model, issues } }` |
+| 本文が JSON でない・スキーマに合わない・ID の形が違う・実行中の制約違反（`ConstraintViolation`）・クエリ文字列に知らない名前や重複 | 400 | `{ code: "constraint_violation", message, details: { model, issues } }` |
+| クエリのカーソルが不正（改ざん・期限切れ・別のパラメータ。`InvalidCursor`） | 400 | `{ code: "invalid_cursor", message, details: { reason } }` |
 | load で見つからない（`not_found` のエラー / `AggregateNotFound`）、GET で見つからない | 404 | `{ code, message, details }` |
 | 現在の状態では操作できない（`require` のガードのエラー） | 409 | 同上 |
 | それ以外の Domain Error（`fail`、Invariant など） | 422 | 同上 |
@@ -275,7 +277,8 @@ await queryClient.query({ ...queries.cleaningStaff.cleaningStaffInvitation.detai
 ```
 
 - **クエリファクトリ**: Aggregate ごとに1つのオブジェクトに、無効化用のキーと `queryOptions` をまとめる。`create<Context>Queries(api)` が `{ <aggregate>: { all(), lists(), details(), detail(id), detailOrSkip(id) } }` を返す。`api` を引数に取るのは、SSR（リクエストごとの Cookie）とテスト（ハンドラにつなぐ `fetch`）で別のクライアントが要るため。リクエストごとに作るなら、ルーターの context などに `createApiQueries(api)` を入れる。`api` はキーに入れない（1つの QueryClient に1つの API クライアント）。
-- **キー**: どれも「オブジェクトを1つだけ持つ配列」。`all()` = `[{ scope: "<context>", entity: "<aggregate>" }]`、`lists()` = `[{ …, kind: "list" }]`、`details()` = `[{ …, kind: "detail" }]`、`detail(id).queryKey` = `[{ …, kind: "detail", id }]`（kebab-case の文字列）。フィルタは名前で部分一致する（順序に依存しない）ので、`[{ scope: "cleaning-staff" }]` はそのコンテキストのすべて、`all()` はその Aggregate のすべて、`details()` はすべての detail、`detail(id).queryKey` はその ID だけに一致する。`detail(id)` は UUID の ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。String の識別子はそのまま、Integer の識別子は `number`（キーも引数も数値。パスの `:id` は数字の並びだけ数値として読む。契約の `idType: "number"`）。`lists()` はモデルにクエリがないので、手で書く一覧クエリの接頭辞（`[{ ...queries.x.y.lists()[0], filters }]`）。
+- **一覧のクエリ**（§9）: モデルのクエリは、読む Aggregate のファクトリに `infiniteQueryOptions` として入る（`queries.<context>.<aggregate>.<query>(params)`）。キーは `[{ scope, entity, kind: "list", query: "<query>", params }]` で `lists()` の下にあるので、その Aggregate を保存するミューテーションの無効化がそのまま当たる。`queryFn` は `({ queryKey: [{ params }], pageParam, signal })` でキーからパラメータを読み、`initialPageParam: null`、`getNextPageParam: (lastPage) => lastPage.nextCursor`（null で終わり）。`useInfiniteQuery` / `useSuspenseInfiniteQuery` / `queryClient.infiniteQuery(options)`（5.102 以上）で使う。
+- **キー**: どれも「オブジェクトを1つだけ持つ配列」。`all()` = `[{ scope: "<context>", entity: "<aggregate>" }]`、`lists()` = `[{ …, kind: "list" }]`、`details()` = `[{ …, kind: "detail" }]`、`detail(id).queryKey` = `[{ …, kind: "detail", id }]`（kebab-case の文字列）。フィルタは名前で部分一致する（順序に依存しない）ので、`[{ scope: "cleaning-staff" }]` はそのコンテキストのすべて、`all()` はその Aggregate のすべて、`details()` はすべての detail、`detail(id).queryKey` はその ID だけに一致する。`detail(id)` は UUID の ID を小文字にする（スキーマと同じ正規化。`ABC…` と `abc…` が同じキャッシュになる）。String の識別子はそのまま、Integer の識別子は `number`（キーも引数も数値。パスの `:id` は数字の並びだけ数値として読む。契約の `idType: "number"`）。`lists()` はモデルのクエリ（§9）の接頭辞で、手で書く一覧クエリもその下に置ける（`[{ ...queries.x.y.lists()[0], filters }]`）。
 - **query options**: `detail(id)` は `queryOptions({ queryKey, queryFn })`。`queryFn` は ID をキーから名前で取り出し（`({ queryKey: [{ id }], signal })`）、TanStack Query の `signal` を fetch に渡す。useQuery・useSuspenseQuery・`queryClient.query`・`getQueryData`（DataTag で型が付く）で使える。`detailOrSkip(id | undefined)` は id が undefined の間 `skipToken` で無効にする useQuery 用（useSuspenseQuery と `queryClient.query` の型は `skipToken` を受け付けないので、`detail` と分けた）。無効の間のキーは `id: undefined` で、ハッシュでは `details()` と同じになる（`details()` そのものはクエリにしないので衝突しない）。
 - **設定できない**: ファクトリは引数に options を取らない。`select`・`staleTime`・`throwOnError` などは呼び出し側で `{ ...options, select }` と足すか、`QueryClient` の `defaultOptions` に書く。`onSuccess` などのクエリのコールバックは付けない。
 - **mutation options**: `create<Context>Mutations(api)` が `{ <useCase>: mutationOptions({ mutationKey: [{ scope: "<context>", useCase: "<use-case>" }], mutationFn, onSuccess }) }` を返す。`onSuccess` は同じクエリファクトリのキーで無効化し、その Promise を返すので、ミューテーションは active なクエリの再取得が終わるまで pending のまま。`mutationKey` もオブジェクトなので `useIsMutating({ mutationKey: [{ scope: "cleaning-staff" }] })` で絞れる。
@@ -301,6 +304,7 @@ DOM もネットワークも使わない。クライアントの `fetch` を生�
 - アプリと同じく `createApiQueries(api)` / `createApiMutations(api)` を1回作り、`queries.<context>.<aggregate>` を使う。
 - Aggregate ごと: `queryClient.query(queries.<context>.<aggregate>.detail(id))` のキー（`[{ scope, entity, kind: "detail", id }]`、ID の小文字化を含む）、取得したデータが保存した Aggregate の JSON と同じこと、未知の ID が `AggregateNotFound`（404）で reject され、クエリの `error` がそのインスタンスであること。
 - Aggregate ごと: オブジェクトのキーの部分一致。`detail(id).queryKey` の無効化はその ID だけ、`details()` はすべての detail（一覧は除く）、`all()` は一覧も含むすべてに当たり、別の `scope` の同じ Aggregate・ID には当たらないこと。
+- クエリごと: シナリオのデータをインメモリのリーダーに入れ、`infiniteQueryOptions` のキー（`lists()` の下）、`queryClient.infiniteQuery` で `nextCursor` をたどって読んだ全ページが1回で読んだ結果と同じこと、`lists()` の無効化が当たること、不正なカーソル（400 `invalid_cursor`）と知らないクエリパラメータ（400）を確かめる。
 - Use case ごと（成功するシナリオと失敗するシナリオを1つずつ）: シナリオの前提をテストダブルに入れ、保存済みの Aggregate を `queryClient.query` で取得し、一覧とほかの ID の detail のプローブを置いてから `new MutationObserver(queryClient, mutations.<context>.<useCase>).mutate(input)`。戻り値・ステータス（200 / 204、失敗はエラーの一覧のステータス）・`observer.getCurrentResult().error` が復元した Domain Error であること、無効化されたキーがちょうど上の規則どおりであること（失敗時は何も無効化しない）、再取得したデータが保存された状態と同じことを確かめる。
 
 #### 移行メモ（2026-10-04、HTTP API）
@@ -323,7 +327,7 @@ DOM もネットワークも使わない。クライアントの `fetch` を生�
 
 ### 認証・認可・レート制限（`security`, 2026-10-06）
 
-モデルに `security` を書いたときだけ生成する（DSL は docs/10 §10、決定と出典は docs/09 §20）。書かなければ、Python・TypeScript・HTTP API のどの生成物も以前とバイト単位で同じ。
+モデルに `security` を書いたときだけ生成する（DSL は docs/10 §11、決定と出典は docs/09 §20）。書かなければ、Python・TypeScript・HTTP API のどの生成物も以前とバイト単位で同じ。
 
 ```text
 # 両方の target
@@ -349,7 +353,7 @@ tests/generated/security.test.ts
 - **順序**（迂回できない。生成コードに認可より前に手順を動かす経路はない）:
   1. `authorize(principal, "<use case>", roles)`: principal がなければ `Unauthenticated`、ロールのどれも持たなければ `NotAuthorized`。`execute` の最初の文で、冪等性の記録の参照・トランザクション・どの `load` よりも前（データがあるかどうかを漏らさない）。
   2. `allow_if` が入力だけを読むなら、その直後に `allow_if(<式>, "<use case>")`。
-  3. `allow_if` が `load` した Aggregate を読むなら、それが使う最後の先頭の `load` の直後、最初の変更（`create` / `invoke`）の前。DSL がそれより後の変数を使わせない（docs/10 §10）。
+  3. `allow_if` が `load` した Aggregate を読むなら、それが使う最後の先頭の `load` の直後、最初の変更（`create` / `invoke`）の前。DSL がそれより後の変数を使わせない（docs/10 §11）。
 - **冪等性**: principal が要る Use case の冪等性キーは principal ごと（`"<principal.id>:<key>"`）。認可は記録の参照より前なので、別の principal が同じキーで記録した結果を受け取ることはない。
 - **エラー**: `NotAuthorized`（コード `not_authorized`）の `details` は `{ action, requiredRoles }`（Python は `required_roles`）か `{ action, rule: "allow_if" }`。比べた値は入れない。`Unauthenticated`（`unauthenticated`）の `details` は `{ action }`、認証器が拒否したトークンなら `{ error: "invalid_token" }`。どちらも Domain Error なので、既存のエラー処理（`ALL_ERRORS` とは別の `SECURITY_ERRORS`）で扱える。
 - **読み取り**: `authorize` が principal を要る Aggregate は、`read_<aggregate>(repository, id, principal)` / `read<Aggregate>(repository, id, principal)` を生成する。ロールを確かめてから読み込み、見つかれば `allow_if` を確かめる。`public` の Aggregate は生成しない（リポジトリをそのまま読む）。
@@ -470,3 +474,88 @@ DSL の `DateTime` は JavaScript の `Date` ではなく、不変の `Instant`�
 - **runtime の名前**: `dateTimeSchema` → `InstantSchema`、`dateTime()` → `instant()`、`localDateSchema` → `LocalDateSchema`、`plusDuration` / `minusDuration` → `addDuration` / `subtractDuration`、`plusDays` / `minusDays` → `addDays` / `subtractDays`。`earliest` / `latest` / `durationBetween` / `daysBetween` は `Instant` / `LocalDate` を受け取る。`uuidSchema` / `idSchema` / `decimalSchema` は変えていない。入力の `Date` を複製する処理と、「Aggregate が返す `Date` は可変」という既知の制限はなくなった。新しく `InstantInput`（入力の型）、testing の `jsonOf` / `aggregateViaJson`。
 - **範囲と精度**: 年は UTC で 0001〜9999（Python の `datetime` と同じ範囲。外れると `ConstraintViolation`）。精度はミリ秒で、それより細かい桁は切り捨てる（以前の `Date` と同じ）。オフセットは保存しない（以前の `Date` も保存していなかった）。
 - **検証**: TypeScript target では型名 `Instant`・`InstantSchema`・`LocalDateSchema` が `reserved-name` になった。
+
+## 9. 読み取り（クエリ）と永続化（PostgreSQL, 2026-10-06）
+
+DSL は docs/10 §10、決定と出典は docs/09 §19。**クエリを宣言したコンテキストだけ**が対象で、クエリのないモデルの生成物はバイト単位で以前と同じ（生成器のテストで確かめる）。両 target で同じ意味論を生成し、SQL は共通の生成器（`packages/generator/src/sql.ts`）が作る（Python はプレースホルダを psycopg の形にしただけの同じ文）。
+
+### 生成物
+
+```text
+sql/<context>.sql                                   # 望ましいスキーマ（両 target で同じ内容）
+# TypeScript
+src/<package>/generated/persistence.ts              # モデルに依存しない部分: SqlClient、InvalidCursor / ConcurrencyConflict、
+                                                    # HmacCursorCodec、指紋、runQuery、pg_trgm の similarity、readRows / readSql、PostgresStore
+src/<package>/generated/<context>/application/queries.ts   # <Query>InputSchema・<Query>Params・<Query>ItemSchema・<Query>Page、
+                                                    # <QUERY>_SPEC、<Query>Reader（ポート）、<Query>Query（execute）
+src/<package>/generated/<context>/persistence/rows.ts      # Aggregate ↔ 行（読み込みで検証）、jsonb の JSON 形、<query>ItemFromRow
+src/<package>/generated/<context>/persistence/postgres.ts  # <AGG>_TABLE と Postgres<Agg>Repository、<QUERY>_SQL と Postgres<Query>Reader
+src/<package>/generated/<context>/testing.ts        # InMemory<Query>Reader が加わる
+src/<package>/generated/api/query-runtime.ts        # API があるとき: GET のエンドポイント・ルート・クライアント
+tests/generated/<context>-<query>.test.ts, <context>-persistence.test.ts
+# Python
+src/<package>/generated/_persistence.py             # 同上（SqlConnection は psycopg 3 の同期 Connection 互換）
+src/<package>/generated/<context>/application/queries.py
+src/<package>/generated/<context>/persistence/{__init__,rows,postgres}.py
+tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
+```
+
+コンテキストの `index.ts` は `application/queries.ts` を再 export する（アプリケーション層）。永続化のアダプタ（`persistence/`）と `persistence.ts` は再 export しない（テストダブルと同じく直接 import する）。
+
+### 読み取りの契約
+
+- **Query（アプリケーションサービス）**: `new <Query>Query({ reader, cursors })`、`execute(input)`（Python は `<Query>Query(reader=..., cursors=...)`、`execute(<Query>Input(...))`）。入力をスキーマで検証し（`ConstraintViolation`）、検索テキストの前後の空白を除き（空なら検索しない）、`limit` を既定値と上限で決め、カーソルを検証・復号して、リーダーを呼び、次のページのカーソルを作る。戻り値は `Page<Item>`（`{ items, nextCursor }` / Python `Page(items, next_cursor)`）。
+- **リーダー（ポート）**: `read(request): Awaitable<QueryResult<Item>>`。`request` は `{ params, search, after, limit }`（`after` は前のページの最後の行のキー、`limit` は確定した大きさ）。結果は `{ items, last }`（`last` は次のページがあるときだけ、最後の項目のキー）。リーダーは `limit + 1` 行読んで次があるかを知る。実装は `Postgres<Query>Reader(client)` と `InMemory<Query>Reader(repository)`。
+- **項目**: `returns` のフィールドの検証済みの値（`<Query>ItemSchema` / `<Query>Item` の Pydantic モデル）。行から作るときに Value Object・Enum・制約を検証する。
+- **指紋**: クエリ名・有効な並び順・検索テキスト・null でないパラメータ（名前順、正規の文字列）の正規 JSON の SHA-256（22 文字）。`limit` は含めない。
+
+### カーソル（トークン）の形式と安全性
+
+`base64url(JSON {"v":1,"keys":[...],"fp":"...","exp"?:n}) + "." + base64url(HMAC-SHA256(secret, その base64url))`。
+
+- **不透明**: クライアントは中身を解釈せず、`nextCursor` をそのまま `cursor` に渡す。キーは読める（暗号化はしない）ので、並び順のキーに秘密を置かない。
+- **完全性**: 署名を定数時間で比べ（`timingSafeEqual` / `hmac.compare_digest`）、合わなければ `InvalidCursor`（`details.reason`: `malformed` / `signature` / `expired` / `mismatch`）。指紋が違えば（別のパラメータ・検索テキスト・並び順）`mismatch`、キーの数が違っても `mismatch`。長さは 4096 文字まで。
+- **秘密**: 32 文字以上。`secrets[0]` で署名し、どれでも検証する。ローテーションは新しい秘密を先頭に足し、古いカーソルが使われなくなったら古い秘密を外す。`ttlSeconds` で期限（`exp`、秒）を付けられる（既定はなし）。
+- **範囲**: 発行した実装の中でだけ有効（TypeScript と Python で指紋の正規化が違う）。キーセットの値は DB の値なので、行が消えたり変わったりしてもカーソルは壊れない（その位置の後ろから読む）。
+
+### SQL と実行の規約
+
+- プレースホルダはすべて明示的なキャスト付き（`$1::uuid`、Python は `%(p1)s::uuid`、リテラルの `%` は `%%`）。node-postgres・PGlite・psycopg のどれでも型推論に頼らない。
+- 文字列の並びは `COLLATE "C"`（コードポイント順）。ORDER BY・キーセットの条件・インデックスで同じにする。ORDER BY の列はテーブル名で修飾する（素の名前は SELECT の出力列 — `to_char(created_at …) AS created_at` — を指してしまう）。
+- SELECT はドライバに依存しない形: 日時は UTC の ISO 8601（マイクロ秒）、日付は `YYYY-MM-DD`、numeric は text、キーは `_k0`, `_k1`… の text（スコアは `float8` の text で float4 の値をそのまま往復させ、次のページでは `$n::real` に戻す）。
+- キーセット: 向きがそろえば行値の比較 `(a, b, id) < ($1, $2, $3)`（btree が1回のシークで使える）、混ざれば `(a > $1) OR (a = $1 AND b < $2) OR …`。OFFSET は使わない。
+- 省略可能なパラメータは `($n::t IS NULL OR 列 = $n::t)`。検索あり・なし × 最初・次のページで4つの文に分ける（検索の条件が `IS NULL OR` の中に入らないので、パラメータの値が分かる計画でも汎用の計画でも trigram のインデックスを使える）。
+- trigram の検索: `CROSS JOIN LATERAL (SELECT GREATEST(similarity(lower(c1), lower($q)), …) AS _score) AS _s` でスコアを1回だけ計算し、`(lower(c1) % lower($q) OR …)`（GIN で絞る）と `_s._score >= min_similarity`（決め手）で絞る。`%` は `pg_trgm.similarity_threshold`（既定 0.3）以上を通すので、`min_similarity` が 0.3 未満なら `%` を出さない（出すと行を取りこぼす）。
+- **psycopg の注意**: psycopg 3 は同じ文を5回実行すると準備済みの文にし、PostgreSQL は汎用の計画を選ぶことがある。`IS NULL OR` のフィルタは汎用の計画でインデックスを使いにくい。大きなテーブルでは `prepare_threshold=None` か、フィルタの組み合わせごとのクエリに分けることを検討する。
+
+### 永続化の契約
+
+- **SqlClient / SqlConnection**: TypeScript は `{ query(text, values): Promise<{ rows }> }`（node-postgres の `Pool` / `Client`、PGlite がそのまま入る）。Python は `execute(query, params) -> cursor`（`description` と `fetchall()`。psycopg 3 の同期 `Connection`。行はタプルでも dict でもよい）。トランザクションはアプリが接続の上で管理する（Use case の `UnitOfWork` を接続の `commit` / `rollback` で実装する）。
+- **リポジトリ**: `Postgres<Agg>Repository(client)` が生成したポート（`get` / `save`）を実装する。`get` は検証して Aggregate を作る（`X.from` / `model_validate`）。
+- **楽観ロック**: Aggregate は不変のまま、リポジトリ（`PostgresStore`）が読み込んだ・保存した Aggregate の `version` を識別子ごとに覚える。読み込んでいない Aggregate の保存は `INSERT … ON CONFLICT (id) DO NOTHING RETURNING version`（version 1）、読み込んだものは `UPDATE … SET …, version = version + 1 WHERE id = … AND version = <読んだ版> RETURNING version`。行が返らなければ `ConcurrencyConflict`（HTTP 409）。`RETURNING` で判定するので、ドライバの `rowCount` に依存しない。**リポジトリは作業単位（リクエスト）ごとに作る**。
+- **行の形**: 必須の Value Object は列に展開、省略可能な Value Object・List・Entity は jsonb（モデルのフィールド名。TypeScript は camelCase との変換を生成する）。両 target が同じスキーマを読み書きできる。
+
+### スキーマ（DDL）とマイグレーション
+
+`sql/<context>.sql` は**望ましいスキーマ**で、`CREATE … IF NOT EXISTS` だけの冪等な文（何度適用してもよい）。既存のテーブルは変えないので、列を足す・型を変えるときのマイグレーションは生成しない。運用ではこのファイルを「あるべき姿」として、スキーマ差分ツール（migra・Atlas・pgschema など）でデータベースとの差分からマイグレーションを作るか、手で書く。
+
+- `CREATE EXTENSION IF NOT EXISTS pg_trgm`（trigram の検索があるとき。拡張を作る権限が要る）、`CREATE SCHEMA IF NOT EXISTS <context>`。
+- テーブルごとに主キー（識別子）、Enum の CHECK、`version bigint NOT NULL`。
+- インデックス: trigram は `USING gin (lower(列) gin_trgm_ops)`、prefix は `(lower(列) text_pattern_ops)`、exact は `(lower(列))`、並び順（relevance を除くキー）は `(列 COLLATE "C" DESC, …, id DESC)`。
+
+### インデックスの助言
+
+- **GIN と GiST**: pg_trgm はどちらも使える。GIN は検索が速くサイズが大きめで更新が遅め（`fastupdate` の保留リストあり）、GiST は更新が速く小さめだが検索が遅く、`<->`（距離）での KNN 並べ替え（`ORDER BY 列 <-> q LIMIT n`）ができる。読み取りの多い一覧・検索なので GIN を既定にした。「似ているものを上位 n 件だけ」でスコアの閾値を使わないなら、GiST と `<->` の方が向く（生成しない。手で足す）。
+- **フィルタとの組み合わせ**: 等値のフィルタ（`status = $1`）が強く絞るなら、`(status, created_at DESC, id DESC)` のように等値の列を先頭に置いた複合インデックスが速い。生成するのは並び順のインデックスだけ（省略可能なパラメータでは先頭の列が使えないことがあるため）。`EXPLAIN (ANALYZE, BUFFERS)` で確かめて足す。
+- **trigram が向かないもの**: 3文字未満の検索語（トリグラムがほとんどできず、結果が広すぎるか空）、日本語など分かち書きしない言語（ロケールによっては英数字以外を区切りとして扱い、トリグラムができない。全文検索や pg_bigm を検討）、ID やコードの完全一致（`exact` を使う）、長い本文の全文検索（`tsvector` と GIN の方が向く）。
+- **min_similarity の調整**: 0.3（既定）は短い名前やメールアドレスでほどよい。上げるほど結果が少なく速く、下げると取りこぼしは減るが候補が増える。0.3 未満では `%`（インデックス）が使えない。DBA が `pg_trgm.similarity_threshold` を `min_similarity` より上げると行を取りこぼす（DDL のコメントにも書いてある）。
+
+### インメモリのリーダー（テスト用）
+
+生成した SQL と同じ意味論: フィルタ（NULL は一致しない、渡さないパラメータは無視）、検索（小文字にして、英数字の並びを単語とし、前に空白2つ・後ろに1つを足したトリグラムの集合で、共通 / 全体を float4 で — pg_trgm と同じ）、並び（文字列はコードポイント順）、キーセット、`limit + 1`。行は Aggregate をリポジトリと同じ行の形にしたもので、項目は同じ `<query>ItemFromRow` で作る。PGlite（WebAssembly の PostgreSQL 18 と pg_trgm）での生成器のテストが、同じデータに対するページごとの結果の一致を確かめる。`lower()` はデータベースのロケールに従うので、英数字以外の大文字小文字の扱いが違うことがある。
+
+### 移行メモ（2026-10-06）
+
+- 既存のモデルは何も変わらない（`queries:` を書いたコンテキストだけが対象）。
+- `queries:` を足すと、そのコンテキストに `sql/<context>.sql` と永続化のファイルが増える。TypeScript の API を使っていれば `api/runtime.ts` の `send` が export され、`api/query-runtime.ts` が増え、保存する Use case のエラーの一覧に `concurrency_conflict: 409` が加わる。
+- 依存は増えない（TypeScript は `node:crypto`、Python は標準ライブラリ）。PostgreSQL のドライバ（`pg` / PGlite / psycopg）はアプリが選んで入れる。

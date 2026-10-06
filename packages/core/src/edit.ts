@@ -205,6 +205,11 @@ function renameType(doc: Document, context: string, from: string, to: string, re
         if (key === "command") definitions++;
         return;
       }
+      if (key === "from" && keys.includes("queries")) {
+        // The aggregate a query reads.
+        if (v === from) replace(node, to);
+        return;
+      }
       if (key === "when" && keys.includes("policies")) {
         // A policy's event: `Event` or `Context.Event`; another context's event of the same name is left alone.
         const ref = /^\s*(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*)\s*$/.exec(v);

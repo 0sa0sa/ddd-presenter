@@ -3,10 +3,18 @@
 
 /** In-memory test doubles for the ports of the CleaningStaff context. */
 
+import { type QueryRequest, type QueryResult, readRows } from "../persistence.js";
 import type { Id } from "../runtime.js";
 import { type FakeUnitOfWork, InMemoryRepository } from "../testing.js";
 import type { CleaningStaffInvitationRepository, Extensions } from "./application/ports.js";
+import {
+  SEARCH_INVITATIONS_SPEC,
+  type SearchInvitationsItem,
+  type SearchInvitationsParams,
+  type SearchInvitationsReader,
+} from "./application/queries.js";
 import type { CleaningStaffInvitation } from "./domain/aggregates.js";
+import { cleaningStaffInvitationToRow, searchInvitationsItemFromRow } from "./persistence/rows.js";
 
 // Shared test doubles (unit of work, clock, ids, event publisher, assertions).
 export * from "../testing.js";
@@ -20,6 +28,23 @@ export class InMemoryCleaningStaffInvitationRepository
 {
   constructor(unitOfWork?: FakeUnitOfWork) {
     super((aggregate) => aggregate.id, unitOfWork);
+  }
+}
+
+/**
+ * In-memory SearchInvitationsReader over a repository's committed aggregates, with the semantics of
+ * the generated SQL (filters, trigram search, keyset order).
+ */
+export class InMemorySearchInvitationsReader implements SearchInvitationsReader {
+  readonly #source: { all(): ReadonlyArray<CleaningStaffInvitation> };
+
+  constructor(source: { all(): ReadonlyArray<CleaningStaffInvitation> }) {
+    this.#source = source;
+  }
+
+  read(request: QueryRequest<SearchInvitationsParams>): QueryResult<SearchInvitationsItem> {
+    const rows = this.#source.all().map(cleaningStaffInvitationToRow);
+    return readRows(SEARCH_INVITATIONS_SPEC, request, rows, searchInvitationsItemFromRow);
   }
 }
 

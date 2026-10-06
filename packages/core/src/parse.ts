@@ -32,6 +32,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
+import { readQueries } from "./queries.ts";
 import { API_CLIENTS, AUTH_SCHEMES, GENERATION_TARGETS, RATE_LIMIT_KEYS, RATE_LIMIT_UNITS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
@@ -50,7 +51,7 @@ type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Structural reader: turns loosely-typed YAML data into IR, reporting shape errors with paths. */
-class Reader {
+export class Reader {
   constructor(readonly bag: DiagnosticBag) {}
 
   obj(value: unknown, path: Path, what: string): Obj | undefined {
@@ -611,7 +612,7 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
   if (!o) return undefined;
   r.keys(
     o,
-    ["name", "description", "subdomain", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases", "policies"],
+    ["name", "description", "subdomain", "glossary", "errors", "enums", "value_objects", "aggregates", "extension_points", "use_cases", "policies", "queries"],
     path,
     "context",
   );
@@ -709,6 +710,7 @@ function readContext(r: Reader, value: unknown, path: Path): ContextIR | undefin
     extensionPoints,
     useCases: r.list(o, "use_cases", path).flatMap(({ value: uv, path: up }) => readUseCase(r, uv, up) ?? []),
     policies: r.list(o, "policies", path).flatMap(({ value: pv, path: pp }) => readPolicy(r, pv, pp) ?? []),
+    queries: readQueries(r, o, path, readFields),
     path,
   };
 }

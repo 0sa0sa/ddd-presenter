@@ -12,6 +12,8 @@ import { camel, ident, kebab, pascal, prop, toSnake } from "./names.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { zodSchema } from "./types.ts";
 import { protectedAggregates, readAccessName } from "./security.ts";
+import { contextPlans, hasQueries, inputName, itemName, pageName, queryClass } from "./queries.ts";
+import type { QueryPlan } from "@ddd/core";
 
 /** `readonly name?: Pick<Type, "member">;` at `depth`, broken like Prettier breaks long type arguments. */
 function pickLine(c: Code, depth: number, name: string, type: string, member: string): void {
@@ -115,6 +117,13 @@ export function useCasePath(api: ApiSettings, L: TsLayout, uc: UseCaseIR): strin
 export function readPath(api: ApiSettings, L: TsLayout, ag: AggregateIR): string {
   return `${api.basePath}/${kebab(L.ca.ir.name)}/${kebab(ag.name)}/:id`;
 }
+export function queryPath(api: ApiSettings, L: TsLayout, plan: QueryPlan): string {
+  return `${api.basePath}/${kebab(L.ca.ir.name)}/queries/${kebab(plan.query.name)}`;
+}
+/** `searchMembers`: a query's member in the contract, the client and the aggregate's query factory. */
+export function queryKey(plan: QueryPlan): string {
+  return prop(plan.query.name);
+}
 
 // ---------------------------------------------------------------------------
 // What a use case does, as the client needs to know it
@@ -198,6 +207,12 @@ export function useCaseErrors(L: TsLayout, uc: UseCaseIR): Map<string, ErrorStat
     }
   };
   L.fieldTypes(uc.command).forEach(voInvariants);
+  // A context with queries gets PostgreSQL repositories: saving may lose an optimistic-locking race (409).
+  let saves = false;
+  walk(uc.steps, (s) => {
+    if (s.kind === "save") saves = true;
+  });
+  if (saves && hasQueries(L)) add("ConcurrencyConflict", 409);
   return out;
 }
 
@@ -334,8 +349,24 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
     else c.block(`export const ${jsonName(o.name)} = z.object(`, () => c.lines_(fields), ");");
     c.line(`export type ${jsonName(o.name)} = z.output<typeof ${jsonName(o.name)}>;`);
   }
+  const plans = contextPlans(L);
+  for (const plan of plans) {
+    const ag = plan.aggregate;
+    const fields = plan.returns.map((f) => `${prop(f)}: ${jsonSchema(L, L.tsFieldType(ag.name, f)!, imp, ag.fields.find((x) => x.name === f)?.constraints ?? {})},`);
+    c.line();
+    c.doc(`JSON form of one ${plan.query.name} item.`);
+    c.block(`export const ${itemName(plan)}Json = z.object(`, () => c.lines_(fields), ");");
+    c.line(`export type ${itemName(plan)}Json = z.output<typeof ${itemName(plan)}Json>;`);
+    c.line();
+    c.doc(`JSON form of a page of ${plan.query.name} (what \`GET ${queryPath(api, L, plan)}\` returns); \`nextCursor\` is null on the last page.`);
+    c.block(`export const ${pageName(plan)}Json = z.object(`, () => {
+      c.line(`items: z.array(${itemName(plan)}Json).readonly(),`);
+      c.line("nextCursor: z.string().nullable(),");
+    }, ");");
+    c.line(`export type ${pageName(plan)}Json = z.output<typeof ${pageName(plan)}Json>;`);
+  }
   c.line();
-  c.doc(`Endpoints of the ${L.ca.ir.name} context: a POST per use case, a GET per aggregate (load by identity).`);
+  c.doc(`Endpoints of the ${L.ca.ir.name} context: a POST per use case, a GET per aggregate (load by identity)${plans.length ? ", a GET per query (one page)" : ""}.`);
   c.block("export const contract =", () => {
     if (!servedUseCases(L).length) c.line("useCases: {},");
     else c.block("useCases:", () => {
@@ -373,6 +404,34 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
         }, "),");
       }
     }, ",");
+    if (plans.length) {
+      c.block("queries:", () => {
+        for (const plan of plans) {
+          imp.value(L.apiModule("query-runtime"), "queryEndpoint");
+          imp.value(L.queries, `${inputName(plan)}Schema`);
+          const kind = (t: Type) => {
+            const b = t.k === "optional" ? t.inner : t;
+            return b.k === "primitive" && b.name === "Integer" ? "integer" : b.k === "primitive" && b.name === "Boolean" ? "boolean" : "string";
+          };
+          const params = [
+            ...plan.params.map((p) => `${p.field.name}: { key: ${tsString(prop(p.field.name))}, kind: ${tsString(kind(p.type))} },`),
+            ...(plan.search ? [`${plan.search.ir.param}: { key: ${tsString(prop(plan.search.ir.param))}, kind: "string" },`] : []),
+            'cursor: { key: "cursor", kind: "string" },',
+            'limit: { key: "limit", kind: "integer" },',
+          ];
+          c.doc(`${plan.query.description ?? `Query ${plan.query.name}`}\n\nOne page of ${plan.aggregate.name} items per request.`);
+          c.block(`${queryKey(plan)}: queryEndpoint(`, () => {
+            c.line(`name: ${tsString(plan.query.name)},`);
+            c.line('method: "GET",');
+            c.line(`path: ${tsString(queryPath(api, L, plan))},`);
+            c.line(`input: ${inputName(plan)}Schema,`);
+            c.block("params:", () => c.lines_(params), ",");
+            c.line(`output: ${pageName(plan)}Json,`);
+            c.line("errors: { constraint_violation: 400, invalid_cursor: 400 },");
+          }, "),");
+        }
+      }, ",");
+    }
   }, " as const;");
   return file(L, mod, `HTTP contract of the ${L.ca.ir.name} context (shared by the server handler and the client; zod only).`, imp, c.toString());
 }
@@ -420,6 +479,16 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
             for (const uc of servedUseCases(L)) {
               pickLine(c, 3, prop(uc.name), `${ns}.${useCaseClass(uc)}`, "execute");
               routes.push(`useCaseRoute(contract.${key}.useCases.${prop(uc.name)}, (d) => d.${key}?.useCases?.${prop(uc.name)}),`);
+            }
+          }, ";");
+        }
+        if (hasQueries(L)) {
+          imp.value(P.apiModule("query-runtime"), "queryRoute");
+          imp.namespace(L.queries, `${ns}Queries`);
+          c.block("readonly queries?:", () => {
+            for (const plan of contextPlans(L)) {
+              pickLine(c, 3, queryKey(plan), `${ns}Queries.${queryClass(plan)}`, "execute");
+              routes.push(`queryRoute(contract.${key}.queries.${queryKey(plan)}, (d) => d.${key}?.queries?.${queryKey(plan)}),`);
             }
           }, ";");
         }
@@ -490,13 +559,21 @@ export function clientFile(P: TsPaths, Ls: TsLayout[]): TsFile {
     imp.value(P.apiModule("runtime"), "errorRegistry");
     imp.type(P.apiModule("runtime"), "Transport");
     imp.value(P.apiModule("contract"), "contract");
-    const parts = [servedUseCases(L).length ? "useCases" : "", L.ca.ir.aggregates.length ? "aggregates" : ""].filter(Boolean);
+    const parts = [servedUseCases(L).length ? "useCases" : "", L.ca.ir.aggregates.length ? "aggregates" : "", hasQueries(L) ? "queries" : ""].filter(Boolean);
     c.line();
     c.block(`function ${key}Client(transport: Transport)`, () => {
       c.line(`const { ${parts.join(", ")} } = contract.${key};`);
+      const extraErrors: string[] = [];
       if (P.model.security) {
         imp.value(P.security, "SECURITY_ERRORS");
-        c.line(`const errors = errorRegistry([...${errorsNs}.ALL_ERRORS, ...SECURITY_ERRORS]);`);
+        extraErrors.push("...SECURITY_ERRORS");
+      }
+      if (hasQueries(L)) {
+        imp.value(P.persistenceRuntime, "ConcurrencyConflict", "InvalidCursor");
+        extraErrors.push("InvalidCursor", "ConcurrencyConflict");
+      }
+      if (extraErrors.length) {
+        c.line(`const errors = errorRegistry([...${errorsNs}.ALL_ERRORS, ${extraErrors.join(", ")}]);`);
       } else c.line(`const errors = errorRegistry(${errorsNs}.ALL_ERRORS);`);
       c.block("return", () => {
         if (!servedUseCases(L).length) c.line("useCases: {},");
@@ -511,6 +588,12 @@ export function clientFile(P: TsPaths, Ls: TsLayout[]): TsFile {
           imp.value(P.apiModule("runtime"), "readCaller");
           c.block("aggregates:", () => {
             for (const ag of L.ca.ir.aggregates) c.line(`${prop(toSnake(ag.name))}: readCaller(transport, aggregates.${prop(toSnake(ag.name))}, errors),`);
+          }, ",");
+        }
+        if (hasQueries(L)) {
+          imp.value(P.apiModule("query-runtime"), "queryCaller");
+          c.block("queries:", () => {
+            for (const plan of contextPlans(L)) c.line(`${queryKey(plan)}: queryCaller(transport, queries.${queryKey(plan)}, errors),`);
           }, ",");
         }
       }, ";");
@@ -577,9 +660,11 @@ export function queriesFile(L: TsLayout): TsFile {
           const kind = idKind(L, ag);
           const T = idParam(kind);
           const call = (id: string) => `api.${key}.aggregates.${prop(toSnake(ag.name))}(${id}, { signal })`;
+          const own = contextPlans(L).filter((p) => p.aggregate.name === ag.name);
           c.block(`${aggregateKey(ag.name)}:`, () => {
             c.line(`all: () => [{ ...${base} }] as const,`);
-            c.comment("Prefix of the list queries you add yourself (the model declares no queries yet).");
+            if (own.length) c.comment(`Prefix of every list query of ${ag.name} (${own.map(queryKey).join(", ")}): the mutations that save it invalidate them.`);
+            else c.comment("Prefix of the list queries you add yourself (the model declares no queries yet).");
             c.line(`lists: () => [{ ...${base}, kind: "list" }] as const,`);
             c.line(`details: () => [{ ...${base}, kind: "detail" }] as const,`);
             c.doc(
@@ -602,6 +687,24 @@ export function queriesFile(L: TsLayout): TsFile {
                 c.line(`queryFn: id === undefined ? skipToken : ({ signal }) => ${call("id")},`);
               }, "),");
             });
+            for (const plan of own) {
+              imp.value("@tanstack/react-query", "infiniteQueryOptions");
+              imp.type(L.queries, inputName(plan));
+              c.doc(
+                `${plan.query.description ?? `Query ${plan.query.name}`}\n\n\`useInfiniteQuery\` / \`useSuspenseInfiniteQuery\` / \`queryClient.infiniteQuery\` over \`GET ${queryPath(api, L, plan)}\`, one page per cursor. The key is under \`lists()\`, so the mutations that save ${ag.name} invalidate it; \`params\` (everything but the cursor) is part of it.`,
+              );
+              const required = plan.params.some((x) => x.type.k !== "optional");
+              c.line(`${queryKey(plan)}: (params: Omit<${inputName(plan)}, "cursor">${required ? "" : " = {}"}) =>`);
+              c.indent(() => {
+                c.block("infiniteQueryOptions(", () => {
+                  c.line(`queryKey: [{ ...${base}, kind: "list", query: ${tsString(kebab(plan.query.name))}, params }] as const,`);
+                  c.line("queryFn: ({ queryKey: [{ params }], pageParam, signal }) =>");
+                  c.indent(() => c.line(`api.${key}.queries.${queryKey(plan)}({ ...params, cursor: pageParam }, { signal }),`));
+                  c.line("initialPageParam: null as string | null,");
+                  c.line("getNextPageParam: (lastPage) => lastPage.nextCursor,");
+                }, "),");
+              });
+            }
           }, ",");
         }
       }, ";");

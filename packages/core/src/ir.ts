@@ -3,6 +3,7 @@
  * validator, the generators, the CLI and the Web editor. Plain JSON-serializable data.
  */
 import type { Path } from "./diagnostics.ts";
+import type { QueryIR } from "./queries.ts";
 
 export const SCHEMA_VERSION = 1 as const;
 
@@ -140,6 +141,8 @@ export interface ContextIR extends Located {
   useCases: UseCaseIR[];
   /** Reactions to domain events: when an event happens, run a use case of this context. */
   policies: PolicyIR[];
+  /** Read side: list / search / paging over one aggregate each (`queries:`, see queries.ts). */
+  queries: QueryIR[];
 }
 
 export interface GlossaryEntryIR {

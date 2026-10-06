@@ -5,6 +5,7 @@
 import { applyEdits, type EditResult } from "./edit.ts";
 import { RELATIONSHIP_PATTERNS, type AggregateIR, type ContextIR, type EntityIR, type FactoryIR, type ModelIR, type OperationIR, type PolicyIR, type StateGuardIR, type StepIR, type UseCaseIR, type ValueObjectIR } from "./ir.ts";
 import { parseModel, type ParseResult } from "./parse.ts";
+import type { QueryIR } from "./queries.ts";
 import { PRIMITIVES, resolveType, typeToString, type Type } from "./types.ts";
 import { analyzeModel, parseEventRef, type Analysis } from "./validate.ts";
 import { formatPath, type Path } from "./diagnostics.ts";
@@ -132,6 +133,16 @@ type Container =
   | "data:event"
   | "data:extensions"
   | "data:nested"
+  | "query"
+  | "queryFilter"
+  | "querySearch"
+  | "queryOrder"
+  | "queryPage"
+  | "scenario:query"
+  | "given:query"
+  | "queryGivenAggregate"
+  | "when:query"
+  | "then:query"
   | "unknown";
 
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
@@ -150,6 +161,7 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
     extension_points: "extension",
     use_cases: "useCase",
     policies: "policy",
+    queries: "query",
   },
   error: { details: "field" },
   valueObject: { fields: "field", invariants: "invariant", normalize: "normalize" },
@@ -189,6 +201,9 @@ const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   "then:useCase": { state: "expectedState", emits: "expectedEvent" },
   expectedState: { fields: "data:expectedState" },
   expectedEvent: { fields: "data:event" },
+  query: { params: "field", where: "queryFilter", search: "querySearch", order_by: "queryOrder", page: "queryPage", scenarios: "scenario:query" },
+  "scenario:query": { given: "given:query", when: "when:query", then: "then:query" },
+  "given:query": { aggregates: "queryGivenAggregate" },
 };
 
 function containerOf(chain: string[]): Container {
@@ -276,6 +291,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("extension_points", "顧客コードで実装する拡張点"),
     K("use_cases", "アクターの操作に対応する手順"),
     K("policies", "イベントが起きたら Use case を実行する自動の反応"),
+    K("queries", "読み取り（一覧・検索・ページング）。宣言すると PostgreSQL のスキーマ・リポジトリ・リーダーも生成する"),
   ],
   glossary: [K("term", "用語"), K("definition", "定義")],
   error: [K("name", "例外クラス名（PascalCase）"), K("code", "機械可読コード（snake_case, 一意）"), K("message", "利用者に見せるメッセージ"), K("description", "説明"), K("details", "内部診断用の追加情報")],
@@ -390,6 +406,37 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
   "then:useCase": [K("raises", "送出されるDomain Error"), K("returns", "戻り値"), K("state", "保存後の状態"), K("emits", "公開されるイベント（順番通り）")],
   expectedState: [K("aggregate", "Aggregate名"), K("id", "識別子"), K("fields", "期待するフィールド値")],
   expectedEvent: [K("event", "イベント名"), K("fields", "期待するペイロード")],
+  query: [
+    K("name", "クエリ名（snake_case）"),
+    K("description", "説明"),
+    K("from", "読む Aggregate"),
+    K("params", "型付きのパラメータ（required: true でなければ省略可能。省略するとそのフィルタは効かない）"),
+    K("where", "フィルタ: { field, op, param } か { field, op, value }"),
+    K("search", "検索: { param, fields, mode: trigram | prefix | exact, min_similarity }"),
+    K("order_by", "並び順（識別子が最後の決め手として自動で付く）。relevance は trigram 検索のスコア順"),
+    K("page", "ページの大きさ: { size, max_size }（既定 20 / 100）"),
+    K("returns", "返すフィールド（射影）。省略するとすべて"),
+    K("scenarios", "Given-When-Then（ページングのテストになる）"),
+  ],
+  queryFilter: [
+    K("field", "フィールドのパス（status, email.value）"),
+    K("op", "eq（既定）| ne | lt | lte | gt | gte"),
+    K("param", "比べるパラメータ（省略可能なパラメータが無いときフィルタは効かない）"),
+    K("value", "比べるリテラル（いつも効く）"),
+  ],
+  querySearch: [
+    K("param", "検索パラメータの名前（既定 q。省略可能な String）"),
+    K("fields", "検索する String のフィールド（Value Object のフィールドも可）"),
+    K("mode", "trigram（既定, pg_trgm の類似度）| prefix（前方一致）| exact（大文字小文字を無視した一致）"),
+    K("min_similarity", "trigram の下限（0 < x ≤ 1、既定 0.3）"),
+  ],
+  queryOrder: [K("field", "並べるフィールド（必須のスカラー）か relevance"), K("direction", "asc（既定）| desc（relevance は desc だけ）")],
+  queryPage: [K("size", "既定のページの大きさ（既定 20）"), K("max_size", "limit の上限（既定 100、最大 1000）")],
+  "scenario:query": [K("name", "シナリオ名（テスト関数名になる）"), K("description", "説明"), K("given", "保存済みの Aggregate"), K("when", "パラメータ・limit・pages"), K("then", "期待する items と next_cursor")],
+  "given:query": [K("aggregates", "保存済みの Aggregate（{ fields }）")],
+  queryGivenAggregate: [K("type", "Aggregate名（省略時は from）"), K("fields", "フィールド値（必須フィールドはすべて）")],
+  "when:query": [K("params", "パラメータと検索の値"), K("limit", "ページの大きさ"), K("pages", "読むページ数（既定 1、nextCursor をたどる）")],
+  "then:query": [K("items", "読んだ全ページの items（順番通り）: 識別子か、一部のフィールド"), K("next_cursor", "最後のページの nextCursor: present | absent")],
 };
 
 /** Keys whose values are rule expressions. */
@@ -483,6 +530,7 @@ interface Scope {
   factory?: FactoryIR;
   useCase?: UseCaseIR;
   policy?: PolicyIR;
+  query?: QueryIR;
 }
 
 const indentOf = (line: string) => /^ */.exec(line)![0].length;
@@ -528,6 +576,7 @@ function resolveScope(s: Snapshot): Scope {
     }
     for (const uc of ctx.useCases) if (inside(s, uc.path)) scope.useCase = uc;
     for (const p of ctx.policies) if (inside(s, p.path)) scope.policy = p;
+    for (const q of ctx.queries ?? []) if (inside(s, q.path)) scope.query = q;
   }
   return scope;
 }
@@ -823,6 +872,10 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     scope.useCase ? [...bindingsBefore(scope.useCase.steps, s)].map(([v, a]) => ({ label: v, kind: "variable" as const, detail: a })) : [];
 
   if (c === "relationship") return relationshipCompletions(s, pos);
+  if (c.startsWith("query")) {
+    const items = queryCompletions(s, scope, pos);
+    if (items) return items;
+  }
   if (c === "generation" && key === "target")
     return [
       { label: "python", kind: "value" as const, detail: "既定。Python 3.11+ / Pydantic v2 / pytest", sortRank: 0 },
@@ -980,6 +1033,39 @@ function relationshipCompletions(s: Snapshot, pos: Extract<Position, { kind: "va
     return up ? eventItems(s, up, false, 1) : [];
   }
   return [];
+}
+
+/** Values inside a query: the aggregate, field paths, parameters, operators, modes, directions. */
+function queryCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind: "value" }>): CompletionItem[] | undefined {
+  const ctx = scope.context;
+  const q = scope.query;
+  const value = (label: string, detail: string, sortRank = 0): CompletionItem => ({ label, kind: "value", detail, sortRank });
+  if (pos.container === "query" && pos.key === "from") return (ctx?.aggregates ?? []).map((a) => ({ label: a.name, kind: "aggregate" as const, detail: "Aggregate", documentation: a.description }));
+  if (pos.container === "queryFilter" && pos.key === "op")
+    return [value("eq", "等しい（既定）"), value("ne", "等しくない"), value("lt", "より小さい"), value("lte", "以下"), value("gt", "より大きい"), value("gte", "以上")];
+  if (pos.container === "querySearch" && pos.key === "mode")
+    return [value("trigram", "既定。pg_trgm の類似度（GIN インデックス、relevance で並べられる）"), value("prefix", "大文字小文字を無視した前方一致", 1), value("exact", "大文字小文字を無視した一致", 2)];
+  if (pos.container === "queryOrder" && pos.key === "direction") return [value("asc", "昇順（既定）"), value("desc", "降順", 1)];
+  if (pos.container === "queryFilter" && pos.key === "param") return (q?.params ?? []).map((p) => ({ label: p.name, kind: "variable" as const, detail: p.type }));
+  const paths = (): CompletionItem[] => {
+    const out: CompletionItem[] = [];
+    const visit = (owner: string | undefined, prefix: string, depth: number) => {
+      for (const [name, t] of fieldTypesOf(s, owner)) {
+        const b = unwrap(t);
+        if (b.k === "vo" && t.k !== "optional" && depth < 3) visit(b.name, `${prefix}${name}.`, depth + 1);
+        else if (b.k === "primitive" || b.k === "enum" || b.k === "ref") out.push({ label: `${prefix}${name}`, kind: "field", detail: typeToString(t) });
+      }
+    };
+    visit(q?.from, "", 0);
+    return out;
+  };
+  if ((pos.container === "queryFilter" || pos.container === "queryOrder") && pos.key === "field") {
+    const items = paths();
+    if (pos.container === "queryOrder" && q?.search) items.unshift({ label: "relevance", kind: "keyword", detail: "検索スコアの高い順（trigram）", sortRank: 0 });
+    return items;
+  }
+  if (pos.container === "querySearch" && pos.key === "fields") return paths().filter((p) => p.detail === "String");
+  return undefined;
 }
 
 /** `when:` of a policy: this context's events, then other contexts' events as Context.Event (contract events first). */

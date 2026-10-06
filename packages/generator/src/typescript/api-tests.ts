@@ -14,6 +14,9 @@ import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { kebab, prop, toSnake } from "./names.ts";
 import { build, importError, principalLiteral, testFile, useCaseSetup } from "./tests.ts";
 import { expectEqual, record, typedValue } from "./values.ts";
+import { contextPlans, inputObject, queryClass, readerName, TEST_SECRET } from "./queries.ts";
+import type { QueryPlan } from "@ddd/core";
+import { queryKey, queryPath } from "./api.ts";
 
 const ORIGIN = "http://localhost";
 
@@ -153,6 +156,10 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
       sep();
       keyMatchTest(L, c, ag);
     }
+    for (const plan of contextPlans(L)) {
+      sep();
+      queryApiTest(L, c, plan, imp);
+    }
     for (const uc of servedUseCases(L)) {
       const ok = uc.scenarios.find((s) => !s.then.raises);
       const failing = uc.scenarios.find((s) => s.then.raises);
@@ -164,6 +171,60 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
     }
   }, ");");
   return testFile(L, module, `HTTP API of the ${L.ca.ir.name} context: server handler, client and TanStack Query options, end to end without a network.`, imp, c.toString());
+}
+
+/**
+ * A query through HTTP and TanStack Query: the infinite query's object key under `lists()`, every page fetched by
+ * following `nextCursor` gives the query's whole result, `lists()` invalidates it, and the HTTP layer answers 400 for a
+ * bad cursor (`invalid_cursor`) or an unknown query parameter.
+ */
+function queryApiTest(L: TsLayout, c: Code, plan: QueryPlan, imp: TsImports): void {
+  const key = contextKey(L);
+  const ag = plan.aggregate;
+  const sample = plan.query.scenarios.find((s) => (s.then.items?.length ?? 0) >= 2) ?? plan.query.scenarios[0];
+  const params = sample?.when.params ?? {};
+  const rows = sample?.given.aggregates ?? [];
+  const api = L.model.generation.typescript.api!;
+  const name = queryKey(plan);
+  imp.value(L.contextTesting, `InMemory${ag.name}Repository`, `InMemory${readerName(plan)}`, "jsonOf");
+  imp.value(L.persistenceRuntime, "HmacCursorCodec");
+  imp.value(L.queries, queryClass(plan));
+  imp.value(L.mod("aggregates"), ag.name);
+  c.doc(
+    `\`queries.${key}.${aggregateKey(ag.name)}.${name}(params)\` runs ${plan.query.name} through \`GET ${queryPath(api, L, plan)}\` as an infinite query: its key is under \`lists()\` (so the mutations that save ${ag.name} invalidate it), following \`nextCursor\` page by page gives the whole result, and a bad cursor or an unknown query parameter is answered 400.`,
+  );
+  c.block(`test(${tsString(`${plan.query.name}: infinite query over HTTP`)}, async () =>`, () => {
+    c.line(`const repository = new InMemory${ag.name}Repository();`);
+    if (rows.length) {
+      c.open("repository.seed(", () => rows.forEach((r) => c.line(`${ag.name}.from(${record(ag.name, r.fields, imp, L)}),`)), ");");
+    }
+    c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
+    c.line(`const ${name} = new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
+    connectLine(c, "handler, queries, queryClient, statuses", key, [`queries: { ${name} }`]);
+    c.line(factoryLine(L, ag));
+    const input = inputObject(L, plan, params, imp, ["limit: 1"]);
+    c.line(`const options = ${factory(ag)}.${name}(${input});`);
+    c.line(
+      `expect([...options.queryKey]).toEqual([{ scope: ${tsString(kebab(L.ca.ir.name))}, entity: ${tsString(kebab(ag.name))}, kind: "list", query: ${tsString(kebab(plan.query.name))}, params: ${input} }]);`,
+    );
+    c.line(`const whole = await ${name}.execute(${inputObject(L, plan, params, imp, [`limit: ${plan.query.page.maxSize}`])});`);
+    c.line("const data = await queryClient.infiniteQuery({ ...options, pages: whole.items.length + 1 });");
+    c.line("expect(jsonOf(data.pages.flatMap((page) => page.items))).toEqual(jsonOf(whole.items));");
+    c.line("expect(data.pages.at(-1)?.nextCursor).toBeNull();");
+    c.line("expect(statuses.every((status) => status === 200)).toBe(true);");
+    c.line(`await queryClient.invalidateQueries({ queryKey: ${factory(ag)}.lists(), refetchType: "none" });`);
+    c.line("expect(queryClient.getQueryState(options.queryKey)?.isInvalidated).toBe(true);");
+    c.line(`const path = ${tsString(`${ORIGIN}${queryPath(api, L, plan)}`)};`);
+    // The scenario's parameters as query-string text (model names), plus a cursor the server never issued.
+    const text = Object.entries(params).map(([k, v]) => `${k}: ${tsString(String(v))}`);
+    c.line(`const query = new URLSearchParams({ ${[...text, 'cursor: "not-a-cursor"'].join(", ")} });`);
+    c.line("const badCursor = await handler(new Request(`${path}?${query.toString()}`));");
+    c.line("expect(badCursor.status).toBe(400);");
+    c.line('expect(await responseJson(badCursor)).toMatchObject({ code: "invalid_cursor" });');
+    c.line('const unknown = await handler(new Request(path + "?no_such_parameter=1"));');
+    c.line("expect(unknown.status).toBe(400);");
+    c.line('expect(await responseJson(unknown)).toMatchObject({ code: "constraint_violation" });');
+  }, ");");
 }
 
 /** Routing and the error responses that do not come from the domain. */

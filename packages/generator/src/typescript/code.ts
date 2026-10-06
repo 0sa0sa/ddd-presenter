@@ -100,6 +100,12 @@ export class Code {
     return this;
   }
 
+  /** A line exactly as given (no indentation), e.g. the continuation of a template literal. */
+  raw(s: string): this {
+    this.lines.push(s);
+    return this;
+  }
+
   lines_(ss: string[]): this {
     for (const s of ss) this.line(s);
     return this;

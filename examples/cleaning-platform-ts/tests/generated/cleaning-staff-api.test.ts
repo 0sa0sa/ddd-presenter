@@ -19,6 +19,7 @@ import {
   type ApiDependencies,
   createApiHandler,
 } from "../../src/cleaning_platform/generated/api/server.js";
+import { SearchInvitationsQuery } from "../../src/cleaning_platform/generated/cleaning-staff/application/queries.js";
 import {
   AcceptInvitationUseCase,
   IssueInvitationUseCase,
@@ -36,10 +37,12 @@ import {
   FakeUnitOfWork,
   FixedClock,
   InMemoryCleaningStaffInvitationRepository,
+  InMemorySearchInvitationsReader,
   jsonOf,
   SequentialIds,
   StubExtensions,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
+import { HmacCursorCodec } from "../../src/cleaning_platform/generated/persistence.js";
 import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/runtime.js";
 import {
   NotAuthorized,
@@ -388,6 +391,78 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     expect(invalidated()).toEqual([true, true, false, false]);
     await queryClient.invalidateQueries({ queryKey: cleaningStaffInvitationQueries.all() });
     expect(invalidated()).toEqual([true, true, true, false]);
+  });
+
+  /**
+   * `queries.cleaningStaff.cleaningStaffInvitation.searchInvitations(params)` runs
+   * search_invitations through `GET /api/cleaning-staff/queries/search-invitations` as an infinite
+   * query: its key is under `lists()` (so the mutations that save CleaningStaffInvitation
+   * invalidate it), following `nextCursor` page by page gives the whole result, and a bad cursor or
+   * an unknown query parameter is answered 400.
+   */
+  test("search_invitations: infinite query over HTTP", async () => {
+    const repository = new InMemoryCleaningStaffInvitationRepository();
+    repository.seed(
+      CleaningStaffInvitation.from({
+        id: "00000000-0000-0000-0000-000000000001",
+        email: { value: "staff@example.com" },
+        status: "pending",
+        createdAt: "2026-01-01T10:00:00+00:00",
+        expiresAt: "2026-01-08T10:00:00+00:00",
+      }),
+      CleaningStaffInvitation.from({
+        id: "00000000-0000-0000-0000-000000000002",
+        email: { value: "stuff.manager@example.com" },
+        status: "accepted",
+        createdAt: "2026-01-02T10:00:00+00:00",
+        expiresAt: "2026-01-09T10:00:00+00:00",
+        acceptedAt: "2026-01-03T10:00:00+00:00",
+      }),
+      CleaningStaffInvitation.from({
+        id: "00000000-0000-0000-0000-000000000003",
+        email: { value: "alice@example.org" },
+        status: "pending",
+        createdAt: "2026-01-03T10:00:00+00:00",
+        expiresAt: "2026-01-10T10:00:00+00:00",
+      }),
+    );
+    const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
+    const searchInvitations = new SearchInvitationsQuery({
+      reader: new InMemorySearchInvitationsReader(repository),
+      cursors,
+    });
+    const { handler, queries, queryClient, statuses } = connect({
+      cleaningStaff: { queries: { searchInvitations } },
+    });
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
+    const options = cleaningStaffInvitationQueries.searchInvitations({ limit: 1 });
+    expect([...options.queryKey]).toEqual([
+      {
+        scope: "cleaning-staff",
+        entity: "cleaning-staff-invitation",
+        kind: "list",
+        query: "search-invitations",
+        params: { limit: 1 },
+      },
+    ]);
+    const whole = await searchInvitations.execute({ limit: 100 });
+    const data = await queryClient.infiniteQuery({ ...options, pages: whole.items.length + 1 });
+    expect(jsonOf(data.pages.flatMap((page) => page.items))).toEqual(jsonOf(whole.items));
+    expect(data.pages.at(-1)?.nextCursor).toBeNull();
+    expect(statuses.every((status) => status === 200)).toBe(true);
+    await queryClient.invalidateQueries({
+      queryKey: cleaningStaffInvitationQueries.lists(),
+      refetchType: "none",
+    });
+    expect(queryClient.getQueryState(options.queryKey)?.isInvalidated).toBe(true);
+    const path = "http://localhost/api/cleaning-staff/queries/search-invitations";
+    const query = new URLSearchParams({ cursor: "not-a-cursor" });
+    const badCursor = await handler(new Request(`${path}?${query.toString()}`));
+    expect(badCursor.status).toBe(400);
+    expect(await responseJson(badCursor)).toMatchObject({ code: "invalid_cursor" });
+    const unknown = await handler(new Request(path + "?no_such_parameter=1"));
+    expect(unknown.status).toBe(400);
+    expect(await responseJson(unknown)).toMatchObject({ code: "constraint_violation" });
   });
 
   /**

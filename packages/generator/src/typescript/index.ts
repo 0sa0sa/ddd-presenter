@@ -12,11 +12,15 @@ import { TsLayout, TsPaths } from "./layout.ts";
 import { ident, prop, toSnake } from "./names.ts";
 import { policiesFile, policyTestFile, translatorScaffold } from "./policies.ts";
 import ADAPTERS_TS from "./templates/adapters.ts.txt" with { type: "text" };
+import API_QUERIES_TS from "./templates/api-queries.ts.txt" with { type: "text" };
 import API_REGISTER_TS from "./templates/api-register.ts.txt" with { type: "text" };
 import API_AUTHENTICATION_TS from "./templates/api-authentication.ts.txt" with { type: "text" };
 import API_RATE_LIMIT_TS from "./templates/api-rate-limit.ts.txt" with { type: "text" };
 import API_RUNTIME_TS from "./templates/api-runtime.ts.txt" with { type: "text" };
+import PERSISTENCE_TS from "./templates/persistence.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
+import { applicationQueriesFile, contextPlans, hasQueries, persistenceTestFile, postgresFile, queryTestFile, rowsFile } from "./queries.ts";
+import { contextSqlFile } from "../sql.ts";
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
 import { tsType } from "./types.ts";
@@ -138,17 +142,30 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       const ext = extensionsScaffold(L);
       scaffold(ext.path, ext.content);
     }
+    // Read side and PostgreSQL persistence: only for contexts that declare queries (docs/09 §19).
+    if (hasQueries(L)) {
+      for (const f of [applicationQueriesFile(L), rowsFile(L), postgresFile(L), persistenceTestFile(L), ...contextPlans(L).map((p) => queryTestFile(L, p))]) gen(f.path, f.content);
+      const sql = contextSqlFile(model, ca);
+      if (sql) gen(sql.path, sql.content);
+    }
+  }
+  if (layouts.some(hasQueries)) {
+    gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", PERSISTENCE_TS));
   }
   const api = model.generation.typescript.api;
   if (api) {
     // Not re-exported from generated/index.ts or a context's index.ts: a backend importing the domain never loads
     // TanStack Query. Shared modules live in generated/api/, each context's contract and queries in generated/<context>/api/.
     const secured = !!model.security;
+    const queries = layouts.some(hasQueries);
+    // With queries, query-runtime.ts reuses the client's `send` (exported only then: the file stays byte-identical otherwise).
+    const runtimeSource = templateSections(API_RUNTIME_TS, { security: secured });
+    const runtime = queries ? runtimeSource.replace("\nasync function send<", "\nexport async function send<") : runtimeSource;
     gen(
       P.file(P.apiModule("runtime")),
       template(
         `Model-independent part of the HTTP API: endpoint types, the Web-standard handler, the fetch transport and the error mapping${secured ? ", authentication and rate limiting hooks, typed client errors and the retry policy" : ""} (zod only).`,
-        templateSections(API_RUNTIME_TS, { security: secured }),
+        runtime,
       ),
     );
     if (secured) {
@@ -156,6 +173,9 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     }
     if (usesJwt(model)) {
       gen(P.file(P.apiModule("authentication")), template("Bearer JWT authentication of the HTTP API (RFC 6750, RFC 7519, RFC 8725) with jose.", API_AUTHENTICATION_TS));
+    }
+    if (queries) {
+      gen(P.file(P.apiModule("query-runtime")), template("Queries over HTTP (model-independent): `GET path?…` endpoints, the server route reading the query string, the client caller.", API_QUERIES_TS));
     }
     gen(P.file(P.apiModule("register")), template("Registers the client's error type as TanStack Query's default error (module augmentation).", API_REGISTER_TS));
     const served = apiContexts(layouts);
@@ -209,6 +229,7 @@ function contextIndex(L: TsLayout, policies: boolean, readAccess = false): { pat
     L.useCases,
     ...(policies ? [L.policies] : []),
     ...(readAccess ? [L.readAccess] : []),
+    ...(hasQueries(L) ? [L.queries] : []),
   ];
   const body = mods.map((m) => `export * from "${relativeSpecifier(L.index, m)}";`).join("\n");
   const doc = `Bounded context ${L.ca.ir.name}.${L.ca.ir.description ? ` ${L.ca.ir.description.trim()}` : ""}\n\nTest doubles are in testing.ts (not exported here).`;

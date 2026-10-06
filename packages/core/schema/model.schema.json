@@ -4,30 +4,59 @@
   "title": "DDD Presenter model (schema_version 1)",
   "description": "Structural schema of *.ddd.yaml models. Semantic rules (references, types, rule expressions) are checked by `ddd validate`.",
   "type": "object",
-  "required": ["schema_version", "project", "contexts"],
+  "required": [
+    "schema_version",
+    "project",
+    "contexts"
+  ],
   "additionalProperties": false,
   "properties": {
-    "security": { "$ref": "#/$defs/security" },
-    "schema_version": { "const": 1 },
-    "project": { "type": "string", "minLength": 1 },
-    "description": { "type": "string" },
+    "security": {
+      "$ref": "#/$defs/security"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
     "generation": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "package": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
-        "src_dir": { "type": "string" },
-        "tests_dir": { "type": "string" },
+        "package": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]*$"
+        },
+        "src_dir": {
+          "type": "string"
+        },
+        "tests_dir": {
+          "type": "string"
+        },
         "target": {
           "description": "Language of the generated code: python (Pydantic v2, default) or typescript (Zod v4).",
-          "enum": ["python", "typescript"]
+          "enum": [
+            "python",
+            "typescript"
+          ]
         },
         "typescript": {
           "description": "Settings of the TypeScript target.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "test_runner": { "description": "Runner the generated tests import from (default vitest).", "enum": ["vitest", "bun"] },
+            "test_runner": {
+              "description": "Runner the generated tests import from (default vitest).",
+              "enum": [
+                "vitest",
+                "bun"
+              ]
+            },
             "api": {
               "description": "Generate an HTTP API: a contract, a Web-standard server handler and a typed client (opt-in).",
               "type": "object",
@@ -38,24 +67,62 @@
                   "type": "string",
                   "pattern": "^(/[A-Za-z0-9._~-]+)*$"
                 },
-                "client": { "description": "Client library of the generated client code (default tanstack-query).", "enum": ["tanstack-query"] }
+                "client": {
+                  "description": "Client library of the generated client code (default tanstack-query).",
+                  "enum": [
+                    "tanstack-query"
+                  ]
+                }
               }
             }
           }
         }
       }
     },
-    "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } },
-    "relationships": { "type": "array", "items": { "$ref": "#/$defs/relationship" } }
+    "contexts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/context"
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relationship"
+      }
+    }
   },
   "$defs": {
-    "pascal": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
-    "snake": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "pascal": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*$"
+    },
+    "snake": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
     "expression": {
       "description": "Rule expression: fields, parameters, literals, ==, !=, <, <=, >, >=, and, or, not, + - * / (Integer, Decimal, DateTime, Duration), null checks, list literals, Type(field=value) constructors and the functions is_empty, contains, length, days, hours, minutes, round, min, max, count, sum, any, all, append, remove, remove_where, replace_where, with. A YAML list (e.g. []) is read as a list literal.",
       "oneOf": [
-        { "type": ["string", "number", "boolean", "null"] },
-        { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } }
+        {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        }
       ]
     },
     "typeExpr": {
@@ -66,113 +133,277 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "min_length": { "type": "integer", "minimum": 0 },
-        "max_length": { "type": "integer", "minimum": 0 },
-        "pattern": { "type": "string" },
-        "min": { "type": "number" },
-        "max": { "type": "number" },
-        "max_digits": { "type": "integer", "minimum": 0 },
-        "decimal_places": { "type": "integer", "minimum": 0 },
-        "min_items": { "type": "integer", "minimum": 0 },
-        "max_items": { "type": "integer", "minimum": 0 }
+        "min_length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "max_digits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decimal_places": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "field": {
       "type": "object",
-      "required": ["name", "type"],
+      "required": [
+        "name",
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "type": { "$ref": "#/$defs/typeExpr" },
-        "required": { "type": "boolean", "default": true },
-        "description": { "type": "string" },
-        "constraints": { "$ref": "#/$defs/constraints" }
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "type": {
+          "$ref": "#/$defs/typeExpr"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints"
+        }
       }
     },
     "parameter": {
       "type": "object",
-      "required": ["name", "type"],
+      "required": [
+        "name",
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "type": { "$ref": "#/$defs/typeExpr" },
-        "required": { "type": "boolean" },
-        "description": { "type": "string" }
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "type": {
+          "$ref": "#/$defs/typeExpr"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "invariant": {
       "type": "object",
-      "required": ["name", "expression", "error"],
+      "required": [
+        "name",
+        "expression",
+        "error"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "description": { "type": "string" },
-        "expression": { "$ref": "#/$defs/expression" },
-        "error": { "$ref": "#/$defs/pascal" },
-        "check_on": { "type": "array", "items": { "enum": ["construct", "transition"] }, "minItems": 1 }
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "description": {
+          "type": "string"
+        },
+        "expression": {
+          "$ref": "#/$defs/expression"
+        },
+        "error": {
+          "$ref": "#/$defs/pascal"
+        },
+        "check_on": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "construct",
+              "transition"
+            ]
+          },
+          "minItems": 1
+        }
       }
     },
     "emission": {
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/pascal" },
-        "when": { "$ref": "#/$defs/expression" },
+        "name": {
+          "$ref": "#/$defs/pascal"
+        },
+        "when": {
+          "$ref": "#/$defs/expression"
+        },
         "fields": {
           "type": "array",
           "items": {
             "oneOf": [
-              { "$ref": "#/$defs/snake" },
+              {
+                "$ref": "#/$defs/snake"
+              },
               {
                 "type": "object",
-                "required": ["name"],
+                "required": [
+                  "name"
+                ],
                 "additionalProperties": false,
-                "properties": { "name": { "$ref": "#/$defs/snake" }, "value": { "$ref": "#/$defs/expression" } }
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/snake"
+                  },
+                  "value": {
+                    "$ref": "#/$defs/expression"
+                  }
+                }
               }
             ]
           }
         }
       }
     },
-    "exprMap": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expression" } },
-    "require": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "exprMap": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/expression"
+      }
+    },
+    "require": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
     "entity": {
       "type": "object",
-      "required": ["name", "identity", "fields"],
+      "required": [
+        "name",
+        "identity",
+        "fields"
+      ],
       "properties": {
-        "name": { "$ref": "#/$defs/pascal" },
-        "description": { "type": "string" },
-        "identity": { "$ref": "#/$defs/snake" },
-        "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
-        "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } }
+        "name": {
+          "$ref": "#/$defs/pascal"
+        },
+        "description": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/snake"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          }
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invariant"
+          }
+        }
       }
     },
     "aggregate": {
-      "allOf": [{ "$ref": "#/$defs/entity" }],
+      "allOf": [
+        {
+          "$ref": "#/$defs/entity"
+        }
+      ],
       "unevaluatedProperties": false,
       "properties": {
         "authorize": {
           "description": "Who may read it by identity (read access / GET endpoint): public, authenticated or { roles, allow_if }.",
-          "anyOf": [{ "enum": ["public", "authenticated"] }, { "$ref": "#/$defs/authorizeRule" }]
+          "anyOf": [
+            {
+              "enum": [
+                "public",
+                "authenticated"
+              ]
+            },
+            {
+              "$ref": "#/$defs/authorizeRule"
+            }
+          ]
         },
-        "rate_limit": { "$ref": "#/$defs/rateLimitOrNone" },
+        "rate_limit": {
+          "$ref": "#/$defs/rateLimitOrNone"
+        },
         "entities": {
           "type": "array",
-          "items": { "allOf": [{ "$ref": "#/$defs/entity" }], "unevaluatedProperties": false }
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/entity"
+              }
+            ],
+            "unevaluatedProperties": false
+          }
         },
         "state_guards": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "expression", "error"],
+            "required": [
+              "name",
+              "expression",
+              "error"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/snake" },
-              "description": { "type": "string" },
-              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
-              "expression": { "$ref": "#/$defs/expression" },
-              "error": { "$ref": "#/$defs/pascal" }
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parameter"
+                }
+              },
+              "expression": {
+                "$ref": "#/$defs/expression"
+              },
+              "error": {
+                "$ref": "#/$defs/pascal"
+              }
             }
           }
         },
@@ -180,15 +411,36 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "fields"],
+            "required": [
+              "name",
+              "fields"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/snake" },
-              "description": { "type": "string" },
-              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
-              "require": { "$ref": "#/$defs/require" },
-              "fields": { "$ref": "#/$defs/exprMap" },
-              "emits": { "type": "array", "items": { "$ref": "#/$defs/emission" } }
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parameter"
+                }
+              },
+              "require": {
+                "$ref": "#/$defs/require"
+              },
+              "fields": {
+                "$ref": "#/$defs/exprMap"
+              },
+              "emits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/emission"
+                }
+              }
             }
           }
         },
@@ -196,19 +448,44 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/snake" },
-              "description": { "type": "string" },
-              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
-              "require": { "$ref": "#/$defs/require" },
-              "changes": { "$ref": "#/$defs/exprMap" },
-              "emits": { "type": "array", "items": { "$ref": "#/$defs/emission" } }
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parameter"
+                }
+              },
+              "require": {
+                "$ref": "#/$defs/require"
+              },
+              "changes": {
+                "$ref": "#/$defs/exprMap"
+              },
+              "emits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/emission"
+                }
+              }
             }
           }
         },
-        "scenarios": { "type": "array", "items": { "$ref": "#/$defs/aggregateScenario" } }
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aggregateScenario"
+          }
+        }
       }
     },
     "then": {
@@ -216,19 +493,32 @@
       "minProperties": 1,
       "additionalProperties": false,
       "properties": {
-        "raises": { "$ref": "#/$defs/pascal" },
+        "raises": {
+          "$ref": "#/$defs/pascal"
+        },
         "returns": {},
         "state": {},
         "emits": {
           "type": "array",
           "items": {
             "oneOf": [
-              { "$ref": "#/$defs/pascal" },
+              {
+                "$ref": "#/$defs/pascal"
+              },
               {
                 "type": "object",
-                "required": ["event"],
+                "required": [
+                  "event"
+                ],
                 "additionalProperties": false,
-                "properties": { "event": { "$ref": "#/$defs/pascal" }, "fields": { "type": "object" } }
+                "properties": {
+                  "event": {
+                    "$ref": "#/$defs/pascal"
+                  },
+                  "fields": {
+                    "type": "object"
+                  }
+                }
               }
             ]
           }
@@ -237,63 +527,126 @@
     },
     "aggregateScenario": {
       "type": "object",
-      "required": ["name", "when", "then"],
+      "required": [
+        "name",
+        "when",
+        "then"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "description": { "type": "string" },
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "description": {
+          "type": "string"
+        },
         "given": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "aggregate": { "type": "object" } }
+          "properties": {
+            "aggregate": {
+              "type": "object"
+            }
+          }
         },
         "when": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "construct": { "type": "object" },
-            "operation": { "$ref": "#/$defs/snake" },
-            "factory": { "$ref": "#/$defs/snake" },
-            "args": { "type": "object" }
+            "construct": {
+              "type": "object"
+            },
+            "operation": {
+              "$ref": "#/$defs/snake"
+            },
+            "factory": {
+              "$ref": "#/$defs/snake"
+            },
+            "args": {
+              "type": "object"
+            }
           }
         },
-        "then": { "$ref": "#/$defs/then" }
+        "then": {
+          "$ref": "#/$defs/then"
+        }
       }
     },
     "useCaseScenario": {
       "type": "object",
-      "required": ["name", "when", "then"],
+      "required": [
+        "name",
+        "when",
+        "then"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "description": { "type": "string" },
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "description": {
+          "type": "string"
+        },
         "given": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "clock": { "type": "string" },
-            "ids": { "type": "array", "items": { "type": "string" } },
+            "clock": {
+              "type": "string"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "aggregates": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["type", "fields"],
+                "required": [
+                  "type",
+                  "fields"
+                ],
                 "additionalProperties": false,
-                "properties": { "type": { "$ref": "#/$defs/pascal" }, "fields": { "type": "object" } }
+                "properties": {
+                  "type": {
+                    "$ref": "#/$defs/pascal"
+                  },
+                  "fields": {
+                    "type": "object"
+                  }
+                }
               }
             },
-            "extensions": { "type": "object" },
+            "extensions": {
+              "type": "object"
+            },
             "principal": {
               "description": "Who runs the use case; null for an anonymous caller.",
               "anyOf": [
-                { "type": "null" },
+                {
+                  "type": "null"
+                },
                 {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
-                    "id": { "type": ["string", "integer"] },
-                    "roles": { "type": "array", "items": { "$ref": "#/$defs/snake" } },
-                    "claims": { "type": "object" }
+                    "id": {
+                      "type": [
+                        "string",
+                        "integer"
+                      ]
+                    },
+                    "roles": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/snake"
+                      }
+                    },
+                    "claims": {
+                      "type": "object"
+                    }
                   }
                 }
               ]
@@ -303,9 +656,15 @@
         "when": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "input": { "type": "object" } }
+          "properties": {
+            "input": {
+              "type": "object"
+            }
+          }
         },
-        "then": { "$ref": "#/$defs/then" }
+        "then": {
+          "$ref": "#/$defs/then"
+        }
       }
     },
     "step": {
@@ -315,59 +674,124 @@
       "properties": {
         "load": {
           "type": "object",
-          "required": ["aggregate", "by", "as"],
+          "required": [
+            "aggregate",
+            "by",
+            "as"
+          ],
           "additionalProperties": false,
           "properties": {
-            "aggregate": { "$ref": "#/$defs/pascal" },
-            "by": { "$ref": "#/$defs/expression" },
-            "as": { "$ref": "#/$defs/snake" },
-            "not_found": { "$ref": "#/$defs/pascal" }
+            "aggregate": {
+              "$ref": "#/$defs/pascal"
+            },
+            "by": {
+              "$ref": "#/$defs/expression"
+            },
+            "as": {
+              "$ref": "#/$defs/snake"
+            },
+            "not_found": {
+              "$ref": "#/$defs/pascal"
+            }
           }
         },
         "create": {
           "type": "object",
-          "required": ["aggregate", "factory", "as"],
+          "required": [
+            "aggregate",
+            "factory",
+            "as"
+          ],
           "additionalProperties": false,
           "properties": {
-            "aggregate": { "$ref": "#/$defs/pascal" },
-            "factory": { "$ref": "#/$defs/snake" },
-            "as": { "$ref": "#/$defs/snake" },
-            "args": { "$ref": "#/$defs/exprMap" }
+            "aggregate": {
+              "$ref": "#/$defs/pascal"
+            },
+            "factory": {
+              "$ref": "#/$defs/snake"
+            },
+            "as": {
+              "$ref": "#/$defs/snake"
+            },
+            "args": {
+              "$ref": "#/$defs/exprMap"
+            }
           }
         },
         "invoke": {
           "type": "object",
-          "required": ["target", "operation"],
+          "required": [
+            "target",
+            "operation"
+          ],
           "additionalProperties": false,
           "properties": {
-            "target": { "$ref": "#/$defs/snake" },
-            "operation": { "$ref": "#/$defs/snake" },
-            "args": { "$ref": "#/$defs/exprMap" }
+            "target": {
+              "$ref": "#/$defs/snake"
+            },
+            "operation": {
+              "$ref": "#/$defs/snake"
+            },
+            "args": {
+              "$ref": "#/$defs/exprMap"
+            }
           }
         },
-        "save": { "$ref": "#/$defs/snake" },
-        "publish": { "$ref": "#/$defs/pascal" },
-        "publish_after_commit": { "$ref": "#/$defs/pascal" },
-        "fail": { "$ref": "#/$defs/pascal" },
-        "return": { "$ref": "#/$defs/expression" },
+        "save": {
+          "$ref": "#/$defs/snake"
+        },
+        "publish": {
+          "$ref": "#/$defs/pascal"
+        },
+        "publish_after_commit": {
+          "$ref": "#/$defs/pascal"
+        },
+        "fail": {
+          "$ref": "#/$defs/pascal"
+        },
+        "return": {
+          "$ref": "#/$defs/expression"
+        },
         "let": {
           "type": "object",
           "description": "Names a computed value for later steps (scoped like as: a value named inside an if-branch stays in that branch).",
-          "required": ["name", "value"],
+          "required": [
+            "name",
+            "value"
+          ],
           "additionalProperties": false,
           "properties": {
-            "name": { "$ref": "#/$defs/snake" },
-            "value": { "$ref": "#/$defs/expression" }
+            "name": {
+              "$ref": "#/$defs/snake"
+            },
+            "value": {
+              "$ref": "#/$defs/expression"
+            }
           }
         },
         "if": {
           "type": "object",
-          "required": ["condition", "then"],
+          "required": [
+            "condition",
+            "then"
+          ],
           "additionalProperties": false,
           "properties": {
-            "condition": { "$ref": "#/$defs/expression" },
-            "then": { "type": "array", "items": { "$ref": "#/$defs/step" } },
-            "else": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+            "condition": {
+              "$ref": "#/$defs/expression"
+            },
+            "then": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/step"
+              }
+            },
+            "else": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/step"
+              }
+            }
           }
         }
       },
@@ -375,32 +799,65 @@
     },
     "context": {
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/pascal" },
-        "description": { "type": "string" },
+        "name": {
+          "$ref": "#/$defs/pascal"
+        },
+        "description": {
+          "type": "string"
+        },
         "glossary": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["term", "definition"],
+            "required": [
+              "term",
+              "definition"
+            ],
             "additionalProperties": false,
-            "properties": { "term": { "type": "string" }, "definition": { "type": "string" } }
+            "properties": {
+              "term": {
+                "type": "string"
+              },
+              "definition": {
+                "type": "string"
+              }
+            }
           }
         },
         "errors": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "code", "message"],
+            "required": [
+              "name",
+              "code",
+              "message"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/pascal" },
-              "code": { "$ref": "#/$defs/snake" },
-              "message": { "type": "string" },
-              "description": { "type": "string" },
-              "details": { "type": "array", "items": { "$ref": "#/$defs/field" } }
+              "name": {
+                "$ref": "#/$defs/pascal"
+              },
+              "code": {
+                "$ref": "#/$defs/snake"
+              },
+              "message": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/field"
+                }
+              }
             }
           }
         },
@@ -408,12 +865,25 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "values"],
+            "required": [
+              "name",
+              "values"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/pascal" },
-              "description": { "type": "string" },
-              "values": { "type": "array", "items": { "$ref": "#/$defs/snake" }, "minItems": 1 }
+              "name": {
+                "$ref": "#/$defs/pascal"
+              },
+              "description": {
+                "type": "string"
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/snake"
+                },
+                "minItems": 1
+              }
             }
           }
         },
@@ -421,32 +891,77 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "fields"],
+            "required": [
+              "name",
+              "fields"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/pascal" },
-              "description": { "type": "string" },
-              "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+              "name": {
+                "$ref": "#/$defs/pascal"
+              },
+              "description": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/field"
+                }
+              },
               "normalize": {
                 "type": "object",
-                "additionalProperties": { "type": "array", "items": { "enum": ["strip", "lower", "upper"] } }
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "strip",
+                      "lower",
+                      "upper"
+                    ]
+                  }
+                }
               },
-              "invariants": { "type": "array", "items": { "$ref": "#/$defs/invariant" } }
+              "invariants": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/invariant"
+                }
+              }
             }
           }
         },
-        "aggregates": { "type": "array", "items": { "$ref": "#/$defs/aggregate" } },
+        "aggregates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aggregate"
+          }
+        },
         "extension_points": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "returns"],
+            "required": [
+              "name",
+              "returns"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/snake" },
-              "description": { "type": "string" },
-              "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
-              "returns": { "$ref": "#/$defs/typeExpr" },
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parameter"
+                }
+              },
+              "returns": {
+                "$ref": "#/$defs/typeExpr"
+              },
               "test_default": {}
             }
           }
@@ -455,26 +970,82 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "command"],
+            "required": [
+              "name",
+              "command"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "$ref": "#/$defs/snake" },
-              "description": { "type": "string" },
-              "actor": { "type": "string" },
-              "command": { "$ref": "#/$defs/pascal" },
-              "input": { "type": "array", "items": { "$ref": "#/$defs/field" } },
-              "transaction": { "enum": ["required", "none"] },
-              "idempotency_key": { "$ref": "#/$defs/snake" },
-              "retry": { "type": "boolean" },
-              "authorize": { "$ref": "#/$defs/authorize" },
-              "rate_limit": { "$ref": "#/$defs/rateLimitOrNone" },
-              "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
-              "scenarios": { "type": "array", "items": { "$ref": "#/$defs/useCaseScenario" } }
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "actor": {
+                "type": "string"
+              },
+              "command": {
+                "$ref": "#/$defs/pascal"
+              },
+              "input": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/field"
+                }
+              },
+              "transaction": {
+                "enum": [
+                  "required",
+                  "none"
+                ]
+              },
+              "idempotency_key": {
+                "$ref": "#/$defs/snake"
+              },
+              "retry": {
+                "type": "boolean"
+              },
+              "authorize": {
+                "$ref": "#/$defs/authorize"
+              },
+              "rate_limit": {
+                "$ref": "#/$defs/rateLimitOrNone"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/step"
+                }
+              },
+              "scenarios": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/useCaseScenario"
+                }
+              }
             }
           }
         },
-        "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } },
-        "subdomain": { "enum": ["core", "supporting", "generic"] }
+        "policies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy"
+          }
+        },
+        "subdomain": {
+          "enum": [
+            "core",
+            "supporting",
+            "generic"
+          ]
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/query"
+          }
+        }
       }
     },
     "authorizeRule": {
@@ -482,49 +1053,127 @@
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "roles": { "type": "array", "items": { "$ref": "#/$defs/snake" } },
-        "allow_if": { "$ref": "#/$defs/expression" }
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/snake"
+          }
+        },
+        "allow_if": {
+          "$ref": "#/$defs/expression"
+        }
       }
     },
     "authorize": {
       "description": "Who may run a use case: public, internal (in-process only), authenticated, or { roles, allow_if }.",
-      "anyOf": [{ "enum": ["public", "internal", "authenticated"] }, { "$ref": "#/$defs/authorizeRule" }]
+      "anyOf": [
+        {
+          "enum": [
+            "public",
+            "internal",
+            "authenticated"
+          ]
+        },
+        {
+          "$ref": "#/$defs/authorizeRule"
+        }
+      ]
     },
     "rateLimit": {
       "type": "object",
-      "required": ["requests", "per"],
+      "required": [
+        "requests",
+        "per"
+      ],
       "additionalProperties": false,
       "properties": {
-        "requests": { "type": "integer", "minimum": 1 },
-        "per": { "enum": ["second", "minute", "hour", "day"] },
-        "by": { "enum": ["principal", "ip", "global"] }
+        "requests": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "per": {
+          "enum": [
+            "second",
+            "minute",
+            "hour",
+            "day"
+          ]
+        },
+        "by": {
+          "enum": [
+            "principal",
+            "ip",
+            "global"
+          ]
+        }
       }
     },
-    "rateLimitOrNone": { "anyOf": [{ "const": "none" }, { "$ref": "#/$defs/rateLimit" }] },
+    "rateLimitOrNone": {
+      "anyOf": [
+        {
+          "const": "none"
+        },
+        {
+          "$ref": "#/$defs/rateLimit"
+        }
+      ]
+    },
     "security": {
       "description": "Authentication, authorization and rate limiting (docs/09 §20).",
       "type": "object",
-      "required": ["roles"],
+      "required": [
+        "roles"
+      ],
       "additionalProperties": false,
       "properties": {
-        "roles": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/snake" } },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/snake"
+          }
+        },
         "principal": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "id": { "enum": ["String", "UUID"] },
+            "id": {
+              "enum": [
+                "String",
+                "UUID"
+              ]
+            },
             "claims": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["name", "type"],
+                "required": [
+                  "name",
+                  "type"
+                ],
                 "additionalProperties": false,
                 "properties": {
-                  "name": { "$ref": "#/$defs/snake" },
-                  "type": { "enum": ["String", "UUID", "Integer", "Boolean", "List[String]"] },
-                  "required": { "type": "boolean" },
-                  "claim": { "type": "string" },
-                  "description": { "type": "string" }
+                  "name": {
+                    "$ref": "#/$defs/snake"
+                  },
+                  "type": {
+                    "enum": [
+                      "String",
+                      "UUID",
+                      "Integer",
+                      "Boolean",
+                      "List[String]"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "claim": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -534,60 +1183,350 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "scheme": { "enum": ["bearer_jwt", "custom"] },
-            "issuer": { "type": "string" },
-            "audience": { "type": "string" },
+            "scheme": {
+              "enum": [
+                "bearer_jwt",
+                "custom"
+              ]
+            },
+            "issuer": {
+              "type": "string"
+            },
+            "audience": {
+              "type": "string"
+            },
             "algorithms": {
               "type": "array",
               "minItems": 1,
-              "items": { "enum": ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA", "HS256", "HS384", "HS512"] }
+              "items": {
+                "enum": [
+                  "RS256",
+                  "RS384",
+                  "RS512",
+                  "PS256",
+                  "PS384",
+                  "PS512",
+                  "ES256",
+                  "ES384",
+                  "ES512",
+                  "EdDSA",
+                  "HS256",
+                  "HS384",
+                  "HS512"
+                ]
+              }
             },
-            "roles_claim": { "type": "string", "minLength": 1 },
-            "clock_tolerance": { "type": "integer", "minimum": 0, "maximum": 300 }
+            "roles_claim": {
+              "type": "string",
+              "minLength": 1
+            },
+            "clock_tolerance": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 300
+            }
           }
         },
         "rate_limits": {
           "type": "object",
           "additionalProperties": false,
-          "properties": { "default": { "$ref": "#/$defs/rateLimit" } }
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/rateLimit"
+            }
+          }
         }
       }
     },
     "policy": {
       "description": "When an event happens, run a use case of this context.",
       "type": "object",
-      "required": ["name", "when", "run"],
+      "required": [
+        "name",
+        "when",
+        "run"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/snake" },
-        "description": { "type": "string" },
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "description": {
+          "type": "string"
+        },
         "when": {
           "description": "Consumed event: Event (same context) or Context.Event (another context; needs a relationship whose events list it).",
           "type": "string",
           "pattern": "^([A-Z][A-Za-z0-9]*\\.)?[A-Z][A-Za-z0-9]*$"
         },
-        "run": { "$ref": "#/$defs/snake" },
+        "run": {
+          "$ref": "#/$defs/snake"
+        },
         "args": {
           "description": "Use case input name → event.<field>, clock.now, ids.new or a literal.",
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/expression" }
+          "additionalProperties": {
+            "$ref": "#/$defs/expression"
+          }
         }
       }
     },
     "relationship": {
       "description": "Context map entry: the downstream context depends on the upstream context.",
       "type": "object",
-      "required": ["upstream", "downstream"],
+      "required": [
+        "upstream",
+        "downstream"
+      ],
       "additionalProperties": false,
       "properties": {
-        "upstream": { "$ref": "#/$defs/pascal" },
-        "downstream": { "$ref": "#/$defs/pascal" },
+        "upstream": {
+          "$ref": "#/$defs/pascal"
+        },
+        "downstream": {
+          "$ref": "#/$defs/pascal"
+        },
         "pattern": {
-          "enum": ["customer_supplier", "conformist", "anticorruption_layer", "open_host_service", "published_language", "shared_kernel", "partnership", "separate_ways"],
+          "enum": [
+            "customer_supplier",
+            "conformist",
+            "anticorruption_layer",
+            "open_host_service",
+            "published_language",
+            "shared_kernel",
+            "partnership",
+            "separate_ways"
+          ],
           "default": "customer_supplier"
         },
-        "events": { "description": "Event contract: upstream events the downstream consumes.", "type": "array", "items": { "$ref": "#/$defs/pascal" } },
-        "description": { "type": "string" }
+        "events": {
+          "description": "Event contract: upstream events the downstream consumes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pascal"
+          }
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "query": {
+      "description": "Read side: list / search / page one aggregate (keyset pagination with signed cursors). Declaring a query also generates the context's PostgreSQL schema, repositories and readers.",
+      "type": "object",
+      "required": [
+        "name",
+        "from"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/snake"
+        },
+        "description": {
+          "type": "string"
+        },
+        "from": {
+          "description": "Aggregate the query reads.",
+          "$ref": "#/$defs/pascal"
+        },
+        "params": {
+          "description": "Typed parameters (primitive, enum or Ref); optional unless required: true (an absent one disables its filters).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          }
+        },
+        "where": {
+          "description": "Filters: field <op> param (optional parameter: no filter when absent) or field <op> value.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "description": "Field path, e.g. status or email.value.",
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+              },
+              "op": {
+                "enum": [
+                  "eq",
+                  "ne",
+                  "lt",
+                  "lte",
+                  "gt",
+                  "gte"
+                ]
+              },
+              "param": {
+                "$ref": "#/$defs/snake"
+              },
+              "value": {}
+            }
+          }
+        },
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "param": {
+              "description": "Name of the search parameter (default q).",
+              "$ref": "#/$defs/snake"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+              },
+              "minItems": 1
+            },
+            "mode": {
+              "enum": [
+                "trigram",
+                "prefix",
+                "exact"
+              ]
+            },
+            "min_similarity": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "order_by": {
+          "description": "Order keys; the identity is appended as the tie-breaker. relevance (search score, desc) needs a trigram search.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "field"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "field": {
+                    "type": "string"
+                  },
+                  "direction": {
+                    "enum": [
+                      "asc",
+                      "desc"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "page": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        },
+        "returns": {
+          "description": "Projection: top-level fields of the aggregate (default every field).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/snake"
+          },
+          "minItems": 1
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "then"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/snake"
+              },
+              "description": {
+                "type": "string"
+              },
+              "given": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "aggregates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "fields"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "$ref": "#/$defs/pascal"
+                        },
+                        "fields": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "when": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "params": {
+                    "type": "object"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "pages": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              "then": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "items": {
+                    "description": "Expected items in order (all fetched pages): identities or partial items.",
+                    "type": "array"
+                  },
+                  "next_cursor": {
+                    "enum": [
+                      "present",
+                      "absent"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

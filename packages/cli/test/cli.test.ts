@@ -19,6 +19,13 @@ function project() {
   return { dir, model: join(dir, "model.ddd.yaml") };
 }
 
+/** The sample without its revoke_invitation use case (the last use case of CleaningStaff, before its queries). */
+function withoutRevoke(text: string): string {
+  const start = text.indexOf("      - name: revoke_invitation");
+  const ends = ["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
+  return text.slice(0, start) + text.slice(Math.min(...ends) + 1);
+}
+
 describe("ddd CLI", () => {
   test("help and unknown commands", () => {
     expect(cli([]).code).toBe(2);
@@ -152,7 +159,7 @@ describe("ddd CLI", () => {
     const test = join(dir, "tests/generated/test_cleaning_staff_revoke_invitation.py");
     expect(existsSync(test)).toBe(true);
     // Drop the revoke_invitation use case (up to the next context).
-    writeFileSync(model, text.slice(0, text.indexOf("      - name: revoke_invitation")) + text.slice(text.indexOf("\n  - name: Staffing") + 1));
+    writeFileSync(model, withoutRevoke(text));
     const check = cli(["diff", model, "--check"]);
     expect(check.code).toBe(1);
     expect(check.err).toContain("Run `ddd generate`.");
@@ -169,7 +176,7 @@ describe("ddd CLI", () => {
     const text = readFileSync(model, "utf8");
     const test = join(dir, "tests/generated/test_cleaning_staff_revoke_invitation.py");
     appendFileSync(test, "\n# my extra assertion\n");
-    writeFileSync(model, text.slice(0, text.indexOf("      - name: revoke_invitation")) + text.slice(text.indexOf("\n  - name: Staffing") + 1));
+    writeFileSync(model, withoutRevoke(text));
     const check = cli(["diff", model, "--check"]);
     expect(check.code).toBe(1);
     expect(check.err).toContain("`ddd generate --prune --force`");

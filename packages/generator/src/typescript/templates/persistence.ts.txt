@@ -1,0 +1,608 @@
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+
+import {
+  type Awaitable,
+  ConstraintViolation,
+  Decimal,
+  DomainError,
+  type ErrorDetails,
+} from "./runtime.js";
+
+// ---------------------------------------------------------------------------
+// SQL client and errors
+// ---------------------------------------------------------------------------
+
+/** A row as the driver returns it (column name → value). */
+export type SqlRow = Readonly<Record<string, unknown>>;
+
+/**
+ * The part of a PostgreSQL driver the generated code uses: node-postgres `Pool` / `Client` and
+ * PGlite satisfy it as they are. Every placeholder of the generated SQL has an explicit cast, so
+ * the driver may send the values untyped.
+ */
+export interface SqlClient {
+  query(text: string, values: unknown[]): Promise<{ rows: SqlRow[] }>;
+}
+
+export interface InvalidCursorDetails extends ErrorDetails {
+  /** Why the cursor was rejected (for logs; the client just starts again from the first page). */
+  readonly reason?: "malformed" | "signature" | "expired" | "mismatch";
+}
+
+/**
+ * The cursor was not made by this server for this query and these parameters (tampered, expired,
+ * signed with a retired secret, or reused with other parameters). HTTP 400.
+ */
+export class InvalidCursor extends DomainError<InvalidCursorDetails> {
+  static override readonly code = "invalid_cursor";
+  override readonly code = "invalid_cursor";
+
+  constructor(
+    details: InvalidCursorDetails = {},
+    message = "The cursor is invalid for this query; start again from the first page",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
+  }
+}
+
+export interface ConcurrencyConflictDetails extends ErrorDetails {
+  readonly aggregate?: string;
+  readonly id?: unknown;
+}
+
+/**
+ * Optimistic locking: the aggregate was changed (or created) by someone else since this repository
+ * loaded it. Reload and retry the use case. HTTP 409.
+ */
+export class ConcurrencyConflict extends DomainError<ConcurrencyConflictDetails> {
+  static override readonly code = "concurrency_conflict";
+  override readonly code = "concurrency_conflict";
+
+  constructor(
+    details: ConcurrencyConflictDetails = {},
+    message = "The data was changed by someone else; reload and try again",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Values between the model and SQL
+// ---------------------------------------------------------------------------
+
+/** An integer column as a number (drivers return int8 as a string, a bigint or a number). */
+export function sqlInteger(value: unknown): unknown {
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return Number(value);
+  return value;
+}
+
+/** A jsonb column as parsed JSON (some drivers return the text). */
+export function sqlJson(value: unknown): unknown {
+  return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+}
+
+/** `decode(value)`, or null for SQL NULL. */
+export function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
+  return value === null || value === undefined ? null : decode(value);
+}
+
+/** A JSON array (jsonb column or nested field) with `decode` applied to each element. */
+export function jsonList<T>(value: unknown, decode: (item: unknown) => T): T[] {
+  const list = sqlJson(value);
+  if (!Array.isArray(list)) throw new ConstraintViolation({}, "Expected a JSON array");
+  return list.map((item: unknown) => decode(item));
+}
+
+/** Field `name` of a JSON object (undefined if `value` is not an object). */
+export function jsonField(value: unknown, name: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  return (value as Readonly<Record<string, unknown>>)[name];
+}
+
+/** A parameter value as SQL sends it: decimals as text, absent as NULL. */
+export function sqlParam(value: unknown): unknown {
+  if (value === undefined) return null;
+  return Decimal.isDecimal(value) ? value.toString() : value;
+}
+
+// ---------------------------------------------------------------------------
+// Query specification, requests and pages
+// ---------------------------------------------------------------------------
+
+/** How values of a column compare (text in code point order, like `COLLATE "C"`). */
+export type ValueKind = "text" | "integer" | "decimal" | "boolean" | "uuid" | "instant" | "date";
+export type FilterOp = "eq" | "ne" | "lt" | "lte" | "gt" | "gte";
+
+export interface FilterSpec {
+  readonly column: string;
+  readonly kind: ValueKind;
+  readonly op: FilterOp;
+  /** Parameter compared with (absent or null: the filter does not apply). */
+  readonly param?: string;
+  /** Literal compared with (always applies). */
+  readonly value?: string | number | boolean;
+}
+
+export interface SearchSpec {
+  readonly param: string;
+  readonly columns: ReadonlyArray<string>;
+  readonly mode: "trigram" | "prefix" | "exact";
+  readonly minSimilarity: number;
+}
+
+export interface KeySpec {
+  /** null: the relevance (search score) key, active only while searching. */
+  readonly column: string | null;
+  readonly kind: ValueKind | "score";
+  readonly direction: "asc" | "desc";
+}
+
+/** What a generated query declares: filters, search, order keys (identity last), page sizes. */
+export interface QuerySpec {
+  readonly name: string;
+  readonly filters: ReadonlyArray<FilterSpec>;
+  readonly search: SearchSpec | null;
+  readonly keys: ReadonlyArray<KeySpec>;
+  readonly size: number;
+  readonly maxSize: number;
+}
+
+/** A value of an order key in a cursor. */
+export type CursorKey = string | number | boolean;
+
+/** What a reader gets: parameters, normalized search text, decoded cursor, page size. */
+export interface QueryRequest<P> {
+  readonly params: P;
+  /** Trimmed search text, or null when not searching. */
+  readonly search: string | null;
+  /** Keys of the last row of the previous page, or null for the first page. */
+  readonly after: ReadonlyArray<CursorKey> | null;
+  /** Rows per page (already clamped to the query's max size). */
+  readonly limit: number;
+}
+
+/** What a reader returns: one page of items and, when more follow, the last item's keys. */
+export interface QueryResult<T> {
+  readonly items: ReadonlyArray<T>;
+  readonly last: ReadonlyArray<CursorKey> | null;
+}
+
+/** One page of a query: `nextCursor` fetches the next page, null at the end. */
+export interface Page<T> {
+  readonly items: ReadonlyArray<T>;
+  readonly nextCursor: string | null;
+}
+
+/** The order keys of a request (the relevance key only while searching). */
+export function activeKeys(spec: QuerySpec, search: string | null): ReadonlyArray<KeySpec> {
+  return spec.keys.filter(
+    (key) => key.column !== null || (spec.search !== null && search !== null),
+  );
+}
+
+/**
+ * What a cursor is bound to: the query, its order, the search text and the parameters (canonical
+ * JSON, hashed). A cursor reused with other parameters no longer matches.
+ */
+export function queryFingerprint(
+  spec: QuerySpec,
+  params: Readonly<Record<string, unknown>>,
+  search: string | null,
+): string {
+  const order = activeKeys(spec, search).map(
+    (key) => `${key.column ?? "relevance"} ${key.direction}`,
+  );
+  const values = Object.keys(params)
+    .filter((name) => params[name] !== null && params[name] !== undefined)
+    .sort()
+    .map((name) => [name, String(sqlParam(params[name]))]);
+  const canonical = JSON.stringify([spec.name, order, search, values]);
+  return createHash("sha256").update(canonical).digest("base64url").slice(0, 22);
+}
+
+/** The arguments of a query's `execute` beyond its parameters. */
+export interface PageInput {
+  readonly search?: string | null | undefined;
+  readonly cursor?: string | null | undefined;
+  readonly limit?: number | null | undefined;
+}
+
+/**
+ * Runs a query: trims the search text (blank = no search), clamps the limit to the query's maximum,
+ * checks and decodes the cursor, calls the reader and encodes the cursor of the next page.
+ */
+export async function runQuery<P extends Readonly<Record<string, unknown>>, T>(
+  spec: QuerySpec,
+  codec: CursorCodec,
+  params: P,
+  input: PageInput,
+  read: (request: QueryRequest<P>) => Awaitable<QueryResult<T>>,
+): Promise<Page<T>> {
+  const text = input.search?.trim() ?? "";
+  const search = spec.search !== null && text !== "" ? text : null;
+  const limit = Math.min(input.limit ?? spec.size, spec.maxSize);
+  const fingerprint = queryFingerprint(spec, params, search);
+  let after: ReadonlyArray<CursorKey> | null = null;
+  if (input.cursor) {
+    after = codec.decode(input.cursor, fingerprint);
+    if (after.length !== activeKeys(spec, search).length) {
+      throw new InvalidCursor({ reason: "mismatch" });
+    }
+  }
+  const result = await read({ params, search, after, limit });
+  const nextCursor = result.last === null ? null : codec.encode(result.last, fingerprint);
+  return { items: result.items, nextCursor };
+}
+
+// ---------------------------------------------------------------------------
+// Cursors: opaque, URL-safe, signed (HMAC-SHA256), bound to the query's fingerprint
+// ---------------------------------------------------------------------------
+
+/** Turns the keys of a page's last row into an opaque token and back. */
+export interface CursorCodec {
+  encode(keys: ReadonlyArray<CursorKey>, fingerprint: string): string;
+  /** The keys of a token `encode` made for this fingerprint; else throws InvalidCursor. */
+  decode(token: string, fingerprint: string): ReadonlyArray<CursorKey>;
+}
+
+export interface HmacCursorCodecOptions {
+  /**
+   * Server secrets, at least 32 characters each. Tokens are signed with the first and accepted with
+   * any of them: to rotate, put the new secret first and remove the old one after the longest
+   * time a client may hold a cursor.
+   */
+  readonly secrets: ReadonlyArray<string>;
+  /** Lifetime of a cursor in seconds (default: cursors do not expire). */
+  readonly ttlSeconds?: number;
+  /** The current time in milliseconds (default `Date.now`; for tests). */
+  readonly now?: () => number;
+}
+
+const CURSOR_VERSION = 1;
+const MAX_CURSOR_LENGTH = 4096;
+
+/**
+ * `base64url(JSON { v, keys, fp, exp? })` + "." + `base64url(HMAC-SHA256(secret, payload))`. The
+ * payload is readable but cannot be changed without the secret; clients must treat it as opaque.
+ */
+export class HmacCursorCodec implements CursorCodec {
+  readonly #secrets: ReadonlyArray<string>;
+  readonly #ttlSeconds: number | undefined;
+  readonly #now: () => number;
+
+  constructor(options: HmacCursorCodecOptions) {
+    if (options.secrets.length === 0) throw new Error("HmacCursorCodec needs at least one secret");
+    if (options.secrets.some((secret) => secret.length < 32)) {
+      throw new Error("Cursor secrets must be at least 32 characters long");
+    }
+    this.#secrets = [...options.secrets];
+    this.#ttlSeconds = options.ttlSeconds;
+    this.#now = options.now ?? Date.now;
+  }
+
+  encode(keys: ReadonlyArray<CursorKey>, fingerprint: string): string {
+    const payload: Record<string, unknown> = { v: CURSOR_VERSION, keys, fp: fingerprint };
+    if (this.#ttlSeconds !== undefined) {
+      payload.exp = Math.floor(this.#now() / 1000) + this.#ttlSeconds;
+    }
+    const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    return `${body}.${sign(this.#secrets[0] ?? "", body)}`;
+  }
+
+  decode(token: string, fingerprint: string): ReadonlyArray<CursorKey> {
+    const parts = token.split(".");
+    const [body, signature] = parts;
+    if (token.length > MAX_CURSOR_LENGTH || parts.length !== 2 || !body || !signature) {
+      throw new InvalidCursor({ reason: "malformed" });
+    }
+    if (!this.#secrets.some((secret) => verify(secret, body, signature))) {
+      throw new InvalidCursor({ reason: "signature" });
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as unknown;
+    } catch {
+      throw new InvalidCursor({ reason: "malformed" });
+    }
+    const keys = jsonField(payload, "keys");
+    const exp = jsonField(payload, "exp");
+    if (jsonField(payload, "v") !== CURSOR_VERSION || !isKeyList(keys)) {
+      throw new InvalidCursor({ reason: "malformed" });
+    }
+    if (exp !== undefined && (typeof exp !== "number" || exp * 1000 <= this.#now())) {
+      throw new InvalidCursor({ reason: "expired" });
+    }
+    if (jsonField(payload, "fp") !== fingerprint) throw new InvalidCursor({ reason: "mismatch" });
+    return keys;
+  }
+}
+
+function sign(secret: string, body: string): string {
+  return createHmac("sha256", secret).update(body).digest("base64url");
+}
+
+/** Constant-time comparison of the signature. */
+function verify(secret: string, body: string, signature: string): boolean {
+  const expected = Buffer.from(sign(secret, body));
+  const actual = Buffer.from(signature);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function isKeyList(value: unknown): value is CursorKey[] {
+  return (
+    Array.isArray(value) &&
+    value.every((v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trigram similarity (pg_trgm)
+// ---------------------------------------------------------------------------
+
+/**
+ * The trigrams of `text` as pg_trgm extracts them: lower case, words are runs of letters and
+ * digits, each padded with two spaces before and one after.
+ */
+export function trigrams(text: string): Set<string> {
+  const set = new Set<string>();
+  for (const word of text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+    const chars = Array.from(`  ${word} `);
+    for (let i = 0; i + 3 <= chars.length; i++) set.add(chars.slice(i, i + 3).join(""));
+  }
+  return set;
+}
+
+/**
+ * pg_trgm's `similarity(a, b)`: shared trigrams / all distinct trigrams, as the float4 PostgreSQL
+ * computes (0 when either has no trigram).
+ */
+export function similarity(a: string, b: string): number {
+  const x = trigrams(a);
+  const y = trigrams(b);
+  if (x.size === 0 || y.size === 0) return 0;
+  let shared = 0;
+  for (const t of x) if (y.has(t)) shared++;
+  return Math.fround(shared / (x.size + y.size - shared));
+}
+
+// ---------------------------------------------------------------------------
+// Ordering and filtering (the in-memory readers; the SQL does the same in the database)
+// ---------------------------------------------------------------------------
+
+/** Code point order (PostgreSQL `COLLATE "C"` on UTF-8), unlike `<` on UTF-16 strings. */
+function compareText(a: string, b: string): number {
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const x = a.codePointAt(i) ?? 0;
+    const y = b.codePointAt(j) ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+    i += x > 0xffff ? 2 : 1;
+    j += y > 0xffff ? 2 : 1;
+  }
+  return Math.sign(a.length - i - (b.length - j));
+}
+
+/** Compares two non-null values of a kind: negative, zero or positive. */
+export function compareValues(kind: ValueKind | "score", a: unknown, b: unknown): number {
+  switch (kind) {
+    case "text":
+      return compareText(String(a), String(b));
+    case "decimal":
+      return new Decimal(String(a)).cmp(new Decimal(String(b)));
+    case "integer":
+    case "score":
+    case "boolean":
+      return Math.sign(Number(a) - Number(b));
+    default:
+      // uuid, instant, date: canonical ASCII strings ordered like the values they denote.
+      return compareText(String(a), String(b));
+  }
+}
+
+function compareKeys(
+  keys: ReadonlyArray<KeySpec>,
+  a: ReadonlyArray<CursorKey>,
+  b: ReadonlyArray<CursorKey>,
+): number {
+  for (const [i, key] of keys.entries()) {
+    const c = compareValues(key.kind, a[i], b[i]);
+    if (c !== 0) return key.direction === "asc" ? c : -c;
+  }
+  return 0;
+}
+
+const FILTER_OPS: Readonly<Record<FilterOp, (c: number) => boolean>> = {
+  eq: (c) => c === 0,
+  ne: (c) => c !== 0,
+  lt: (c) => c < 0,
+  lte: (c) => c <= 0,
+  gt: (c) => c > 0,
+  gte: (c) => c >= 0,
+};
+
+/** Like SQL: NULL matches nothing; an absent optional parameter disables its filter. */
+function matches(
+  filter: FilterSpec,
+  row: SqlRow,
+  params: Readonly<Record<string, unknown>>,
+): boolean {
+  const value = filter.param === undefined ? filter.value : sqlParam(params[filter.param]);
+  if (value === null || value === undefined) return filter.param !== undefined;
+  const cell = row[filter.column];
+  if (cell === null || cell === undefined) return false;
+  return FILTER_OPS[filter.op](compareValues(filter.kind, cell, value));
+}
+
+/** The search score of a row (0 for prefix / exact), or null when it does not match. */
+function score(search: SearchSpec, row: SqlRow, text: string): number | null {
+  const q = text.toLowerCase();
+  let best: number | null = null;
+  for (const column of search.columns) {
+    const cell = row[column];
+    if (typeof cell !== "string") continue;
+    const value = cell.toLowerCase();
+    if (search.mode === "trigram") {
+      const s = similarity(value, q);
+      best = best === null ? s : Math.max(best, s);
+    } else if (search.mode === "prefix" ? value.startsWith(q) : value === q) {
+      best = 0;
+    }
+  }
+  if (best === null || (search.mode === "trigram" && best < search.minSimilarity)) return null;
+  return best;
+}
+
+/**
+ * A query over rows in memory with the semantics of the generated SQL: filters, search, order
+ * (relevance first while searching), keyset after the cursor, one extra row to know if more follow.
+ */
+export function readRows<P extends Readonly<Record<string, unknown>>, T>(
+  spec: QuerySpec,
+  request: QueryRequest<P>,
+  rows: ReadonlyArray<SqlRow>,
+  toItem: (row: SqlRow) => T,
+): QueryResult<T> {
+  const keys = activeKeys(spec, request.search);
+  const candidates: { row: SqlRow; key: CursorKey[] }[] = [];
+  for (const row of rows) {
+    if (!spec.filters.every((filter) => matches(filter, row, request.params))) continue;
+    let relevance = 0;
+    if (spec.search !== null && request.search !== null) {
+      const s = score(spec.search, row, request.search);
+      if (s === null) continue;
+      relevance = s;
+    }
+    const key = keys.map((k) => (k.column === null ? relevance : (row[k.column] as CursorKey)));
+    candidates.push({ row, key });
+  }
+  candidates.sort((a, b) => compareKeys(keys, a.key, b.key));
+  const after = request.after;
+  const rest =
+    after === null ? candidates : candidates.filter((c) => compareKeys(keys, c.key, after) > 0);
+  const page = rest.slice(0, request.limit);
+  const last = page.at(-1);
+  return {
+    items: page.map((c) => toItem(c.row)),
+    last: rest.length > request.limit && last !== undefined ? last.key : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PostgreSQL: query readers and repositories
+// ---------------------------------------------------------------------------
+
+/** A bound value of a generated statement, in placeholder order. */
+export type SqlArg =
+  | { readonly param: string }
+  | { readonly value: string | number | boolean }
+  | { readonly search: true }
+  | { readonly key: number }
+  | { readonly limit: true };
+
+export interface SqlStatement {
+  readonly text: string;
+  readonly args: ReadonlyArray<SqlArg>;
+}
+
+/** The statements of a query: first / next page, and while searching (when it has a search). */
+export interface QueryStatements {
+  readonly first: SqlStatement;
+  readonly next: SqlStatement;
+  readonly searchFirst?: SqlStatement;
+  readonly searchNext?: SqlStatement;
+}
+
+/** Runs the statement for the request and reads one page (keys come back as `_k0`, `_k1`, …). */
+export async function readSql<P extends Readonly<Record<string, unknown>>, T>(
+  client: SqlClient,
+  spec: QuerySpec,
+  statements: QueryStatements,
+  request: QueryRequest<P>,
+  toItem: (row: SqlRow) => T,
+): Promise<QueryResult<T>> {
+  const searching = spec.search !== null && request.search !== null;
+  const after = request.after;
+  const statement = searching
+    ? after === null
+      ? statements.searchFirst
+      : statements.searchNext
+    : after === null
+      ? statements.first
+      : statements.next;
+  if (statement === undefined) throw new Error(`Query ${spec.name} has no search statement`);
+  const values = statement.args.map((arg): unknown => {
+    if ("param" in arg) return sqlParam(request.params[arg.param]);
+    if ("value" in arg) return arg.value;
+    if ("search" in arg) return request.search;
+    if ("key" in arg) return after?.[arg.key] ?? null;
+    return request.limit + 1;
+  });
+  const { rows } = await client.query(statement.text, values);
+  const page = rows.slice(0, request.limit);
+  const last = page.at(-1);
+  const count = activeKeys(spec, request.search).length;
+  const keys =
+    rows.length > request.limit && last !== undefined
+      ? Array.from({ length: count }, (_, i) => String(last[`_k${String(i)}`]))
+      : null;
+  return { items: page.map(toItem), last: keys };
+}
+
+/** How one aggregate maps to its table (generated per aggregate). */
+export interface TableMapping<A, K> {
+  readonly aggregate: string;
+  /** `SELECT … WHERE <identity> = $1` */
+  readonly select: string;
+  /** `INSERT … ON CONFLICT DO NOTHING RETURNING version` over `toValues` */
+  readonly insert: string;
+  /** `UPDATE … WHERE <identity> = … AND version = $n RETURNING version` (+ version) */
+  readonly update: string;
+  identity(aggregate: A): K;
+  toValues(aggregate: A): unknown[];
+  fromRow(row: SqlRow): A;
+}
+
+/**
+ * Loads and saves aggregates with optimistic locking. The aggregate stays immutable: the store
+ * remembers the version of every aggregate it loaded or saved, so use one store (repository) per
+ * unit of work. Saving an aggregate it did not load inserts it; a lost race (the row changed or
+ * already exists) throws ConcurrencyConflict.
+ */
+export class PostgresStore<A, K> {
+  readonly #client: SqlClient;
+  readonly #mapping: TableMapping<A, K>;
+  readonly #versions = new Map<K, number>();
+
+  constructor(client: SqlClient, mapping: TableMapping<A, K>) {
+    this.#client = client;
+    this.#mapping = mapping;
+  }
+
+  async get(id: K): Promise<A | null> {
+    const { rows } = await this.#client.query(this.#mapping.select, [id]);
+    const row = rows[0];
+    if (row === undefined) return null;
+    const aggregate = this.#mapping.fromRow(row);
+    this.#versions.set(this.#mapping.identity(aggregate), Number(sqlInteger(row.version)));
+    return aggregate;
+  }
+
+  async save(aggregate: A): Promise<void> {
+    const id = this.#mapping.identity(aggregate);
+    const expected = this.#versions.get(id);
+    const values = this.#mapping.toValues(aggregate);
+    const { rows } =
+      expected === undefined
+        ? await this.#client.query(this.#mapping.insert, values)
+        : await this.#client.query(this.#mapping.update, [...values, expected]);
+    const row = rows[0];
+    if (row === undefined) {
+      throw new ConcurrencyConflict({ aggregate: this.#mapping.aggregate, id });
+    }
+    this.#versions.set(id, Number(sqlInteger(row.version)));
+  }
+}

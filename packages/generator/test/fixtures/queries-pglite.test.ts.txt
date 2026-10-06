@@ -1,0 +1,174 @@
+// PGlite verification of the generated PostgreSQL code (copied into the generated project by the generator test).
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+
+import { Member, type MemberInput } from "../src/member_directory/generated/directory/domain/aggregates.js";
+import { Badge } from "../src/member_directory/generated/directory/domain/entities.js";
+import {
+  ListMembersQuery,
+  MemberByEmailQuery,
+  MembersByNamePrefixQuery,
+  SearchMembersQuery,
+} from "../src/member_directory/generated/directory/application/queries.js";
+import {
+  PostgresListMembersReader,
+  PostgresMemberByEmailReader,
+  PostgresMemberRepository,
+  PostgresMembersByNamePrefixReader,
+  PostgresSearchMembersReader,
+  LIST_MEMBERS_SQL,
+  SEARCH_MEMBERS_SQL,
+} from "../src/member_directory/generated/directory/persistence/postgres.js";
+import {
+  InMemoryListMembersReader,
+  InMemoryMemberByEmailReader,
+  InMemoryMemberRepository,
+  InMemoryMembersByNamePrefixReader,
+  InMemorySearchMembersReader,
+  plain,
+} from "../src/member_directory/generated/directory/testing.js";
+import { ConcurrencyConflict, HmacCursorCodec, type Page, type SqlClient } from "../src/member_directory/generated/persistence.js";
+
+const cursors = new HmacCursorCodec({ secrets: ["pglite-test-secret-0123456789-0123456789"] });
+const NAMES = ["Alice Johnson", "Alicia Keys", "Bob Smith", "Alison Brie", "Carol Alison", "Alexander Graham", "Ali Baba", "alice cooper", "Malice Doe", "Lisa Alis"];
+const STATUSES = ["active", "suspended", "left"] as const;
+
+function members(): MemberInput[] {
+  return NAMES.map((name, i) => ({
+    id: `00000000-0000-0000-0000-0000000000${String(i + 10)}`,
+    displayName: name,
+    email: { value: `${name.toLowerCase().replace(/\s+/g, ".")}@example.${i % 2 ? "org" : "com"}` },
+    status: STATUSES[i % 3]!,
+    // Ties on purpose: the identity decides.
+    joinedAt: `2026-01-0${String((i % 4) + 1)}T09:00:00.123+00:00`,
+    birthday: i % 2 ? "1990-05-01" : null,
+    points: (i * 7) % 5,
+    balance: { amount: `${String(i)}.50`, currency: i % 3 ? "JPY" : "USD" },
+    nickname: i % 2 ? `n${String(i)}` : null,
+    referrer: i ? "00000000-0000-0000-0000-000000000010" : null,
+    tags: i % 2 ? ["vip", "early"] : [],
+    badges: i % 3 ? [] : [Badge.from({ code: `b${String(i)}`, awardedAt: "2026-01-02T00:00:00+00:00", prize: { amount: "1.00", currency: "JPY" } })],
+    home: i % 2 ? { amount: "1.25", currency: "USD" } : null,
+  }));
+}
+
+// One database for the file (starting PGlite takes seconds); every test starts from an empty table.
+let db: PGlite;
+let client: SqlClient;
+beforeAll(async () => {
+  db = new PGlite({ extensions: { pg_trgm } });
+  await db.exec(readFileSync("sql/directory.sql", "utf8"));
+  // Applying the desired schema twice is harmless (IF NOT EXISTS).
+  await db.exec(readFileSync("sql/directory.sql", "utf8"));
+  client = db;
+}, 120_000);
+afterAll(async () => {
+  await db.close();
+});
+beforeEach(async () => {
+  await db.exec("TRUNCATE directory.member; RESET enable_seqscan;");
+});
+
+async function all<T>(run: (cursor: string | null) => Promise<Page<T>>): Promise<T[]> {
+  const out: T[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 100; i++) {
+    const page: Page<T> = await run(cursor);
+    out.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor === null) return out;
+  }
+  throw new Error("too many pages");
+}
+
+describe("generated PostgreSQL code on PGlite", () => {
+  test("keyset paging and trigram search agree with the in-memory readers", async () => {
+    const repository = new PostgresMemberRepository(client);
+    const memory = new InMemoryMemberRepository();
+    for (const input of members()) {
+      await repository.save(Member.from(input));
+      memory.seed(Member.from(input));
+    }
+    const pg = {
+      search: new SearchMembersQuery({ reader: new PostgresSearchMembersReader(client), cursors }),
+      list: new ListMembersQuery({ reader: new PostgresListMembersReader(client), cursors }),
+      prefix: new MembersByNamePrefixQuery({ reader: new PostgresMembersByNamePrefixReader(client), cursors }),
+      email: new MemberByEmailQuery({ reader: new PostgresMemberByEmailReader(client), cursors }),
+    };
+    const mem = {
+      search: new SearchMembersQuery({ reader: new InMemorySearchMembersReader(memory), cursors }),
+      list: new ListMembersQuery({ reader: new InMemoryListMembersReader(memory), cursors }),
+      prefix: new MembersByNamePrefixQuery({ reader: new InMemoryMembersByNamePrefixReader(memory), cursors }),
+      email: new MemberByEmailQuery({ reader: new InMemoryMemberByEmailReader(memory), cursors }),
+    };
+    for (const limit of [1, 2, 3, 50]) {
+      for (const input of [{}, { q: "alison" }, { q: "ali" }, { q: "alice" }, { q: "example" }, { status: "active" as const }, { q: "alis", status: "left" as const }, { joinedAfter: "2026-01-02T00:00:00+00:00" }]) {
+        const a = await all((cursor) => pg.search.execute({ ...input, cursor, limit }));
+        const b = await all((cursor) => mem.search.execute({ ...input, cursor, limit }));
+        expect({ input, limit, items: plain(a) }).toEqual({ input, limit, items: plain(b) });
+      }
+      for (const input of [{}, { minPoints: 2 }]) {
+        const a = await all((cursor) => pg.list.execute({ ...input, cursor, limit }));
+        const b = await all((cursor) => mem.list.execute({ ...input, cursor, limit }));
+        expect({ input, limit, items: plain(a) }).toEqual({ input, limit, items: plain(b) });
+        expect(a.length).toBeGreaterThan(0);
+      }
+      for (const input of [{ currency: "JPY" }, { currency: "JPY", prefix: "AL" }, { currency: "USD", prefix: "a%" }, { currency: "JPY", prefix: "ali_" }]) {
+        const a = await all((cursor) => pg.prefix.execute({ ...input, cursor, limit }));
+        const b = await all((cursor) => mem.prefix.execute({ ...input, cursor, limit }));
+        expect({ input, limit, items: plain(a) }).toEqual({ input, limit, items: plain(b) });
+      }
+      for (const input of [{}, { email: "ALICE.JOHNSON@example.com" }]) {
+        const a = await all((cursor) => pg.email.execute({ ...input, cursor, limit: 1 }));
+        const b = await all((cursor) => mem.email.execute({ ...input, cursor, limit: 1 }));
+        expect(plain(a)).toEqual(plain(b));
+      }
+    }
+    const ranked = await pg.search.execute({ q: "alison", limit: 50 });
+    expect(ranked.items.map((m) => m.displayName)).toEqual(["Alison Brie", "Carol Alison", "Lisa Alis", "Alice Johnson"]);
+  }, 120_000);
+
+  test("the trigram GIN indexes serve the search; the order index serves the keyset", async () => {
+    await db.exec("SET enable_seqscan = off;");
+    const statement = SEARCH_MEMBERS_SQL.searchFirst!;
+    const values = statement.args.map((arg) => ("search" in arg ? "alison" : "limit" in arg ? 10 : null));
+    const plan = (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${statement.text}`, values)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(plan).toContain("Bitmap Index Scan on member_display_name_trgm_idx");
+    expect(plan).toContain("Bitmap Index Scan on member_email_value_trgm_idx");
+    const next = LIST_MEMBERS_SQL.next;
+    const keys = ["active", "3", "00000000-0000-0000-0000-000000000010"];
+    const nextValues = next.args.map((arg) => ("key" in arg ? keys[arg.key] : "limit" in arg ? 10 : "value" in arg ? arg.value : null));
+    const ordered = (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${next.text}`, nextValues)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    expect(ordered).toContain("member_list_members_order_idx");
+    expect(ordered).not.toContain("Sort Key");
+  });
+
+  test("optimistic locking: the second writer of a loaded version gets ConcurrencyConflict", async () => {
+    const input = members()[0]!;
+    await new PostgresMemberRepository(client).save(Member.from(input));
+    const first = new PostgresMemberRepository(client);
+    const second = new PostgresMemberRepository(client);
+    const a = (await first.get(Member.from(input).id))!;
+    const b = (await second.get(Member.from(input).id))!;
+    await first.save(a.suspend().aggregate);
+    let error: unknown;
+    try {
+      await second.save(b.suspend().aggregate);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ConcurrencyConflict);
+    // Inserting an id that exists (without loading it) is a conflict too.
+    let duplicate: unknown;
+    try {
+      await new PostgresMemberRepository(client).save(Member.from(input));
+    } catch (e) {
+      duplicate = e;
+    }
+    expect(duplicate).toBeInstanceOf(ConcurrencyConflict);
+    const reloaded = (await new PostgresMemberRepository(client).get(Member.from(input).id))!;
+    expect(reloaded.status).toBe("suspended");
+  });
+});

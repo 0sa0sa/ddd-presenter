@@ -7,9 +7,11 @@
  */
 
 import * as cleaningStaffErrors from "../cleaning-staff/domain/errors.js";
+import { ConcurrencyConflict, InvalidCursor } from "../persistence.js";
 import { SECURITY_ERRORS } from "../security.js";
 import * as staffingErrors from "../staffing/domain/errors.js";
 import { contract } from "./contract.js";
+import { queryCaller } from "./query-runtime.js";
 import {
   type ApiClientOptions,
   createTransport,
@@ -20,8 +22,13 @@ import {
 } from "./runtime.js";
 
 function cleaningStaffClient(transport: Transport) {
-  const { useCases, aggregates } = contract.cleaningStaff;
-  const errors = errorRegistry([...cleaningStaffErrors.ALL_ERRORS, ...SECURITY_ERRORS]);
+  const { useCases, aggregates, queries } = contract.cleaningStaff;
+  const errors = errorRegistry([
+    ...cleaningStaffErrors.ALL_ERRORS,
+    ...SECURITY_ERRORS,
+    InvalidCursor,
+    ConcurrencyConflict,
+  ]);
   return {
     useCases: {
       issueInvitation: useCaseCaller(transport, useCases.issueInvitation, errors),
@@ -30,6 +37,9 @@ function cleaningStaffClient(transport: Transport) {
     },
     aggregates: {
       cleaningStaffInvitation: readCaller(transport, aggregates.cleaningStaffInvitation, errors),
+    },
+    queries: {
+      searchInvitations: queryCaller(transport, queries.searchInvitations, errors),
     },
   };
 }

@@ -6,9 +6,15 @@
  * mutationOptions per use case (no React API).
  */
 
-import { mutationOptions, queryOptions, skipToken } from "@tanstack/react-query";
+import {
+  infiniteQueryOptions,
+  mutationOptions,
+  queryOptions,
+  skipToken,
+} from "@tanstack/react-query";
 
 import type { ApiClient } from "../../api/client.js";
+import type { SearchInvitationsInput } from "../application/queries.js";
 import type {
   AcceptInvitationInput,
   IssueInvitationInput,
@@ -42,7 +48,8 @@ export function createCleaningStaffQueries(api: ApiClient) {
   return {
     cleaningStaffInvitation: {
       all: () => [{ ...cleaningStaffInvitationKey }] as const,
-      // Prefix of the list queries you add yourself (the model declares no queries yet).
+      // Prefix of every list query of CleaningStaffInvitation (searchInvitations): the mutations
+      // that save it invalidate them.
       lists: () => [{ ...cleaningStaffInvitationKey, kind: "list" }] as const,
       details: () => [{ ...cleaningStaffInvitationKey, kind: "detail" }] as const,
       /**
@@ -75,6 +82,27 @@ export function createCleaningStaffQueries(api: ApiClient) {
               ? skipToken
               : ({ signal }) =>
                   api.cleaningStaff.aggregates.cleaningStaffInvitation(id, { signal }),
+        }),
+      /**
+       * 招待をメールアドレスで探す（似ている順）。状態と作成日時で絞り込める
+       *
+       * `useInfiniteQuery` / `useSuspenseInfiniteQuery` / `queryClient.infiniteQuery` over `GET
+       * /api/cleaning-staff/queries/search-invitations`, one page per cursor. The key is under
+       * `lists()`, so the mutations that save CleaningStaffInvitation invalidate it; `params`
+       * (everything but the cursor) is part of it.
+       */
+      searchInvitations: (params: Omit<SearchInvitationsInput, "cursor"> = {}) =>
+        infiniteQueryOptions({
+          queryKey: [
+            { ...cleaningStaffInvitationKey, kind: "list", query: "search-invitations", params },
+          ] as const,
+          queryFn: ({ queryKey: [{ params }], pageParam, signal }) =>
+            api.cleaningStaff.queries.searchInvitations(
+              { ...params, cursor: pageParam },
+              { signal },
+            ),
+          initialPageParam: null as string | null,
+          getNextPageParam: (lastPage) => lastPage.nextCursor,
         }),
     },
   };

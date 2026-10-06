@@ -11,6 +11,9 @@ import { readAccessFile, securityFiles, servedOverHttp } from "./python/security
 import { securityTestFile } from "./python/security-tests.ts";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "./output.ts";
 import { generateTypeScript } from "./typescript/index.ts";
+import { persistenceRuntime } from "./python/persistence.ts";
+import { pyContextPlans, pyHasQueries, pyPersistenceTestFile, pyPostgresFile, pyQueriesFile, pyQueryTestFile, pyRowsFile } from "./python/queries.ts";
+import { contextSqlFile } from "./sql.ts";
 
 export { GENERATOR_NAME, GENERATOR_VERSION };
 export * from "./plan.ts";
@@ -46,6 +49,7 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     if (t) gen(t.path, t.content);
   }
 
+  let withQueries = false;
   for (const ca of analysis.contexts.values()) {
     const L = new Layout(model, ca);
     const dir = `${src}/${L.base.replace(/\./g, "/")}`;
@@ -95,6 +99,18 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
       scaffold(`${src}/${pkg}/extensions/${L.ctxModule}/__init__.py`, "");
       scaffold(`${src}/${pkg}/extensions/${L.ctxModule}/extensions.py`, extensionsScaffold(L));
     }
+    // Read side and PostgreSQL persistence: only for contexts that declare queries (docs/09 §19).
+    if (pyHasQueries(L)) {
+      gen(`${dir}/persistence/__init__.py`, initPy(`PostgreSQL adapters of ${ca.ir.name} (repositories with optimistic locking, query readers).`));
+      for (const f of [pyQueriesFile(L), pyRowsFile(L), pyPostgresFile(L), pyPersistenceTestFile(L), ...pyContextPlans(L).map((p) => pyQueryTestFile(L, p))]) gen(f.path, f.content);
+      const sql = contextSqlFile(model, ca);
+      if (sql) gen(sql.path, sql.content);
+      withQueries = true;
+    }
+  }
+  if (withQueries) {
+    const doc = docstringLines("Read side and PostgreSQL runtime: connection port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", "").join("\n");
+    gen(`${src}/${pkg}/generated/_persistence.py`, `${header(model)}\n\n${doc}\n\n${persistenceRuntime(`${pkg}.generated._runtime`)}`);
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path));

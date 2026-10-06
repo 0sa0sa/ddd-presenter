@@ -8,8 +8,10 @@
 
 import { z } from "zod";
 
+import { queryEndpoint } from "../../api/query-runtime.js";
 import { readEndpoint, useCaseEndpoint } from "../../api/runtime.js";
 import { idSchema, InstantSchema, uuidSchema } from "../../runtime.js";
+import { SearchInvitationsInputSchema } from "../application/queries.js";
 import { AcceptInvitation, IssueInvitation, RevokeInvitation } from "../domain/commands.js";
 import { InvitationStatusSchema } from "../domain/enums.js";
 import { EmailAddressSchema } from "../domain/value-objects.js";
@@ -29,9 +31,29 @@ export const CleaningStaffInvitationJson = z.object({
 });
 export type CleaningStaffInvitationJson = z.output<typeof CleaningStaffInvitationJson>;
 
+/** JSON form of one search_invitations item. */
+export const SearchInvitationsItemJson = z.object({
+  id: idSchema("CleaningStaffInvitation"),
+  email: EmailAddressSchema,
+  status: InvitationStatusSchema,
+  createdAt: InstantSchema,
+  expiresAt: InstantSchema,
+});
+export type SearchInvitationsItemJson = z.output<typeof SearchInvitationsItemJson>;
+
+/**
+ * JSON form of a page of search_invitations (what `GET
+ * /api/cleaning-staff/queries/search-invitations` returns); `nextCursor` is null on the last page.
+ */
+export const SearchInvitationsPageJson = z.object({
+  items: z.array(SearchInvitationsItemJson).readonly(),
+  nextCursor: z.string().nullable(),
+});
+export type SearchInvitationsPageJson = z.output<typeof SearchInvitationsPageJson>;
+
 /**
  * Endpoints of the CleaningStaff context: a POST per use case, a GET per aggregate (load by
- * identity).
+ * identity), a GET per query (one page).
  */
 export const contract = {
   useCases: {
@@ -48,6 +70,7 @@ export const contract = {
         not_authorized: 403,
         email_blocked: 422,
         invalid_invitation_window: 422,
+        concurrency_conflict: 409,
       },
       auth: { kind: "principal", roles: ["admin"] },
       rateLimit: { name: "issue_invitation", requests: 10, windowSeconds: 60, by: "principal" },
@@ -66,6 +89,7 @@ export const contract = {
         invitation_not_found: 404,
         invitation_not_deliverable: 409,
         invalid_invitation_window: 422,
+        concurrency_conflict: 409,
       },
       auth: { kind: "principal", roles: ["candidate"] },
       rateLimit: { name: "accept_invitation", requests: 5, windowSeconds: 60, by: "principal" },
@@ -84,6 +108,7 @@ export const contract = {
         invitation_not_found: 404,
         invitation_already_closed: 409,
         invalid_invitation_window: 422,
+        concurrency_conflict: 409,
       },
       auth: { kind: "principal", roles: ["admin"] },
       rateLimit: { name: "revoke_invitation", requests: 60, windowSeconds: 60, by: "principal" },
@@ -111,6 +136,28 @@ export const contract = {
         windowSeconds: 60,
         by: "principal",
       },
+    }),
+  },
+  queries: {
+    /**
+     * 招待をメールアドレスで探す（似ている順）。状態と作成日時で絞り込める
+     *
+     * One page of CleaningStaffInvitation items per request.
+     */
+    searchInvitations: queryEndpoint({
+      name: "search_invitations",
+      method: "GET",
+      path: "/api/cleaning-staff/queries/search-invitations",
+      input: SearchInvitationsInputSchema,
+      params: {
+        status: { key: "status", kind: "string" },
+        created_after: { key: "createdAfter", kind: "string" },
+        q: { key: "q", kind: "string" },
+        cursor: { key: "cursor", kind: "string" },
+        limit: { key: "limit", kind: "integer" },
+      },
+      output: SearchInvitationsPageJson,
+      errors: { constraint_violation: 400, invalid_cursor: 400 },
     }),
   },
 } as const;

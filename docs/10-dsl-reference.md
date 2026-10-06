@@ -28,6 +28,7 @@ contexts:
     extension_points: [...]
     use_cases: [...]
     policies: [...]                 # イベント → Use case の反応（§8）
+    queries: [...]                  # 読み取り: 一覧・検索・ページング（§10）。PostgreSQL の永続化も生成する
 relationships: [...]                # コンテキストマップ（§9）
 ```
 
@@ -83,7 +84,7 @@ generation:
 
 - `src/<package>/generated/api/`（共有）: `contract.ts`（全エンドポイント）、`server.ts`（`createApiHandler`、Web 標準の `Request` → `Response`）、`client.ts`（`createApiClient`）、`queries.ts`（`createApiQueries` / `createApiMutations`: 全コンテキストのクエリファクトリと mutationOptions）、`runtime.ts`（モデルに依存しない部分）、`register.ts`（TanStack Query の `Register` に error の型を登録）。
 - `src/<package>/generated/<context>/api/`（コンテキストの隣、縦の配置）: `contract.ts`（JSON 形とエンドポイント）、`queries.ts`（`create<Context>Queries` / `create<Context>Mutations`）。カスタムフックと React の Context は生成しない。
-- エンドポイント: Use case ごとに `POST <base_path>/<context>/<use-case>`（入力はコマンドのスキーマ、出力は Use case の戻り値。戻り値がなければ 204）、Aggregate ごとに `GET <base_path>/<context>/<aggregate>/:id`（Aggregate の JSON 形）。パスの名前は kebab-case（`/api/cleaning-staff/accept-invitation`）。
+- エンドポイント: Use case ごとに `POST <base_path>/<context>/<use-case>`（入力はコマンドのスキーマ、出力は Use case の戻り値。戻り値がなければ 204）、Aggregate ごとに `GET <base_path>/<context>/<aggregate>/:id`（Aggregate の JSON 形）、クエリ（§10）ごとに `GET <base_path>/<context>/queries/<query>?…`（1ページ分の `{ items, nextCursor }`）。パスの名前は kebab-case（`/api/cleaning-staff/accept-invitation`）。クエリは `generated/api/query-runtime.ts` と、Aggregate のクエリファクトリの `infiniteQueryOptions`（キーは `lists()` の下）になる。
 - テスト `tests/generated/<context>-api.test.ts`（ネットワークも DOM も使わず、クライアントの `fetch` を生成したハンドラにつなぐ）。
 - 依存: 新しく作る `package.json` には `@tanstack/react-query`・`react`（dependencies）と `@types/react`（devDependencies）が入る。既存のプロジェクトの `package.json` は顧客所有なので書き換えない。手で足す（docs/05 §8 の移行メモ）。
 
@@ -424,7 +425,102 @@ relationships:
 
 検査: コンテキストとイベントが存在するか、自分自身への関係、同じ上流・下流の組の重複、`separate_ways` にイベント契約。契約に載っているのにどのポリシーも受けていないイベントは情報として示す。生成される各コンテキストの README には、ポリシーの一覧と Mermaid のコンテキストマップが入る。
 
-## 10. 認証・認可・レート制限（`security`）
+## 10. クエリ（読み取り: 一覧・trigram 検索・ページング）
+
+Aggregate を1つ読み、絞り込み・検索・並べ替えをして、1ページずつ返す読み取り（CQRS の Query）。書き込み（Use case）とは別に、コンテキストの `queries:` に書く。決定と出典は docs/09 §19、生成物と SQL の契約は docs/05 §9。
+
+```yaml
+queries:
+  - name: search_invitations                   # snake_case（生成: SearchInvitationsQuery / …Reader / …Item / …Input）
+    description: 招待をメールアドレスで探す
+    from: CleaningStaffInvitation               # 読む Aggregate
+    params:                                     # 型付きのパラメータ。required: true でなければ省略可能
+      - { name: status, type: InvitationStatus }
+      - { name: created_after, type: DateTime }
+    where:                                      # フィルタ。省略可能なパラメータが無いとき、そのフィルタは効かない
+      - { field: status, op: eq, param: status }
+      - { field: created_at, op: gt, param: created_after }
+      - { field: status, op: ne, value: revoked }   # リテラルと比べる（いつも効く）
+    search: { param: q, fields: [email.value], mode: trigram, min_similarity: 0.3 }
+    order_by:
+      - relevance                               # 検索のスコア順（trigram の検索中だけ。いつも desc）
+      - { field: created_at, direction: desc }  # 識別子（id）は最後の決め手として自動で付く
+    page: { size: 20, max_size: 100 }           # 既定 20 / 100。limit は max_size に切り詰める
+    returns: [id, email, status, created_at]    # 射影（トップレベルのフィールド）。省略するとすべて
+    scenarios: [...]                            # §10.4
+```
+
+| キー | 値 | 検査（エラーのコード） |
+|---|---|---|
+| `name` | snake_case | 重複・Use case / Aggregate と同じ名前（テストのファイル名が重なる）・`policies` `invariants` `api` `persistence` `queries` `testing` `rows` `postgres`（`duplicate-name` / `reserved-name`）。生成するクラス名（`<Name>Query` `Reader` `Item` `Input` `Page` `Params` `ItemSchema` `InputSchema` `ItemJson` `PageJson`）が既存の型と重なると `duplicate-name` |
+| `from` | このコンテキストの Aggregate | `unknown-aggregate`（候補つき） |
+| `params` | フィールドと同じ形（`name` `type` `required` `constraints`）。型はプリミティブ・Enum・`Ref[...]` | 他の型は `invalid-type`。`cursor` / `limit`（HTTP で使う）と検索パラメータの名前は使えない（`reserved-name` / `duplicate-name`）。どのフィルタにも使われないと警告 `unused-parameter` |
+| `where[].field` | フィールドのパス（`status`、`email.value`） | 無いフィールド `unknown-field`。jsonb の列（省略可能な Value Object・List・Entity の中）は `unqueryable-field` |
+| `where[].op` | `eq`（既定）`ne` `lt` `lte` `gt` `gte` | 大小比較は String / Integer / Decimal / DateTime / Date だけ（`invalid-operator`） |
+| `where[].param` / `value` | パラメータ名 / リテラル（どちらか一方） | 無いパラメータ `unknown-parameter`、型の不一致 `type-mismatch`（Integer → Decimal は可）、リテラルはシナリオの値と同じ検査 |
+| `search.param` | 検索テキストのパラメータ名（既定 `q`。省略可能な String、200 文字まで） | |
+| `search.fields` | String のフィールドのパス（Value Object の String のフィールドも可。1つ以上） | String でない・Value Object そのもの `invalid-type`、jsonb の中 `unqueryable-field` |
+| `search.mode` | `trigram`（既定。pg_trgm の類似度）`prefix`（大文字小文字を無視した前方一致）`exact`（大文字小文字を無視した一致） | |
+| `search.min_similarity` | 0 < x ≤ 1（trigram だけ。既定 0.3） | 範囲外 `invalid-value`。0.3（pg_trgm の既定の `similarity_threshold`）未満は警告 `trigram-threshold-below-default`（`%` と GIN インデックスを使えず全行で similarity を計算する） |
+| `order_by[]` | `{ field, direction }`（`asc` 既定 / `desc`）か、フィールド名だけ。`relevance` | 省略可能なフィールド・並べられない型 `invalid-order`（NULL はキーセットに置けない）、jsonb の中 `unqueryable-field`、重複、`relevance` は trigram の検索があるときだけで desc だけ（`invalid-order`）。識別子のあとのキーは警告 `redundant-order` |
+| `page` | `size` ≥ 1、`size` ≤ `max_size` ≤ 1000 | `invalid-value` |
+| `returns` | トップレベルのフィールド名（重複なし） | `unknown-field` |
+
+**パラメータの意味**: 省略可能なパラメータを渡さない（`null`）と、それを使うフィルタは効かない（「すべて」）。NULL のフィールドはどのフィルタにも一致しない（SQL と同じ）。検索テキストは前後の空白を除き、空なら検索しない（`relevance` も効かず、残りのキーで並ぶ）。
+
+**並び順**: 宣言したキーのあとに識別子が付く（向きは最後のキーと同じ）。文字列は `COLLATE "C"`（コードポイント順）で並べる（インメモリのリーダーと同じ順になる）。
+
+### 10.1 ページングとカーソル
+
+ページングはキーセット方式（OFFSET を使わない）: 前のページの最後の行の並び順のキーより後ろを読む。1ページは `{ items, nextCursor }` で、`nextCursor` は最後のページで null。
+
+- 入力は `{ ...params, q?, cursor?, limit? }`。`limit` の既定は `page.size`、`max_size` より大きければ切り詰める（エラーにしない）。1 未満は `ConstraintViolation`。
+- カーソルは不透明な URL セーフの文字列（`base64url(JSON) + "." + base64url(HMAC-SHA256)`）。中身はキーと、クエリ名・並び順・検索テキスト・パラメータの指紋。別のパラメータ（検索テキスト）で使う、改ざんする、期限切れ、退役した秘密で署名した — どれも `InvalidCursor`（HTTP 400 `invalid_cursor`）。`limit` は指紋に入らない（ページの大きさは途中で変えてよい）。
+- 秘密は `HmacCursorCodec({ secrets: [...] })`（Python は `HmacCursorCodec([...])`）で渡す。32 文字以上。先頭の秘密で署名し、どれでも受け付ける（ローテーション）。`ttlSeconds`（`ttl_seconds`）で有効期限を付けられる（既定は無期限）。
+- カーソルは発行した実装（TypeScript か Python）の中でだけ有効。
+
+### 10.2 永続化（PostgreSQL）
+
+クエリを宣言したコンテキストは、すべての Aggregate について PostgreSQL のテーブル・リポジトリを生成する（クエリがないコンテキスト・モデルは何も変わらない）。
+
+| モデル | 列 |
+|---|---|
+| String / Integer / Decimal / Boolean / UUID / DateTime / Date | `text` / `bigint` / `numeric` / `boolean` / `uuid` / `timestamptz` / `date` |
+| Enum | `text` と `CHECK (列 IN (...))` |
+| `Ref[X]` | X の識別子の型 |
+| 必須の Value Object | フィールドごとの列に展開（`email.value` → `email_value`、入れ子も同様） |
+| 省略可能な Value Object・List・Entity | `jsonb`（モデルのフィールド名の JSON） |
+| `required: false` | NULL を許す |
+
+テーブルは `<context>.<aggregate>`（PostgreSQL のスキーマがコンテキスト）、主キーは識別子、楽観ロック用の `version bigint`。展開した列名が重なる（`email_value` というフィールドと `email.value`）と `column-clash`、`version` に当たるフィールドは `reserved-name`、63 文字を超える列名は `invalid-name`。
+
+### 10.3 検索のモード
+
+| mode | SQL | インデックス | 並び |
+|---|---|---|---|
+| `trigram` | `lower(列) % lower(q)`（GIN で絞る）かつ `similarity(lower(列), lower(q)) >= min_similarity`。複数の列は最大の類似度 | `USING gin (lower(列) gin_trgm_ops)` | `relevance` で類似度の高い順 |
+| `prefix` | `lower(列) LIKE <q をエスケープ> || '%'` | `(lower(列) text_pattern_ops)` | 宣言した順 |
+| `exact` | `lower(列) = lower(q)` | `(lower(列))` | 宣言した順 |
+
+### 10.4 シナリオ（生成テスト）
+
+```yaml
+scenarios:
+  - name: newest_first_across_pages
+    given:
+      aggregates:                           # 保存済みの Aggregate（type は省略時 from）。必須フィールドはすべて
+        - fields: { id: "...", email: { value: staff@example.com }, status: pending, created_at: ..., expires_at: ... }
+    when: { params: { status: pending, q: staff }, limit: 2, pages: 2 }   # すべて省略可（pages 既定 1）
+    then:
+      items: ["...", "..."]                 # 読んだ全ページの items を順番通り: 識別子、または一部のフィールド { status: pending }
+      next_cursor: absent                   # 最後に読んだページの nextCursor: present | absent
+```
+
+`then` には `items` か `next_cursor` の少なくとも一方が要る（`ambiguous-scenario`）。値はフィールドの型で検査する。`returns` に識別子がなければ、items は一部のフィールドで書く。
+
+生成されるテスト（`tests/generated/<context>-<query>.test.ts` / `test_<context>_<query>.py`）: シナリオごとのテスト（インメモリのリーダー）、`limit` の切り詰め、2件以上を返すシナリオのデータでのページングの性質（1件ずつのページの連結が1回で読んだ結果と同じ順・重複なし・欠けなし）、改ざんしたカーソルと別のパラメータで使ったカーソルの拒否。コンテキストごとに `persistence` のテスト（行との往復、楽観ロック、カーソルの署名・ローテーション・期限、trigram の類似度が pg_trgm と同じ）も生成する。
+
+## 11. 認証・認可・レート制限（`security`）
 
 トップレベルの `security` を書くと、Principal（呼び出し元）の型、Use case と Aggregate の読み取りの認可、HTTP API の認証とレート制限を生成する（決定の理由と出典は docs/09 §20、生成物とエラーの対応は docs/05 §8）。書かなければ生成物は以前とバイト単位で同じ。
 

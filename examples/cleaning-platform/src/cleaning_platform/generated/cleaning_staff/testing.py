@@ -10,15 +10,25 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from cleaning_platform.generated._persistence import QueryRequest, QueryResult, read_rows
 from cleaning_platform.generated._runtime import DomainEvent
+from cleaning_platform.generated.cleaning_staff.application.queries import (
+    SEARCH_INVITATIONS_SPEC,
+    SearchInvitationsItem,
+)
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.cleaning_staff.persistence.rows import (
+    cleaning_staff_invitation_to_row,
+    search_invitations_item_from_row,
+)
 
 __all__ = [
     "CapturingEventPublisher",
     "FakeUnitOfWork",
     "FixedClock",
     "InMemoryCleaningStaffInvitationRepository",
+    "InMemorySearchInvitationsReader",
     "SequentialIds",
     "StubExtensions",
 ]
@@ -86,6 +96,19 @@ class InMemoryCleaningStaffInvitationRepository:
 
     def _rollback(self) -> None:
         self._pending.clear()
+
+
+class InMemorySearchInvitationsReader:
+    """In-memory SearchInvitationsReader over a repository's committed aggregates, with the
+    semantics of the generated SQL.
+    """
+
+    def __init__(self, source: InMemoryCleaningStaffInvitationRepository) -> None:
+        self._source = source
+
+    def read(self, request: QueryRequest) -> QueryResult[SearchInvitationsItem]:
+        rows = [cleaning_staff_invitation_to_row(aggregate) for aggregate in self._source.all()]
+        return read_rows(SEARCH_INVITATIONS_SPEC, request, rows, search_invitations_item_from_row)
 
 
 class FixedClock:

@@ -5,6 +5,7 @@ export * from "./expr.ts";
 export * from "./checker.ts";
 export * from "./parse.ts";
 export * from "./validate.ts";
+export * from "./queries.ts";
 export * from "./usage.ts";
 export * from "./rulecheck.ts";
 export * from "./edit.ts";

@@ -1,0 +1,295 @@
+schema_version: 1
+project: member-directory
+description: Read side fixture (queries, trigram search, cursor paging, PostgreSQL persistence)
+generation:
+  package: member_directory
+
+contexts:
+  - name: Directory
+    errors:
+      - { name: MemberNotFound, code: member_not_found, message: The member does not exist }
+      - { name: MemberAlreadySuspended, code: member_already_suspended, message: The member is already suspended }
+    enums:
+      - { name: MemberStatus, values: [active, suspended, left] }
+    value_objects:
+      - name: EmailAddress
+        fields:
+          - { name: value, type: String, constraints: { min_length: 3, max_length: 254 } }
+        normalize: { value: [strip, lower] }
+      - name: Money
+        fields:
+          - { name: amount, type: Decimal, constraints: { decimal_places: 2 } }
+          - { name: currency, type: String, constraints: { min_length: 3, max_length: 3 } }
+    aggregates:
+      - name: Member
+        identity: id
+        fields:
+          - { name: id, type: UUID }
+          - { name: display_name, type: String, constraints: { min_length: 1, max_length: 100 } }
+          - { name: email, type: EmailAddress }
+          - { name: status, type: MemberStatus }
+          - { name: joined_at, type: DateTime }
+          - { name: birthday, type: Date, required: false }
+          - { name: points, type: Integer }
+          - { name: balance, type: Money }
+          - { name: nickname, type: String, required: false }
+          - { name: referrer, type: "Ref[Member]", required: false }
+          - { name: tags, type: "List[String]" }
+          - { name: badges, type: "List[Badge]" }
+          - { name: home, type: Money, required: false }
+        entities:
+          - name: Badge
+            identity: code
+            fields:
+              - { name: code, type: String }
+              - { name: awarded_at, type: DateTime }
+              - { name: prize, type: Money, required: false }
+        state_guards:
+          - name: is_active
+            expression: status == active
+            error: MemberAlreadySuspended
+        factories:
+          - name: register
+            parameters:
+              - { name: id, type: UUID }
+              - { name: display_name, type: String }
+              - { name: email, type: EmailAddress }
+              - { name: at, type: DateTime }
+            fields:
+              id: id
+              display_name: display_name
+              email: email
+              status: active
+              joined_at: at
+              points: 0
+              balance: Money(amount=0, currency="JPY")
+              tags: []
+              badges: []
+        operations:
+          - name: suspend
+            require: [is_active]
+            changes: { status: suspended }
+          - name: award
+            parameters:
+              - { name: code, type: String }
+              - { name: at, type: DateTime }
+            changes:
+              badges: append(badges, Badge(code=code, awarded_at=at))
+              points: points + 10
+
+    use_cases:
+      - name: register_member
+        command: RegisterMember
+        transaction: required
+        input:
+          - { name: display_name, type: String }
+          - { name: email, type: EmailAddress }
+        steps:
+          - create: { aggregate: Member, factory: register, as: member, args: { id: ids.new, display_name: display_name, email: email, at: clock.now } }
+          - save: member
+          - return: member.id
+        scenarios:
+          - name: member_is_registered
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              ids: ["00000000-0000-0000-0000-0000000000aa"]
+            when:
+              input: { display_name: Dana, email: { value: dana@example.com } }
+            then:
+              returns: "00000000-0000-0000-0000-0000000000aa"
+              state:
+                - aggregate: Member
+                  id: "00000000-0000-0000-0000-0000000000aa"
+                  fields: { status: active, points: 0 }
+      - name: suspend_member
+        command: SuspendMember
+        transaction: required
+        input:
+          - { name: member_id, type: UUID }
+        steps:
+          - load: { aggregate: Member, by: member_id, as: member, not_found: MemberNotFound }
+          - invoke: { target: member, operation: suspend }
+          - save: member
+        scenarios:
+          - name: active_member_is_suspended
+            given:
+              aggregates:
+                - type: Member
+                  fields: &alice
+                    id: "00000000-0000-0000-0000-000000000001"
+                    display_name: Alice Johnson
+                    email: { value: alice@example.com }
+                    status: active
+                    joined_at: "2026-01-01T09:00:00+00:00"
+                    points: 10
+                    balance: { amount: "100.50", currency: JPY }
+                    tags: [early]
+                    badges: [{ code: first, awarded_at: "2026-01-02T00:00:00+00:00", prize: { amount: "1.00", currency: JPY } }]
+            when:
+              input: { member_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              state:
+                - aggregate: Member
+                  id: "00000000-0000-0000-0000-000000000001"
+                  fields: { status: suspended }
+
+    queries:
+      - name: search_members
+        description: Members whose name or email resembles the search text, best match first
+        from: Member
+        params:
+          - { name: status, type: MemberStatus }
+          - { name: joined_after, type: DateTime }
+        where:
+          - { field: status, op: eq, param: status }
+          - { field: joined_at, op: gt, param: joined_after }
+        search: { param: q, fields: [display_name, email.value], mode: trigram, min_similarity: 0.3 }
+        order_by:
+          - relevance
+          - { field: joined_at, direction: desc }
+        page: { size: 2, max_size: 50 }
+        returns: [id, display_name, email, status, joined_at]
+        scenarios:
+          - name: without_search_newest_first
+            given:
+              aggregates: &members
+                - fields: *alice
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000002"
+                    display_name: Alicia Keys
+                    email: { value: alicia@example.org }
+                    status: active
+                    joined_at: "2026-01-03T09:00:00+00:00"
+                    birthday: "1990-05-01"
+                    points: 30
+                    balance: { amount: "5.00", currency: USD }
+                    nickname: Ali
+                    referrer: "00000000-0000-0000-0000-000000000001"
+                    tags: []
+                    badges: []
+                    home: { amount: "1.25", currency: USD }
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000003"
+                    display_name: Bob Smith
+                    email: { value: bob@example.com }
+                    status: suspended
+                    joined_at: "2026-01-02T09:00:00+00:00"
+                    points: 30
+                    balance: { amount: "0", currency: JPY }
+                    tags: [vip, early]
+                    badges: []
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000004"
+                    display_name: Alison Brie
+                    email: { value: alison@example.net }
+                    status: left
+                    joined_at: "2026-01-04T09:00:00+00:00"
+                    points: 5
+                    balance: { amount: "12.30", currency: EUR }
+                    tags: []
+                    badges: []
+                - fields:
+                    id: "00000000-0000-0000-0000-000000000005"
+                    display_name: Carol Alison
+                    email: { value: carol@example.com }
+                    status: active
+                    joined_at: "2026-01-04T09:00:00+00:00"
+                    points: 20
+                    balance: { amount: "7.00", currency: JPY }
+                    tags: []
+                    badges: []
+            when: { pages: 3 }
+            then:
+              items:
+                - "00000000-0000-0000-0000-000000000005"
+                - "00000000-0000-0000-0000-000000000004"
+                - "00000000-0000-0000-0000-000000000002"
+                - "00000000-0000-0000-0000-000000000003"
+                - "00000000-0000-0000-0000-000000000001"
+              next_cursor: absent
+          - name: status_filter_and_one_page
+            given:
+              aggregates: *members
+            when: { params: { status: active } }
+            then:
+              items:
+                - { display_name: Carol Alison, status: active }
+                - { display_name: Alicia Keys, email: { value: alicia@example.org } }
+              next_cursor: present
+          - name: search_ranks_by_similarity
+            given:
+              aggregates: *members
+            when: { params: { q: alison }, limit: 10 }
+            then:
+              items:
+                - "00000000-0000-0000-0000-000000000004"
+                - "00000000-0000-0000-0000-000000000005"
+                - "00000000-0000-0000-0000-000000000001"
+              next_cursor: absent
+
+      - name: list_members
+        description: Members who have not left, by status then most points first
+        from: Member
+        params:
+          - { name: min_points, type: Integer }
+        where:
+          - { field: status, op: ne, value: left }
+          - { field: points, op: gte, param: min_points }
+        order_by:
+          - { field: status, direction: asc }
+          - { field: points, direction: desc }
+        page: { size: 3, max_size: 10 }
+        scenarios:
+          - name: mixed_directions_page_through
+            given:
+              aggregates: *members
+            when: { limit: 1, pages: 4 }
+            then:
+              items:
+                - "00000000-0000-0000-0000-000000000002"
+                - "00000000-0000-0000-0000-000000000005"
+                - "00000000-0000-0000-0000-000000000001"
+                - "00000000-0000-0000-0000-000000000003"
+              next_cursor: absent
+          - name: minimum_points
+            given:
+              aggregates: *members
+            when: { params: { min_points: 25 } }
+            then:
+              items: ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003"]
+              next_cursor: absent
+
+      - name: members_by_name_prefix
+        from: Member
+        params:
+          - { name: currency, type: String, required: true }
+        where:
+          - { field: balance.currency, op: eq, param: currency }
+        search: { param: prefix, fields: [display_name], mode: prefix }
+        order_by:
+          - { field: display_name }
+        returns: [id, display_name, balance]
+        scenarios:
+          - name: prefix_is_case_insensitive
+            given:
+              aggregates: *members
+            when: { params: { currency: JPY, prefix: "AL" } }
+            then:
+              items: [{ display_name: Alice Johnson, balance: { amount: "100.50", currency: JPY } }]
+              next_cursor: absent
+
+      - name: member_by_email
+        from: Member
+        search: { param: email, fields: [email.value], mode: exact }
+        order_by:
+          - { field: joined_at }
+        page: { size: 1, max_size: 1 }
+        returns: [id, email, badges, tags, home, birthday, referrer, nickname, points]
+        scenarios:
+          - name: exact_match_ignores_case
+            given:
+              aggregates: *members
+            when: { params: { email: "ALICE@example.com" } }
+            then:
+              items: [{ points: 10, tags: [early] }]
+              next_cursor: absent

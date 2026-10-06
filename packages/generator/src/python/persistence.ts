@@ -1,0 +1,595 @@
+/**
+ * `generated/_persistence.py`: the model-independent read side and PostgreSQL runtime of the Python target
+ * (generated when a context declares queries). Mirrors templates/persistence.ts.txt of the TypeScript target.
+ */
+export function persistenceRuntime(runtimeModule: string): string {
+  return `from __future__ import annotations
+
+import base64
+import binascii
+import functools
+import hashlib
+import hmac
+import json
+import re
+import struct
+import time
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar
+from uuid import UUID
+
+from ${runtimeModule} import DomainError
+
+__all__ = [
+    "ConcurrencyConflict",
+    "CursorCodec",
+    "CursorKey",
+    "FilterSpec",
+    "HmacCursorCodec",
+    "InvalidCursor",
+    "KeySpec",
+    "Page",
+    "PostgresStore",
+    "QueryRequest",
+    "QueryResult",
+    "QuerySpec",
+    "QueryStatements",
+    "SearchSpec",
+    "SqlConnection",
+    "SqlCursor",
+    "SqlStatement",
+    "TableMapping",
+    "active_keys",
+    "query_fingerprint",
+    "read_rows",
+    "read_sql",
+    "rows_of",
+    "run_query",
+    "similarity",
+    "sql_json",
+    "sql_param",
+    "trigrams",
+]
+
+
+# ---------------------------------------------------------------------------
+# SQL connection and errors
+# ---------------------------------------------------------------------------
+
+
+class SqlCursor(Protocol):
+    """What \`SqlConnection.execute\` returns: rows plus the column names (a psycopg 3 cursor)."""
+
+    @property
+    def description(self) -> Sequence[Any] | None: ...
+
+    def fetchall(self) -> Sequence[Any]: ...
+
+
+class SqlConnection(Protocol):
+    """The part of a PostgreSQL driver the generated code uses (psycopg 3's synchronous
+    \`Connection\`). Statements use named placeholders (\`%(p1)s\`), each with an explicit cast.
+    """
+
+    def execute(self, query: str, params: Mapping[str, Any]) -> SqlCursor: ...
+
+
+def _column_name(column: Any) -> str:
+    name = getattr(column, "name", None)
+    return str(name if name is not None else column[0])
+
+
+def rows_of(cursor: SqlCursor) -> list[dict[str, Any]]:
+    """The rows of a cursor as dicts (tuple rows are named after \`cursor.description\`)."""
+    rows = cursor.fetchall()
+    names = [_column_name(c) for c in cursor.description or ()]
+    return [dict(r) if isinstance(r, Mapping) else dict(zip(names, r, strict=True)) for r in rows]
+
+
+class InvalidCursor(DomainError):
+    """The cursor was not made by this server for this query and these parameters (tampered,
+    expired, signed with a retired secret, or reused with other parameters). HTTP 400.
+    """
+
+    code = "invalid_cursor"
+    default_message = "The cursor is invalid for this query; start again from the first page"
+
+
+class ConcurrencyConflict(DomainError):
+    """Optimistic locking: the aggregate was changed (or created) by someone else since this
+    repository loaded it. Reload and retry the use case. HTTP 409.
+    """
+
+    code = "concurrency_conflict"
+    default_message = "The data was changed by someone else; reload and try again"
+
+
+# ---------------------------------------------------------------------------
+# Values between the model and SQL
+# ---------------------------------------------------------------------------
+
+
+def sql_json(value: object) -> object:
+    """A jsonb column as parsed JSON (some drivers return the text)."""
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def sql_param(value: object) -> object:
+    """A parameter value as SQL sends it (enums as their value)."""
+    return value.value if isinstance(value, Enum) else value
+
+
+# ---------------------------------------------------------------------------
+# Query specification, requests and pages
+# ---------------------------------------------------------------------------
+
+CursorKey: TypeAlias = str | int | float | bool
+"""A value of an order key in a cursor."""
+
+
+@dataclass(frozen=True, slots=True)
+class FilterSpec:
+    """\`column <op> param\` (an absent parameter disables the filter) or \`column <op> value\`."""
+
+    column: str
+    kind: str
+    op: str
+    param: str | None = None
+    value: object = None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchSpec:
+    param: str
+    columns: tuple[str, ...]
+    mode: str
+    min_similarity: float
+
+
+@dataclass(frozen=True, slots=True)
+class KeySpec:
+    """An order key; \`column\` None is the relevance (search score) key, active while searching."""
+
+    column: str | None
+    kind: str
+    direction: str
+
+
+@dataclass(frozen=True, slots=True)
+class QuerySpec:
+    """What a generated query declares: filters, search, order keys (identity last), page sizes."""
+
+    name: str
+    filters: tuple[FilterSpec, ...]
+    search: SearchSpec | None
+    keys: tuple[KeySpec, ...]
+    size: int
+    max_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class QueryRequest:
+    """What a reader gets: parameters, the trimmed search text (None: not searching), the keys of
+    the previous page's last row (None: first page) and the page size (already clamped).
+    """
+
+    params: Mapping[str, object]
+    search: str | None
+    after: tuple[CursorKey, ...] | None
+    limit: int
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class QueryResult(Generic[T]):
+    """One page of items and, when more rows follow, the keys of the last item."""
+
+    items: tuple[T, ...]
+    last: tuple[CursorKey, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class Page(Generic[T]):
+    """One page of a query: \`next_cursor\` fetches the next page, None at the end."""
+
+    items: tuple[T, ...]
+    next_cursor: str | None
+
+
+def active_keys(spec: QuerySpec, search: str | None) -> tuple[KeySpec, ...]:
+    """The order keys of a request (the relevance key only while searching)."""
+    searching = spec.search is not None and search is not None
+    return tuple(k for k in spec.keys if k.column is not None or searching)
+
+
+def query_fingerprint(spec: QuerySpec, params: Mapping[str, object], search: str | None) -> str:
+    """What a cursor is bound to: the query, its order, the search text and the parameters."""
+    order = [f"{k.column or 'relevance'} {k.direction}" for k in active_keys(spec, search)]
+    values = [[n, str(sql_param(params[n]))] for n in sorted(params) if params[n] is not None]
+    canonical = json.dumps([spec.name, order, search, values], separators=(",", ":"))
+    return _b64(hashlib.sha256(canonical.encode()).digest())[:22]
+
+
+class CursorCodec(Protocol):
+    """Turns the keys of a page's last row into an opaque token and back."""
+
+    def encode(self, keys: Sequence[CursorKey], fingerprint: str) -> str: ...
+
+    def decode(self, token: str, fingerprint: str) -> tuple[CursorKey, ...]: ...
+
+
+def run_query(
+    spec: QuerySpec,
+    codec: CursorCodec,
+    params: Mapping[str, object],
+    *,
+    search: str | None,
+    cursor: str | None,
+    limit: int | None,
+    read: Callable[[QueryRequest], QueryResult[T]],
+) -> Page[T]:
+    """Runs a query: trims the search text (blank = no search), clamps the limit to the
+    query's maximum, checks and decodes the cursor, reads and encodes the next cursor.
+    """
+    text = (search or "").strip()
+    searching = text if spec.search is not None and text else None
+    size = min(limit if limit is not None else spec.size, spec.max_size)
+    fingerprint = query_fingerprint(spec, params, searching)
+    after: tuple[CursorKey, ...] | None = None
+    if cursor:
+        after = codec.decode(cursor, fingerprint)
+        if len(after) != len(active_keys(spec, searching)):
+            raise InvalidCursor(reason="mismatch")
+    result = read(QueryRequest(params=params, search=searching, after=after, limit=size))
+    next_cursor = None if result.last is None else codec.encode(result.last, fingerprint)
+    return Page(items=result.items, next_cursor=next_cursor)
+
+
+# ---------------------------------------------------------------------------
+# Cursors: opaque, URL-safe, signed (HMAC-SHA256), bound to the query's fingerprint
+# ---------------------------------------------------------------------------
+
+_CURSOR_VERSION = 1
+_MAX_CURSOR_LENGTH = 4096
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+class HmacCursorCodec:
+    """\`base64url(JSON {v, keys, fp, exp?})\` + "." + \`base64url(HMAC-SHA256(secret, payload))\`.
+
+    Tokens are signed with the first secret and accepted with any of them (rotation: put the new
+    secret first, remove the old one once no client can hold a cursor signed with it).
+    \`ttl_seconds\` makes cursors expire (default: they do not).
+    """
+
+    def __init__(
+        self,
+        secrets: Sequence[str],
+        *,
+        ttl_seconds: int | None = None,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        if not secrets:
+            raise ValueError("HmacCursorCodec needs at least one secret")
+        if any(len(s) < 32 for s in secrets):
+            raise ValueError("Cursor secrets must be at least 32 characters long")
+        self._secrets = tuple(secrets)
+        self._ttl_seconds = ttl_seconds
+        self._now = now
+
+    def encode(self, keys: Sequence[CursorKey], fingerprint: str) -> str:
+        payload: dict[str, object] = {"v": _CURSOR_VERSION, "keys": list(keys), "fp": fingerprint}
+        if self._ttl_seconds is not None:
+            payload["exp"] = int(self._now()) + self._ttl_seconds
+        body = _b64(json.dumps(payload, separators=(",", ":")).encode())
+        return f"{body}.{_sign(self._secrets[0], body)}"
+
+    def decode(self, token: str, fingerprint: str) -> tuple[CursorKey, ...]:
+        parts = token.split(".")
+        if len(token) > _MAX_CURSOR_LENGTH or len(parts) != 2 or not all(parts):
+            raise InvalidCursor(reason="malformed")
+        body, signature = parts
+        if not any(hmac.compare_digest(_sign(s, body), signature) for s in self._secrets):
+            raise InvalidCursor(reason="signature")
+        try:
+            payload = json.loads(_unb64(body))
+        except (ValueError, binascii.Error) as exc:
+            raise InvalidCursor(reason="malformed") from exc
+        keys = payload.get("keys") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("v") != _CURSOR_VERSION
+            or not isinstance(keys, list)
+            or not all(isinstance(k, (str, int, float, bool)) for k in keys)
+        ):
+            raise InvalidCursor(reason="malformed")
+        exp = payload.get("exp")
+        if exp is not None and (not isinstance(exp, int) or exp <= self._now()):
+            raise InvalidCursor(reason="expired")
+        if payload.get("fp") != fingerprint:
+            raise InvalidCursor(reason="mismatch")
+        return tuple(keys)
+
+
+def _sign(secret: str, body: str) -> str:
+    return _b64(hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest())
+
+
+# ---------------------------------------------------------------------------
+# Trigram similarity (pg_trgm)
+# ---------------------------------------------------------------------------
+
+_WORD = re.compile(r"[^\\W_]+")
+
+
+def trigrams(text: str) -> set[str]:
+    """The trigrams of \`text\` as pg_trgm extracts them: lower case, words are runs of letters and
+    digits, each padded with two spaces before and one after.
+    """
+    out: set[str] = set()
+    for word in _WORD.findall(text.lower()):
+        padded = f"  {word} "
+        out.update(padded[i : i + 3] for i in range(len(padded) - 2))
+    return out
+
+
+def _float32(value: float) -> float:
+    return float(struct.unpack("f", struct.pack("f", value))[0])
+
+
+def similarity(a: str, b: str) -> float:
+    """pg_trgm's \`similarity(a, b)\` as the float4 PostgreSQL computes (0 without trigrams)."""
+    x = trigrams(a)
+    y = trigrams(b)
+    if not x or not y:
+        return 0.0
+    shared = len(x & y)
+    return _float32(shared / (len(x) + len(y) - shared))
+
+
+# ---------------------------------------------------------------------------
+# Ordering and filtering (the in-memory readers; the SQL does the same in the database)
+# ---------------------------------------------------------------------------
+
+
+def _compare(a: Any, b: Any) -> int:
+    return int((a > b) - (a < b))
+
+
+def _key_value(kind: str, key: CursorKey) -> object:
+    """A cursor key (JSON) as the value it was made from."""
+    match kind:
+        case "uuid":
+            return UUID(str(key))
+        case "instant":
+            return datetime.fromisoformat(str(key))
+        case "date":
+            return date.fromisoformat(str(key))
+        case "decimal":
+            return Decimal(str(key))
+        case _:
+            return key
+
+
+def _key_json(value: object) -> CursorKey:
+    """A key value for a cursor (JSON)."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (UUID, Decimal)):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+_OPS: dict[str, Callable[[int], bool]] = {
+    "eq": lambda c: c == 0,
+    "ne": lambda c: c != 0,
+    "lt": lambda c: c < 0,
+    "lte": lambda c: c <= 0,
+    "gt": lambda c: c > 0,
+    "gte": lambda c: c >= 0,
+}
+
+
+def _matches(f: FilterSpec, row: Mapping[str, object], params: Mapping[str, object]) -> bool:
+    value = f.value if f.param is None else sql_param(params.get(f.param))
+    if value is None:
+        return f.param is not None
+    cell = row.get(f.column)
+    return cell is not None and _OPS[f.op](_compare(cell, value))
+
+
+def _score(search: SearchSpec, row: Mapping[str, object], text: str) -> float | None:
+    q = text.lower()
+    best: float | None = None
+    for column in search.columns:
+        cell = row.get(column)
+        if not isinstance(cell, str):
+            continue
+        value = cell.lower()
+        if search.mode == "trigram":
+            s = similarity(value, q)
+            best = s if best is None else max(best, s)
+        elif value.startswith(q) if search.mode == "prefix" else value == q:
+            best = 0.0
+    if best is None or (search.mode == "trigram" and best < search.min_similarity):
+        return None
+    return best
+
+
+_Candidate: TypeAlias = tuple[Mapping[str, object], tuple[object, ...]]
+
+
+def read_rows(
+    spec: QuerySpec,
+    request: QueryRequest,
+    rows: Iterable[Mapping[str, object]],
+    to_item: Callable[[Mapping[str, object]], T],
+) -> QueryResult[T]:
+    """A query over rows in memory with the semantics of the generated SQL: filters, search,
+    order (relevance first while searching), keyset after the cursor, one extra row.
+    """
+    keys = active_keys(spec, request.search)
+    candidates: list[_Candidate] = []
+    for row in rows:
+        if not all(_matches(f, row, request.params) for f in spec.filters):
+            continue
+        relevance = 0.0
+        if spec.search is not None and request.search is not None:
+            s = _score(spec.search, row, request.search)
+            if s is None:
+                continue
+            relevance = s
+        key = tuple(relevance if k.column is None else row[k.column] for k in keys)
+        candidates.append((row, key))
+
+    def order(a: tuple[object, ...], b: tuple[object, ...]) -> int:
+        for k, x, y in zip(keys, a, b, strict=True):
+            c = _compare(x, y)
+            if c:
+                return c if k.direction == "asc" else -c
+        return 0
+
+    def by_key(a: _Candidate, b: _Candidate) -> int:
+        return order(a[1], b[1])
+
+    candidates.sort(key=functools.cmp_to_key(by_key))
+    rest = candidates
+    if request.after is not None:
+        after = tuple(_key_value(k.kind, v) for k, v in zip(keys, request.after, strict=True))
+        rest = [c for c in candidates if order(c[1], after) > 0]
+    page = rest[: request.limit]
+    last = tuple(_key_json(v) for v in page[-1][1]) if len(rest) > request.limit else None
+    return QueryResult(items=tuple(to_item(row) for row, _ in page), last=last)
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL: query readers and repositories
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SqlStatement:
+    """A generated statement and its bound values in placeholder order: ("param", name),
+    ("value", literal), ("search", None), ("key", index) or ("limit", None).
+    """
+
+    text: str
+    args: tuple[tuple[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QueryStatements:
+    first: SqlStatement
+    next: SqlStatement
+    search_first: SqlStatement | None = None
+    search_next: SqlStatement | None = None
+
+
+def read_sql(
+    connection: SqlConnection,
+    spec: QuerySpec,
+    statements: QueryStatements,
+    request: QueryRequest,
+    to_item: Callable[[Mapping[str, object]], T],
+) -> QueryResult[T]:
+    """Runs the statement for the request and reads one page (keys come back as _k0, _k1, …)."""
+    searching = spec.search is not None and request.search is not None
+    after = request.after
+    if searching:
+        statement = statements.search_first if after is None else statements.search_next
+    else:
+        statement = statements.first if after is None else statements.next
+    if statement is None:
+        raise ValueError(f"Query {spec.name} has no search statement")
+
+    def bound(kind: str, arg: object) -> object:
+        match kind:
+            case "param":
+                return sql_param(request.params.get(str(arg)))
+            case "value":
+                return arg
+            case "search":
+                return request.search
+            case "key":
+                return None if after is None else after[int(str(arg))]
+            case _:
+                return request.limit + 1
+
+    params = {f"p{i + 1}": bound(kind, arg) for i, (kind, arg) in enumerate(statement.args)}
+    rows = rows_of(connection.execute(statement.text, params))
+    page = rows[: request.limit]
+    count = len(active_keys(spec, request.search))
+    last = None
+    if len(rows) > request.limit and page:
+        last = tuple(str(page[-1][f"_k{i}"]) for i in range(count))
+    return QueryResult(items=tuple(to_item(row) for row in page), last=last)
+
+
+A = TypeVar("A")
+K = TypeVar("K", bound=Hashable)
+
+
+@dataclass(frozen=True, slots=True)
+class TableMapping(Generic[A, K]):
+    """How one aggregate maps to its table (generated per aggregate)."""
+
+    aggregate: str
+    select: str
+    insert: str
+    update: str
+    identity: Callable[[A], K]
+    to_values: Callable[[A], Sequence[object]]
+    from_row: Callable[[Mapping[str, Any]], A]
+
+
+class PostgresStore(Generic[A, K]):
+    """Loads and saves aggregates with optimistic locking.
+
+    The aggregate stays immutable: the store remembers the version of every aggregate it loaded
+    or saved, so use one store (repository) per unit of work. Saving an aggregate it did not load
+    inserts it; a lost race (the row changed or already exists) raises ConcurrencyConflict.
+    """
+
+    def __init__(self, connection: SqlConnection, mapping: TableMapping[A, K]) -> None:
+        self._connection = connection
+        self._mapping = mapping
+        self._versions: dict[K, int] = {}
+
+    def get(self, identity: K) -> A | None:
+        rows = rows_of(self._connection.execute(self._mapping.select, {"p1": identity}))
+        if not rows:
+            return None
+        aggregate = self._mapping.from_row(rows[0])
+        self._versions[self._mapping.identity(aggregate)] = int(rows[0]["version"])
+        return aggregate
+
+    def save(self, aggregate: A) -> None:
+        identity = self._mapping.identity(aggregate)
+        values = self._mapping.to_values(aggregate)
+        params: dict[str, object] = {f"p{i + 1}": v for i, v in enumerate(values)}
+        expected = self._versions.get(identity)
+        if expected is None:
+            rows = rows_of(self._connection.execute(self._mapping.insert, params))
+        else:
+            params[f"p{len(values) + 1}"] = expected
+            rows = rows_of(self._connection.execute(self._mapping.update, params))
+        if not rows:
+            raise ConcurrencyConflict(aggregate=self._mapping.aggregate, id=identity)
+        self._versions[identity] = int(rows[0]["version"])
+`;
+}

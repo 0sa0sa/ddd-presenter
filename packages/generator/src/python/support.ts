@@ -135,6 +135,12 @@ export class Code {
     return this;
   }
 
+  /** A line exactly as given (no indentation), e.g. the continuation of a triple-quoted string. */
+  raw(s: string): this {
+    this.lines.push(s);
+    return this;
+  }
+
   indent(fn: () => void): this {
     this.depth++;
     fn();

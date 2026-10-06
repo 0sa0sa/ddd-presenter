@@ -320,6 +320,7 @@ describe("expressions", () => {
     extensionPoints: [],
     useCases: [],
     policies: [],
+    queries: [],
     path: [],
   };
   const env = () =>
@@ -564,7 +565,7 @@ ${failStep}          - invoke: { target: order, operation: place }
   });
 
   test("evaluation over scenario values follows Python semantics for the generated operators", () => {
-    const ctx: ContextIR = { name: "X", glossary: [], errors: [], enums: [{ name: "Status", values: ["draft", "placed"], path: [] }], valueObjects: [], aggregates: [], extensionPoints: [], useCases: [], policies: [], path: [] };
+    const ctx: ContextIR = { name: "X", glossary: [], errors: [], enums: [{ name: "Status", values: ["draft", "placed"], path: [] }], valueObjects: [], aggregates: [], extensionPoints: [], useCases: [], policies: [], queries: [], path: [] };
     const fields = new Map<string, Type>([
       ["status", { k: "enum", name: "Status" }],
       ["total", T.Integer],

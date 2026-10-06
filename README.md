@@ -144,7 +144,7 @@ queryClient.invalidateQueries({ queryKey: [{ scope: "cleaning-staff" }] }); // �
 
 #### 認証・認可・レート制限（`security`、オプトイン）
 
-モデルに `security` を書くと、Principal（呼び出し元）の型、Use case と読み取りの認可（ロールは何も読み込む前、`allow_if` は読み込んだ Aggregate に対して変更の前）、HTTP API の bearer JWT 認証（jose / PyJWT、RFC 8725）とトークンバケットのレート制限（429 と IETF の RateLimit ヘッダー）を生成する。書くと既定は拒否で、すべての Use case と Aggregate に `authorize` が要る（[docs/10 §10](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §20](docs/09-implementation-decisions.md)）。
+モデルに `security` を書くと、Principal（呼び出し元）の型、Use case と読み取りの認可（ロールは何も読み込む前、`allow_if` は読み込んだ Aggregate に対して変更の前）、HTTP API の bearer JWT 認証（jose / PyJWT、RFC 8725）とトークンバケットのレート制限（429 と IETF の RateLimit ヘッダー）を生成する。書くと既定は拒否で、すべての Use case と Aggregate に `authorize` が要る（[docs/10 §11](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §20](docs/09-implementation-decisions.md)）。
 
 ```yaml
 security:
@@ -183,6 +183,41 @@ export const queryClient = new QueryClient({ defaultOptions: { queries: { retry:
 ```
 
 Python（HTTP 層は生成しない）は `generated/security.py`（Principal・NotAuthorized・`RATE_LIMITS`）、`generated/rate_limit.py`（`RateLimiter`）、`generated/authentication.py`（PyJWT の `BearerJwtAuthenticator`）を FastAPI などの依存関数から使う（例は docs/05 §8）。依存に `pyjwt[crypto]` を足す。
+
+### 一覧・trigram 検索・ページング（`queries:`）
+
+コンテキストに `queries:` を書くと、読み取り側（CQRS の Query）を両方の target で生成する: 入力の検証、pg_trgm の trigram 検索（`prefix` / `exact` も可）、OFFSET を使わないキーセット方式のページング、HMAC-SHA256 で署名したトークン（カーソル）。クエリを宣言したコンテキストには PostgreSQL のスキーマ（`sql/<context>.sql`）、楽観ロック付きのリポジトリとリーダー、インメモリのリーダー（テスト用）も生成する。DSL は [docs/10 §10](docs/10-dsl-reference.md)、契約は [docs/05 §9](docs/05-generation-and-architecture.md)、決定と出典は [docs/09 §19](docs/09-implementation-decisions.md)。
+
+```yaml
+    queries:
+      - name: search_invitations
+        from: CleaningStaffInvitation
+        params: [{ name: status, type: InvitationStatus }]          # 省略可能（省略するとフィルタは効かない）
+        where: [{ field: status, op: eq, param: status }]
+        search: { param: q, fields: [email.value], mode: trigram, min_similarity: 0.3 }
+        order_by: [relevance, { field: created_at, direction: desc }]   # id が最後の決め手として自動で付く
+        page: { size: 20, max_size: 100 }
+```
+
+```ts
+// サーバー: PostgreSQL（node-postgres の Pool / PGlite がそのまま SqlClient になる）。sql/cleaning_staff.sql を適用しておく
+const cursors = new HmacCursorCodec({ secrets: [process.env.CURSOR_SECRET!] }); // 新しい秘密を先頭に足すとローテーション
+const searchInvitations = new SearchInvitationsQuery({ reader: new PostgresSearchInvitationsReader(pool), cursors });
+const page = await searchInvitations.execute({ q: "staff", status: "pending", limit: 20 }); // { items, nextCursor }
+await searchInvitations.execute({ q: "staff", status: "pending", cursor: page.nextCursor }); // 次のページ（別のパラメータでは InvalidCursor）
+// HTTP: GET /api/cleaning-staff/queries/search-invitations?q=staff&status=pending&cursor=…&limit=20（不正なカーソルは 400 invalid_cursor）
+createApiHandler({ cleaningStaff: { queries: { searchInvitations } } });
+
+// クライアント: infiniteQueryOptions（キーは lists() の下なので、招待を保存するミューテーションが無効化する）
+const { data, fetchNextPage, hasNextPage } = useInfiniteQuery(queries.cleaningStaff.cleaningStaffInvitation.searchInvitations({ q, status }));
+```
+
+```python
+# Python: psycopg 3 の同期 Connection がそのまま SqlConnection になる
+query = SearchInvitationsQuery(reader=PostgresSearchInvitationsReader(conn), cursors=HmacCursorCodec([secret]))
+page = query.execute(SearchInvitationsInput(q="staff", status=InvitationStatus.PENDING))
+repository = PostgresCleaningStaffInvitationRepository(conn)  # 作業単位ごとに1つ。古い版を保存すると ConcurrencyConflict
+```
 
 ### VS Code 拡張
 
@@ -256,13 +291,17 @@ src/<package>/
     <context>/domain/{errors,enums,value_objects,entities,aggregates,events,commands,rules}.py
     <context>/application/{ports,use_cases}.py
     <context>/application/policies.py   # ポリシーのハンドラと subscriptions()（ポリシーがあるコンテキストだけ）
-    <context>/testing.py           # In-memory の Repository / Clock / Publisher / UnitOfWork
+    <context>/application/queries.py    # クエリの入力・項目・リーダーのポート・Query（queries: があるコンテキストだけ）
+    <context>/persistence/{rows,postgres}.py  # 行との対応、PostgreSQL のリポジトリ（楽観ロック）とリーダー（同上）
+    _persistence.py                # カーソル（HMAC）・キーセット・pg_trgm の類似度・楽観ロック（queries: があるときだけ）
+    <context>/testing.py           # In-memory の Repository / Clock / Publisher / UnitOfWork（と In-memory のリーダー）
     <context>/README.md            # ルール・適用箇所・テストの対応表
     model_manifest.json            # モデルhash・生成器版・各ファイルのsha256
   extensions/<context>/extensions.py   # 初回のみ作成。以後はあなたのコード
   extensions/<context>/translators.py  # anticorruption_layer の翻訳層。初回のみ作成
 tests/generated/test_<context>_<name>.py
 tests/generated/test_<context>_policies.py
+sql/<context>.sql                    # queries: があるコンテキストの PostgreSQL のスキーマ（両 target で同じ）
 ```
 
 `target: typescript` のとき:
@@ -278,6 +317,9 @@ src/<package>/
     index.ts                       # runtime と、コンテキストごとの名前空間
     <context>/domain/{errors,enums,value-objects,entities,aggregates,events,commands,rules}.ts
     <context>/application/{ports,use-cases,policies}.ts
+    <context>/application/queries.ts        # queries: があるコンテキストだけ（下の2つと persistence.ts も）
+    <context>/persistence/{rows,postgres}.ts
+    persistence.ts
     <context>/testing.ts, index.ts, README.md
     model_manifest.json
   extensions/<context>/extensions.ts   # 初回のみ作成。以後はあなたのコード

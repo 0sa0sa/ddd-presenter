@@ -10,6 +10,13 @@ import { emitExpr, Imports } from "../src/python/support.ts";
 const EXAMPLE = join(import.meta.dir, "../../../examples/cleaning-platform");
 const MODEL = readFileSync(join(EXAMPLE, "model.ddd.yaml"), "utf8");
 
+/** The model without its revoke_invitation use case (the last use case of CleaningStaff, before its queries). */
+function withoutRevoke(text: string): string {
+  const start = text.indexOf("      - name: revoke_invitation");
+  const ends = ["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
+  return text.slice(0, start) + text.slice(Math.min(...ends) + 1);
+}
+
 function generate(text = MODEL) {
   const r = validateModelText(text);
   if (!r.ok) throw new Error(JSON.stringify(r.diagnostics, null, 2));
@@ -84,7 +91,7 @@ describe("plan", () => {
   });
 
   test("model changes: removed symbols are reported; an untouched stale generated test is deleted, an edited one blocks", () => {
-    const text = MODEL.slice(0, MODEL.indexOf("      - name: revoke_invitation")) + MODEL.slice(MODEL.indexOf("\n  - name: Staffing") + 1);
+    const text = withoutRevoke(MODEL);
     const next = generate(text);
     const d = disk();
     const plan = computePlan(next, out.manifest, (p) => d.get(p));
@@ -131,6 +138,7 @@ describe("expression emission", () => {
     extensionPoints: [],
     useCases: [],
     policies: [],
+    queries: [],
     path: [],
   };
   const env = makeEnv(ctx, {
@@ -212,6 +220,9 @@ const ORDERING = readFileSync(join(import.meta.dir, "fixtures/ordering.ddd.yaml"
 const LONG_RULES = readFileSync(join(import.meta.dir, "fixtures/long-rules.ddd.yaml"), "utf8");
 /** Roles, a typed principal with claims, bearer JWT, rate limits; public, internal and role / rule protected use cases. */
 const SECURITY = readFileSync(join(import.meta.dir, "fixtures/security.ddd.yaml"), "utf8");
+
+/** Queries (read side) and the PostgreSQL adapters (their SQL is exercised on PGlite by queries.test.ts). */
+const QUERIES = readFileSync(join(import.meta.dir, "fixtures/queries.ddd.yaml"), "utf8");
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -226,6 +237,8 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the ordering model (arithmetic, durations, collection functions, constructors, let)", ORDERING],
     ["the long-rules model (wrapped invariants, guards, emits conditions and use-case conditions must still fire)", LONG_RULES],
     ["the security model (roles, allow_if, public / internal use cases, PyJWT authenticator, rate limiter)", SECURITY],
+
+    ["the queries model (trigram / prefix / exact search, keyset paging, cursors, PostgreSQL mapping without a database)", QUERIES],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -281,6 +294,8 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
     ["the ordering model", ORDERING],
     ["the long-rules model", LONG_RULES],
     ["the security model", SECURITY],
+
+    ["the queries model", QUERIES],
     ["a model reflected from the discovery board", FROM_BOARD],
   ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));

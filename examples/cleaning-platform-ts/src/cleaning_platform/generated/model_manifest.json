@@ -3,8 +3,12 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "9d20747997ab8e011136e57bbef266fd4c5a1caf72e36c987f86e721b4993452",
+  "model_sha256": "7aa24d8c5c0652d17ccbff5895ae4018dc5b71a20d1b9fdc28565e60028338c1",
   "files": [
+    {
+      "path": "sql/cleaning_staff.sql",
+      "sha256": "81813c23419a04c8945398e50966975b53ba8b709704c1fdf4670e49a286f7d3"
+    },
     {
       "path": "src/cleaning_platform/generated/adapters.ts",
       "sha256": "005ddffe00c1bcc6fbaa38ef9eed7cb26506f4915c153003b5b5981a0d1ac725"
@@ -15,7 +19,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/client.ts",
-      "sha256": "69edf44b9f6b211a819523bc3e7cb31e5f6754149f65964ccc393d2aff44ba67"
+      "sha256": "e1f7b84cea33c0e6944a9c10e84ded79d3a3a8ee46cc00351eaf3f77c9697c57"
     },
     {
       "path": "src/cleaning_platform/generated/api/contract.ts",
@@ -24,6 +28,10 @@
     {
       "path": "src/cleaning_platform/generated/api/queries.ts",
       "sha256": "33fba964656131d56c912f0f0df2a473d3168a8b1bb13c5951b368cd5f204de4"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/query-runtime.ts",
+      "sha256": "1c63f946f9dfb06e15815ca40850cadc07d43f4cdd15bcd9bcf294afbe5e7b03"
     },
     {
       "path": "src/cleaning_platform/generated/api/rate-limit.ts",
@@ -35,23 +43,27 @@
     },
     {
       "path": "src/cleaning_platform/generated/api/runtime.ts",
-      "sha256": "a1da54480f2e4643661a5a3ea24a0b5e2828d9ac556d5d87a3b9f9125b65f7f1"
+      "sha256": "ec418fb21e4b4a2ffa7b148c57313da9c6244bd124bd5d702514e87868e70f34"
     },
     {
       "path": "src/cleaning_platform/generated/api/server.ts",
-      "sha256": "2bc17bca70cfc595b5448a7246200d77359202c3e700d31cff5a2bb1b40a3a9a"
+      "sha256": "48e90c881ebda3ab1599f2fc935c56820f26ef790d8ceb1a768f0fc6b7e372f2"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/contract.ts",
-      "sha256": "024d1fc27c10d0a44b0aae615f7f8a1b38a93a1fcb45eb66a451c45882735753"
+      "sha256": "33d62f158836f02e8cb06c0f70b2b671d2150661be81bd85d62ae9abde3d5db0"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/queries.ts",
-      "sha256": "44b8a7e8be99d2fa0c5e00dc0759370ac6e2002605f6e03742e6b905f91c01d5"
+      "sha256": "da28231090d802f258bacd18c775501f832a796b4057cbf86fd6eabce7956b81"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/ports.ts",
       "sha256": "3770f0e0d3a1b322890ecdc153b47014bd8ddb43fd06f128d6fae4cde1bb24a7"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning-staff/application/queries.ts",
+      "sha256": "e733f2c001f2e4aca4ecc59a3f6d49ab5eeb2e240ac6c93772bea82d25665797"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/application/read-access.ts",
@@ -95,7 +107,15 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/index.ts",
-      "sha256": "a65938a5970b6644465bb6ed36628b9d906333362fac448e4854bc1938c9e463"
+      "sha256": "ecde6468e7ba4cd295c9746977a5763420dbb353ed621a75782f9f2f7d4be02f"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning-staff/persistence/postgres.ts",
+      "sha256": "9b8386e35f03f239b6d758dc17a7f9ade95fdb769579f0675aa1840ac6fe4667"
+    },
+    {
+      "path": "src/cleaning_platform/generated/cleaning-staff/persistence/rows.ts",
+      "sha256": "bdebdabe75252a04056fe1daecdd37bdc855f3ff58373124d20ef82f73c299d0"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/README.md",
@@ -103,11 +123,15 @@
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/testing.ts",
-      "sha256": "53c02fecfd467bfdd17a0ff51db0f655800008fe11c1b0a0c81e062893014d79"
+      "sha256": "0c0af3afba6eada1be55466bac22c45928e971dc87ffa3fc23809b1d251e63d5"
     },
     {
       "path": "src/cleaning_platform/generated/index.ts",
       "sha256": "d9f82e21192ec7ef76cf3b06a744bbe8a5aa7003f2137e80dcabdbb6b6056312"
+    },
+    {
+      "path": "src/cleaning_platform/generated/persistence.ts",
+      "sha256": "8fd0005335d3eda189de8a15361c90079f0dd87697f53600995646ebd9c40994"
     },
     {
       "path": "src/cleaning_platform/generated/runtime.ts",
@@ -195,7 +219,7 @@
     },
     {
       "path": "tests/generated/cleaning-staff-api.test.ts",
-      "sha256": "ec331526b04decc5e5f71fcb5416b99b247c44977e334be586aba8019bb2bc61"
+      "sha256": "1aca7a7deed0758a5ac87583f3c7e0f95df8d69d762e57e4b4b62573504dea03"
     },
     {
       "path": "tests/generated/cleaning-staff-cleaning-staff-invitation.test.ts",
@@ -210,8 +234,16 @@
       "sha256": "98152580575cf6e76da8b80e47d1bf3ddbc4a9a07ad10a56fad6c92e847057ca"
     },
     {
+      "path": "tests/generated/cleaning-staff-persistence.test.ts",
+      "sha256": "c16b8b15d791fee077234921828a6bb3c5136b764a6d634807a1640bca234f84"
+    },
+    {
       "path": "tests/generated/cleaning-staff-revoke-invitation.test.ts",
       "sha256": "28cd52dfcf65d51e1dd042df4e4fc0e4e6457a0dcd3daa2a59d27c3a976a79e9"
+    },
+    {
+      "path": "tests/generated/cleaning-staff-search-invitations.test.ts",
+      "sha256": "c36c2c251407c6bc1f0f4c53eae28c13210f5c916f75b5a3e650d0e0d1fdceff"
     },
     {
       "path": "tests/generated/security.test.ts",

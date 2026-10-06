@@ -45,6 +45,10 @@ export class TsPaths {
   apiContext(context: string, name: string): string {
     return `${this.contextBase(context)}/api/${name}`;
   }
+  /** Model-independent read side and PostgreSQL runtime (generated when a context declares queries). */
+  get persistenceRuntime(): string {
+    return `${this.generated}/persistence`;
+  }
   /** Module path → file path. */
   file(module: string): string {
     return `${module}.ts`;
@@ -80,6 +84,18 @@ export class TsLayout extends TsPaths {
   /** Authorized loading of aggregates by identity (`authorize` on aggregates). */
   get readAccess(): string {
     return `${this.base}/application/read-access`;
+  }
+  /** Queries (read side) of the context: inputs, items, specs, reader ports, query services. */
+  get queries(): string {
+    return `${this.base}/application/queries`;
+  }
+  /** Aggregate ↔ row mapping and query item decoders. */
+  get rows(): string {
+    return `${this.base}/persistence/rows`;
+  }
+  /** PostgreSQL repositories and readers. */
+  get postgres(): string {
+    return `${this.base}/persistence/postgres`;
   }
   get contextTesting(): string {
     return `${this.base}/testing`;

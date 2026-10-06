@@ -32,6 +32,7 @@ import {
   requiresPrincipal,
   SECURITY_TYPE_NAMES,
 } from "./security.ts";
+import { checkQueries } from "./queries.ts";
 import { assignable, closest, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -712,6 +713,7 @@ class ContextValidator {
       this.checkDuplicateSnake(uc.scenarios.map((s) => ({ name: s.name, path: [...s.path, "name"] })), "scenario", this.el(uc.name));
       for (const sc of uc.scenarios) this.checkUseCaseScenario(uc, sc);
     }
+    checkQueries(this);
     return { ir: this.ctx, fieldTypes: this.fieldTypes, exprs: this.exprs, events: this.events, useCases: this.useCases, policies: this.policies };
   }
 

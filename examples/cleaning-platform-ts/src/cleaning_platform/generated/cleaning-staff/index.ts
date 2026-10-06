@@ -18,3 +18,4 @@ export * from "./domain/rules.js";
 export * from "./application/ports.js";
 export * from "./application/use-cases.js";
 export * from "./application/read-access.js";
+export * from "./application/queries.js";

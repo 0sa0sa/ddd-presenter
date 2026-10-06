@@ -236,7 +236,10 @@ describe("generation preview", () => {
     expect(first.body.files.length).toBeGreaterThan(20);
     expect(first.body.plan.every((e: any) => e.action === "create")).toBe(true);
 
-    const changed = SAMPLE.slice(0, SAMPLE.indexOf("      - name: revoke_invitation")) + SAMPLE.slice(SAMPLE.indexOf("\n  - name: Staffing") + 1);
+    // Drop the revoke_invitation use case only (it is followed by the context's queries, then Staffing).
+    const start = SAMPLE.indexOf("      - name: revoke_invitation");
+    const end = Math.min(...["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => SAMPLE.indexOf(m, start)).filter((i) => i > start));
+    const changed = SAMPLE.slice(0, start) + SAMPLE.slice(end + 1);
     await s.json("PUT", `/api/projects/${project}/model`, { yaml: changed, base_version: 1 });
     const second = await s.json("GET", `/api/projects/${project}/preview`);
     expect(second.body.base_version).toBe(1);

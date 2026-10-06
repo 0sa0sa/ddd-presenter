@@ -16,7 +16,7 @@ export const EVENT_UNION = "AnyEvent";
 // shared helpers
 // ---------------------------------------------------------------------------
 
-function fieldArgs(c: Constraints): string[] {
+export function fieldArgs(c: Constraints): string[] {
   const out: string[] = [];
   if (c.min_length !== undefined) out.push(`min_length=${c.min_length}`);
   if (c.max_length !== undefined) out.push(`max_length=${c.max_length}`);
@@ -35,7 +35,7 @@ function pyRaw(s: string): string {
   return pyString(s);
 }
 
-function fieldLines(L: Layout, owner: string, fields: FieldIR[], imp: Imports): string[] {
+export function fieldLines(L: Layout, owner: string, fields: FieldIR[], imp: Imports): string[] {
   const types = L.fieldTypes(owner);
   const lines: string[] = [];
   for (const f of fields) {

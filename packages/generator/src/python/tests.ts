@@ -3,6 +3,7 @@ import { depParams, repoAttr, resolveReturn, useCaseAuthorization, useCaseDeps }
 import { securityModule } from "./security.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
+import { pyInMemoryReaders } from "./queries.ts";
 import { assertEquals, Code, Imports, pascal, pyString, pyType, pyValue, type ValueContext } from "./support.ts";
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,9 @@ export function testingFile(L: Layout): PyFile {
       c.indent(() => c.line("self._pending.clear()"));
     });
   }
+
+  // In-memory readers of the context's queries (none without queries: the file stays as before).
+  pyInMemoryReaders(L, c, imp);
 
   if (L.ca.ir.useCases.some((u) => u.idempotencyKey)) {
     imp.from(L.ports, "RecordedResult");

@@ -31,6 +31,22 @@ export class Layout {
   get policies(): string {
     return `${this.base}.application.policies`;
   }
+  /** Queries (read side): inputs, items, specs, reader ports, query services (contexts with queries). */
+  get queries(): string {
+    return `${this.base}.application.queries`;
+  }
+  /** Aggregate ↔ row mapping and query item decoders. */
+  get rows(): string {
+    return `${this.base}.persistence.rows`;
+  }
+  /** PostgreSQL repositories and readers. */
+  get postgres(): string {
+    return `${this.base}.persistence.postgres`;
+  }
+  /** Model-independent read side and PostgreSQL runtime. */
+  get persistenceRuntime(): string {
+    return `${this.pkg}.generated._persistence`;
+  }
   /** Events module of any context of the model (upstream events are imported from here). */
   eventsOf(context: string): string {
     return `${this.pkg}.generated.${toSnake(context)}.domain.events`;
@@ -115,7 +131,12 @@ export function assemble(model: ModelIR, doc: string | undefined, imports: Impor
 /** Top-level classes, functions and assignments of a module body that do not start with an underscore. */
 export function publicNames(body: string): string[] {
   const names = new Set<string>();
+  let inString = false;
   for (const line of body.split("\n")) {
+    // Lines inside a multi-line string (e.g. generated SQL) are not code.
+    const wasInString = inString;
+    if ((line.match(/"""/g) ?? []).length % 2 === 1) inString = !inString;
+    if (wasInString) continue;
     const m = /^(?:class |def )?([A-Za-z]\w*)\s*(?:[(:]|=(?!=))/.exec(line);
     if (m && !/^(?:if|for|while|with|try|except|else|elif|return|raise|assert|import|from)$/.test(m[1]!)) names.add(m[1]!);
   }

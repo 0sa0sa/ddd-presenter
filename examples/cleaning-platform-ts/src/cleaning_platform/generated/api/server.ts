@@ -6,11 +6,13 @@
  * repositories.
  */
 
+import * as cleaningStaffQueries from "../cleaning-staff/application/queries.js";
 import * as cleaningStaff from "../cleaning-staff/index.js";
 import type { Awaitable } from "../runtime.js";
 import type { Principal } from "../security.js";
 import * as staffing from "../staffing/index.js";
 import { contract } from "./contract.js";
+import { queryRoute } from "./query-runtime.js";
 import { apiHandler, type ApiHandlerOptions, readRoute, useCaseRoute } from "./runtime.js";
 
 /**
@@ -24,6 +26,9 @@ export interface ApiDependencies {
       readonly issueInvitation?: Pick<cleaningStaff.IssueInvitationUseCase, "execute">;
       readonly acceptInvitation?: Pick<cleaningStaff.AcceptInvitationUseCase, "execute">;
       readonly revokeInvitation?: Pick<cleaningStaff.RevokeInvitationUseCase, "execute">;
+    };
+    readonly queries?: {
+      readonly searchInvitations?: Pick<cleaningStaffQueries.SearchInvitationsQuery, "execute">;
     };
     readonly repositories?: {
       readonly cleaningStaffInvitationRepository?: Pick<
@@ -72,6 +77,10 @@ export function createApiHandler(
       useCaseRoute(
         contract.cleaningStaff.useCases.revokeInvitation,
         (d) => d.cleaningStaff?.useCases?.revokeInvitation,
+      ),
+      queryRoute(
+        contract.cleaningStaff.queries.searchInvitations,
+        (d) => d.cleaningStaff?.queries?.searchInvitations,
       ),
       readRoute(
         contract.cleaningStaff.aggregates.cleaningStaffInvitation,
