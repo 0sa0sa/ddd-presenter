@@ -420,7 +420,7 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 | 行の形 | 必須の Value Object は列に展開（`email_value`）、省略可能な Value Object・List・Entity は jsonb（モデルのフィールド名） | 検索・絞り込み・並べ替えに使うのはスカラーなので列にする（関数インデックスも素直に張れる）。省略可能な Value Object は全列 NULL と「中身がすべて NULL」の区別がつかないので jsonb。jsonb のキーをモデルの名前にそろえ、両 target が同じテーブルを読み書きできるようにした |
 | スキーマ | 冪等な望ましいスキーマ（`CREATE … IF NOT EXISTS`）を生成し、マイグレーションは生成しない | 生成器は「あるべき姿」しか知らず、既存のデータの移し方（列の分割・既定値の埋め方）はモデルから決まらない。差分ツールに望ましいスキーマを渡すのが安全 |
 | TanStack Query | クエリは読む Aggregate のファクトリに `infiniteQueryOptions` で入る。キーは `[{ scope, entity, kind: "list", query, params }]`、`queryFn` はキーからパラメータを読み、`initialPageParam: null`、`getNextPageParam: (lastPage) => lastPage.nextCursor` | §18 の規則（オブジェクト1つのキー、queryFn の変数はすべてキーに、フックを生成しない）をそのまま当てた。キーが `lists()` の下なので、その Aggregate を保存するミューテーションの既存の無効化が当たる（[TanStack Query: Infinite Queries](https://tanstack.com/query/latest/docs/framework/react/guides/infinite-queries)、[TkDodo: Effective React Query Keys](https://tkdodo.eu/blog/effective-react-query-keys)） |
-| 認可の余地 | Query はアプリケーションサービス（`<Query>Query.execute`）で、リーダーはポート | 別の作業で足す `authorize:` は Use case と同じく `execute` の入口に付けられる（リーダーとカーソルの形は変わらない） |
+| 認可の余地 | Query はアプリケーションサービス（`<Query>Query.execute`）で、リーダーはポート | `authorize:` は Use case と同じく `execute` の入口に付けた（§21。リーダーには呼び出し元の絞り込みの値が `request.scope` で届く） |
 
 ### 確かめた事実（PGlite 0.5 = PostgreSQL 18.3 で実測）
 
@@ -493,13 +493,38 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 - **ファイルの分け方とバイト同一性**: `security` のない出力を変えないため、モデルに依存しない新しい部分（レート制限・JWT の認証器）は別のテンプレートにし、既存の `api-runtime.ts.txt` には `//#if security` … `//#else` … `//#endif` の区間を置いた（生成器が使わない区間と目印の行を消す）。1つのテンプレートなので、エンドポイントの型・ハンドラ・クライアントの変更が2か所に分かれない。両方の版を Prettier で整形済みにし、生成器のテストが目印が残らないことを確かめる。
 - **Python**: HTTP 層を生成しないので、フレームワークに依存しない部品だけを生成した（`RateLimiter` と `RateLimitStore` の Protocol、インメモリのストア、`RATE_LIMITS`、PyJWT の `BearerJwtAuthenticator`）。PyJWT は型が付いていて、許可リスト・必須クレーム・leeway・JWKS に対応するので、自前の検証ではなくそれを使った（依存に `pyjwt[crypto]` が増える）。FastAPI / Starlette での組み込み方を docs/05 に書いた。
 - **クライアントのエラー型の名前**: 課題は `UnauthenticatedError` / `ForbiddenError` を挙げたが、401 / 403 は既存の方針（エラーの応答は `code` から Domain Error のクラスに戻す）に合わせて、サーバーと同じ `Unauthenticated` / `NotAuthorized` のクラスで reject する（`instanceof` が両側で同じ）。429 はドメインのエラーではないので `RateLimitedError`（`ApiError` のサブクラス、`retryAfter`）。
-- **将来の `queries:`（Read model）への拡張点**: `authorize` と `rate_limit` は Use case と Aggregate で同じ形（`AuthorizeIR` / `RateLimitIR`、`readAccess` に相当する関数、契約の `auth` / `rateLimit`）なので、クエリの宣言にも同じキーを置ける。ロールは読み込む前、`allow_if` は1件ごと（一覧なら絞り込みの条件として渡すのが望ましい）に当てはめる。
+- **`queries:`（Read model）への拡張**: `authorize` と `rate_limit` は Use case と Aggregate で同じ形（`AuthorizeIR` / `RateLimitIR`、`readAccess` に相当する関数、契約の `auth` / `rateLimit`）なので、クエリの宣言にも同じキーを置いた。ロールは読み込む前。行の絞り込みは1件ごとの `allow_if` ではなく `where` の条件にした（§21）。
 
 ### 制限
 
 - ロールは平らなリストで、継承（admin ⊃ staff）はない。必要なら `roles: [admin, staff]` と並べる。
 - `allow_if` で読めるのは入力と先頭の `load` だけ。途中の計算（`let`）や複数の Aggregate の関係を使う認可は、`if` + `fail` の手順で書く（その場合は認可より前に動く手順があることになるので、読み込むだけにする）。
-- 一覧（Read model）の行ごとの認可は、クエリの宣言がないのでまだない。
+- 一覧（クエリ）の行の認可は `where` の `principal:`（呼び出し元の id かクレームとの比較）だけで、任意の式はない（§21）。
 - レート制限はエンドポイントごとで、複数のエンドポイントをまとめた「API 全体で1分に600回」は生成しない（ハンドラの前のミドルウェアで足す）。`InMemoryRateLimitStore` は1プロセス用で、複数のインスタンスでは共有のストアを実装する必要がある。
 - トークンの失効（ログアウト、`jti` の拒否リスト）とリフレッシュは扱わない（短い `exp` と ID プロバイダーに任せる）。CORS と本文の大きさの制限もホストの責務のまま。
 - 既存のモデルに `security` を足すと、`execute` の引数が増える（破壊的変更。`ddd diff` が示す）。
+
+## 21. クエリの認可（2026-10-06）
+
+§19 の読み取り（`queries:`）と §20 の `security` は並行して作り、統合した時点ではクエリに `authorize` がなく、`security` を宣言したモデルでもクエリのエンドポイントは principal なしで誰でも読めた（Use case と Aggregate には既定で拒否を課していたのに、一覧だけが穴になっていた）。クエリにも同じ決まりを当てはめた。DSL は docs/10 §10.5、契約は docs/05 §8・§9。
+
+### 決定したこと
+
+- **既定は拒否をクエリにも**: `security` を書いたら、すべてのクエリに `authorize` が要る（`missing-authorize`、§20 と同じ理由。公開する一覧は `authorize: public` と明示する）。`security` がなければ `authorize` / `rate_limit` / `principal:` / `given.principal` はエラー（`security-not-declared`）。
+- **`authorize` の形**: `public` / `authenticated` / `{ roles }`。`internal` は採らなかった: クエリは HTTP の読み取りのために宣言するもので、プロセス内のジョブはリーダー（ポート）を直接使えばよい。エンドポイントを持たないクエリは、ロールの確認も契約も意味がない。
+- **ロールは何かを読む前**: `execute` の最初の文が `authorize(principal, "<query>", roles)`。入力の検証より前なので、ロールのない呼び出し元には、入力が正しいかどうかもデータがあるかどうかも伝わらない（OWASP の「すべての要求で、失敗は安全側に」、ASVS V4.1.1 のサービス層での強制）。生成テストは、読むと失敗するリーダーを渡して確かめる（Use case のリポジトリのテストダブルと同じ方法）。
+- **行の認可は 1件ごとの `allow_if` ではなく `where` の条件**: 一覧で `allow_if` を1件ずつ評価すると、(1) SQL が `LIMIT n + 1` で切ったページから行を落とすので、ページが短くなり、空のページに `nextCursor` が付くことがある（キーセットの「次がある」の判定が壊れる）、(2) 埋めるために読み続けると、1回の要求で読む行数に上限がなくなる、(3) 落とした行の数やカーソルの進み方から、見えない行の存在が推測できる。行の制限は DB が絞り込む条件にすれば、ページの大きさ・並び・インデックスはそのまま正しい（OWASP Authorization Cheat Sheet の「関係・属性による確認」を、データの取得の条件として行う。ASVS V4.2.1 の IDOR 対策）。そこで宣言的な `where` に値の出どころ `principal:` を足した: `{ field: company_id, op: eq, principal: company_id }`。値は `principal.id` か宣言したクレーム（スカラー）で、フィールドの型と照合する（`Ref[X]` は X の識別子の型）。SQL とインメモリのリーダーは同じ条件を同じ意味論で評価する（PGlite で一致を確かめた）。
+- **呼び出し元での絞り込みはいつも効く**: 省略可能なパラメータは「渡さなければ条件を外す」（`$n IS NULL OR …`）が、呼び出し元での絞り込みにそれを当てはめると、値のない principal に全行が見える。SQL は `列 = $n` だけを出し（NULL なら1行も一致しない）、インメモリのリーダーも値がなければ一致させない。
+- **クレームがないとき**: `required: false` のクレームで絞るクエリに、そのクレームを持たない principal が来たら `NotAuthorized`（`details: { action, missingClaim }`）にした。空の結果を返す案もあったが、「会社に属していない呼び出し元」は多くの場合トークンの発行側の設定ミスで、空の一覧は「データがない」と区別がつかず気づけない。403 なら原因が分かり、行も読まない（ロールの確認と同じく読み込みの前）。必須のクレームと `principal.id` は Principal のスキーマが保証するので確かめない。
+- **カーソルを principal に結び付ける**: 保護されたクエリの指紋に principal の id と絞り込みの値を入れた（`QueryScope`）。キーセットの値は署名されているので改ざんはできないが、漏れたカーソル（ログ、共有した URL）を別の利用者が使うと、同じ条件のページを続けて読めてしまう。絞り込みの値だけでは同じ会社の別の人を区別できないので id も入れた。別の principal は `InvalidCursor`（400）で、最初のページからやり直す。`public` のクエリは principal がないので、今までどおり。
+- **`execute(input, principal)`**: Use case と同じく引数1つ（§20）。`public` のクエリの `execute(input)` は変えない（HTTP のルートの型 `Runs<I, P>` に引数の少ない関数として入る）。保護されたクエリでは `input` の既定値 `{}` をやめた（TypeScript では既定値のある引数のあとに必須の引数を置けないため。Python も同じ形にそろえた）。
+- **HTTP**: クエリのルートも `Route<D, P>`（統合で型が食い違い、`bun run verify:example:ts` が失敗していた原因）。認証・レート制限・401 / 429・RateLimit ヘッダーはハンドラが `auth` / `rateLimit` から一か所で行うので、クエリのルートは契約にその2つを持ち、principal を渡すだけにした。レート制限のポリシー名（とバケットのキー）はクエリ名で、`read_<aggregate>` と同じ名前のクエリはバケットを共有してしまうのでエラー（`duplicate-name`）。クライアントはエラーの `code` から `Unauthenticated` / `NotAuthorized` に戻し、429 は `RateLimitedError`（既存の仕組みのまま）。`infiniteQueryOptions` の形は変えない（トークンは `getToken`）。
+- **シナリオ**: クエリのシナリオに `given.principal` を足した（既定は Use case と同じく `authorize.roles` を持つ principal）。クエリのシナリオに `then.raises` はないので、そのクエリを実行できない principal（ロールがない、未認証、絞り込みのクレームがない）はシナリオのエラー（`invalid-scenario`）にし、その拒否は生成テストが確かめる。
+- **インデックス**: 等値の `principal:` の列を並び順のインデックスの先頭に置く（`(company_id, posted_at DESC, id DESC)`）。省略可能なパラメータの列と違い必ず条件に入るので、先頭の列として常に使える。PGlite の `EXPLAIN` で、Sort なしにそのインデックスを読むことを確かめた。
+- **バイト同一性**: `security` のないモデルの生成物は変えない。`persistence.ts` のテンプレートにも `//#if security` の区間を置き（§20 の方法）、Python の `_persistence.py` は同じ分岐を生成器の中に持つ。クエリのない `security` のモデルも変わらない（全フィクスチャで、変更前の生成器の出力と比べて確かめた）。
+
+### 制限
+
+- 行の絞り込みは「フィールド 演算子 principal のメンバー」の AND だけ。「管理者は全社、スタッフは自社」のようにロールで条件を変えるには、クエリを2つ宣言する（`all_jobs` は `roles: [admin]`、`company_jobs` は `roles: [staff]` と `principal: company_id`）。リストのクレーム（`List[String]`、`roles`）との `in` もない。
+- クエリのシナリオで認可のエラーを書けない（生成テストが拒否を確かめる）。
+- カーソルは principal の id に結び付くので、同じ利用者でも id が変わる（ID プロバイダーの移行など）と使えなくなる（最初のページからやり直せば済む）。

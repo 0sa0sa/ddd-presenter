@@ -144,7 +144,7 @@ queryClient.invalidateQueries({ queryKey: [{ scope: "cleaning-staff" }] }); // �
 
 #### 認証・認可・レート制限（`security`、オプトイン）
 
-モデルに `security` を書くと、Principal（呼び出し元）の型、Use case と読み取りの認可（ロールは何も読み込む前、`allow_if` は読み込んだ Aggregate に対して変更の前）、HTTP API の bearer JWT 認証（jose / PyJWT、RFC 8725）とトークンバケットのレート制限（429 と IETF の RateLimit ヘッダー）を生成する。書くと既定は拒否で、すべての Use case と Aggregate に `authorize` が要る（[docs/10 §11](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §20](docs/09-implementation-decisions.md)）。
+モデルに `security` を書くと、Principal（呼び出し元）の型、Use case と読み取りの認可（ロールは何も読み込む前、`allow_if` は読み込んだ Aggregate に対して変更の前）、HTTP API の bearer JWT 認証（jose / PyJWT、RFC 8725）とトークンバケットのレート制限（429 と IETF の RateLimit ヘッダー）を生成する。書くと既定は拒否で、すべての Use case・Aggregate・クエリに `authorize` が要る（[docs/10 §11](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §20](docs/09-implementation-decisions.md)）。
 
 ```yaml
 security:
@@ -192,6 +192,7 @@ Python（HTTP 層は生成しない）は `generated/security.py`（Principal・
     queries:
       - name: search_invitations
         from: CleaningStaffInvitation
+        authorize: { roles: [admin] }                                # security があれば必須（ロールは読む前に確かめる）
         params: [{ name: status, type: InvitationStatus }]          # 省略可能（省略するとフィルタは効かない）
         where: [{ field: status, op: eq, param: status }]
         search: { param: q, fields: [email.value], mode: trigram, min_similarity: 0.3 }
@@ -203,9 +204,10 @@ Python（HTTP 層は生成しない）は `generated/security.py`（Principal・
 // サーバー: PostgreSQL（node-postgres の Pool / PGlite がそのまま SqlClient になる）。sql/cleaning_staff.sql を適用しておく
 const cursors = new HmacCursorCodec({ secrets: [process.env.CURSOR_SECRET!] }); // 新しい秘密を先頭に足すとローテーション
 const searchInvitations = new SearchInvitationsQuery({ reader: new PostgresSearchInvitationsReader(pool), cursors });
-const page = await searchInvitations.execute({ q: "staff", status: "pending", limit: 20 }); // { items, nextCursor }
-await searchInvitations.execute({ q: "staff", status: "pending", cursor: page.nextCursor }); // 次のページ（別のパラメータでは InvalidCursor）
-// HTTP: GET /api/cleaning-staff/queries/search-invitations?q=staff&status=pending&cursor=…&limit=20（不正なカーソルは 400 invalid_cursor）
+// authorize のあるクエリは principal を取る（public のクエリは execute(input) のまま）
+const page = await searchInvitations.execute({ q: "staff", status: "pending", limit: 20 }, principal); // { items, nextCursor }
+await searchInvitations.execute({ q: "staff", status: "pending", cursor: page.nextCursor }, principal); // 次のページ（別のパラメータ・別の principal では InvalidCursor）
+// HTTP: GET /api/cleaning-staff/queries/search-invitations?q=staff&status=pending&cursor=…&limit=20（不正なカーソルは 400 invalid_cursor、認証なしは 401、ロールなしは 403）
 createApiHandler({ cleaningStaff: { queries: { searchInvitations } } });
 
 // クライアント: infiniteQueryOptions（キーは lists() の下なので、招待を保存するミューテーションが無効化する）
@@ -215,9 +217,11 @@ const { data, fetchNextPage, hasNextPage } = useInfiniteQuery(queries.cleaningSt
 ```python
 # Python: psycopg 3 の同期 Connection がそのまま SqlConnection になる
 query = SearchInvitationsQuery(reader=PostgresSearchInvitationsReader(conn), cursors=HmacCursorCodec([secret]))
-page = query.execute(SearchInvitationsInput(q="staff", status=InvitationStatus.PENDING))
+page = query.execute(SearchInvitationsInput(q="staff", status=InvitationStatus.PENDING), principal)
 repository = PostgresCleaningStaffInvitationRepository(conn)  # 作業単位ごとに1つ。古い版を保存すると ConcurrencyConflict
 ```
+
+`security` を書いたモデルでは、クエリにも `authorize`（`public` / `authenticated` / `{ roles }`）が要る。行を呼び出し元に絞るのは行ごとの `allow_if` ではなく `where` の `{ field: company_id, op: eq, principal: company_id }`（`principal.id` か宣言したクレーム。SQL とインメモリのリーダーで同じ条件になり、キーセットのページングが崩れない）。カーソルは発行した principal に結び付き、別の principal が使うと `InvalidCursor`（[docs/10 §10.5](docs/10-dsl-reference.md)・[docs/09 §21](docs/09-implementation-decisions.md)）。
 
 ### VS Code 拡張
 
@@ -396,7 +400,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 - 認証はパスワード（argon2id）か認証プロキシのヘッダー。多要素認証・パスワードの再設定メールはない（SSO が必要なら認証プロキシを前に置く）。インターネットに公開するときは HTTPS と `DDD_SECURE_COOKIES=1` が必要。
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
 - 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（日時はミリ秒精度の ISO 文字列 `Instant`、文字列の長さの数え方など）は docs/09 §14・§17。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
-- TypeScript の HTTP API（`typescript.api`）は Use case の POST と ID による Aggregate の GET だけ。DSL にクエリ（Read model）がないので一覧のクエリは生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可・レート制限はモデルに `security` を書いたときだけ生成する（書かなければハンドラの前に置く）。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
-- 生成する認可はロール（any-of、継承なし）と `allow_if`（入力と先頭の `load` だけを読む）。トークンの失効・リフレッシュ、複数のエンドポイントをまとめたレート制限、一覧の行ごとの認可はない。インメモリのレート制限のストアは1プロセス用（docs/09 §20）。
+- TypeScript の HTTP API（`typescript.api`）は Use case の POST、ID による Aggregate の GET、`queries:` に書いたクエリの GET（キーセットのページング）。それ以外の一覧は生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可・レート制限はモデルに `security` を書いたときだけ生成する（書かなければハンドラの前に置く）。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
+- 生成する認可はロール（any-of、継承なし）と `allow_if`（入力と先頭の `load` だけを読む）。クエリの行は `where` の `principal:`（呼び出し元の id かクレームとの比較）で絞る（行ごとの `allow_if` はない）。トークンの失効・リフレッシュ、複数のエンドポイントをまとめたレート制限はない。インメモリのレート制限のストアは1プロセス用（docs/09 §20）。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。

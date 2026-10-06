@@ -434,6 +434,8 @@ queries:
   - name: search_invitations                   # snake_case（生成: SearchInvitationsQuery / …Reader / …Item / …Input）
     description: 招待をメールアドレスで探す
     from: CleaningStaffInvitation               # 読む Aggregate
+    authorize: { roles: [admin] }               # security を宣言したら必須（§10.5）。public / authenticated / { roles }
+    rate_limit: { requests: 30, per: minute }   # 省略で security.rate_limits.default、none で制限なし
     params:                                     # 型付きのパラメータ。required: true でなければ省略可能
       - { name: status, type: InvitationStatus }
       - { name: created_after, type: DateTime }
@@ -457,7 +459,9 @@ queries:
 | `params` | フィールドと同じ形（`name` `type` `required` `constraints`）。型はプリミティブ・Enum・`Ref[...]` | 他の型は `invalid-type`。`cursor` / `limit`（HTTP で使う）と検索パラメータの名前は使えない（`reserved-name` / `duplicate-name`）。どのフィルタにも使われないと警告 `unused-parameter` |
 | `where[].field` | フィールドのパス（`status`、`email.value`） | 無いフィールド `unknown-field`。jsonb の列（省略可能な Value Object・List・Entity の中）は `unqueryable-field` |
 | `where[].op` | `eq`（既定）`ne` `lt` `lte` `gt` `gte` | 大小比較は String / Integer / Decimal / DateTime / Date だけ（`invalid-operator`） |
-| `where[].param` / `value` | パラメータ名 / リテラル（どちらか一方） | 無いパラメータ `unknown-parameter`、型の不一致 `type-mismatch`（Integer → Decimal は可）、リテラルはシナリオの値と同じ検査 |
+| `where[].param` / `value` / `principal` | パラメータ名 / リテラル / principal のメンバー（`id` か宣言したクレーム。§10.5）のどれか1つ | 無いパラメータ `unknown-parameter`、型の不一致 `type-mismatch`（Integer → Decimal は可）、リテラルはシナリオの値と同じ検査。2つ以上は `invalid-shape`、どれもないと `missing-key` |
+| `authorize` | `public` / `authenticated` / `{ roles: [...] }`（§10.5） | `security` を宣言したら必須（`missing-authorize`）、宣言していなければ書けない（`security-not-declared`）。`internal` と `allow_if` は `invalid-authorize`、宣言していないロールは `unknown-role` |
+| `rate_limit` | `{ requests, per, by }` / `none`（§11 と同じ） | `public` のクエリで `by: principal` は `rate-limit-without-principal` |
 | `search.param` | 検索テキストのパラメータ名（既定 `q`。省略可能な String、200 文字まで） | |
 | `search.fields` | String のフィールドのパス（Value Object の String のフィールドも可。1つ以上） | String でない・Value Object そのもの `invalid-type`、jsonb の中 `unqueryable-field` |
 | `search.mode` | `trigram`（既定。pg_trgm の類似度）`prefix`（大文字小文字を無視した前方一致）`exact`（大文字小文字を無視した一致） | |
@@ -508,6 +512,7 @@ queries:
 scenarios:
   - name: newest_first_across_pages
     given:
+      principal: { roles: [admin] }         # 保護されたクエリを実行する principal（§10.5。省略で authorize.roles を持つ既定の principal）
       aggregates:                           # 保存済みの Aggregate（type は省略時 from）。必須フィールドはすべて
         - fields: { id: "...", email: { value: staff@example.com }, status: pending, created_at: ..., expires_at: ... }
     when: { params: { status: pending, q: staff }, limit: 2, pages: 2 }   # すべて省略可（pages 既定 1）
@@ -516,13 +521,63 @@ scenarios:
       next_cursor: absent                   # 最後に読んだページの nextCursor: present | absent
 ```
 
-`then` には `items` か `next_cursor` の少なくとも一方が要る（`ambiguous-scenario`）。値はフィールドの型で検査する。`returns` に識別子がなければ、items は一部のフィールドで書く。
+`then` には `items` か `next_cursor` の少なくとも一方が要る（`ambiguous-scenario`）。値はフィールドの型で検査する。`returns` に識別子がなければ、items は一部のフィールドで書く。クエリのシナリオは結果を確かめるもので、エラーは書けない（認可のエラーのテストは生成される。§10.5）。
 
-生成されるテスト（`tests/generated/<context>-<query>.test.ts` / `test_<context>_<query>.py`）: シナリオごとのテスト（インメモリのリーダー）、`limit` の切り詰め、2件以上を返すシナリオのデータでのページングの性質（1件ずつのページの連結が1回で読んだ結果と同じ順・重複なし・欠けなし）、改ざんしたカーソルと別のパラメータで使ったカーソルの拒否。コンテキストごとに `persistence` のテスト（行との往復、楽観ロック、カーソルの署名・ローテーション・期限、trigram の類似度が pg_trgm と同じ）も生成する。
+生成されるテスト（`tests/generated/<context>-<query>.test.ts` / `test_<context>_<query>.py`）: シナリオごとのテスト（インメモリのリーダー）、`limit` の切り詰め、2件以上を返すシナリオのデータでのページングの性質（1件ずつのページの連結が1回で読んだ結果と同じ順・重複なし・欠けなし）、改ざんしたカーソルと別のパラメータで使ったカーソルの拒否、保護されたクエリでは認可のテスト（§10.5）。コンテキストごとに `persistence` のテスト（行との往復、楽観ロック、カーソルの署名・ローテーション・期限、trigram の類似度が pg_trgm と同じ）も生成する。
+
+### 10.5 クエリの認可（`security` があるとき）
+
+`security`（§11）を宣言したモデルでは、Use case・Aggregate と同じく**すべてのクエリに `authorize` が要る**（既定は拒否。書かないと `missing-authorize`）。決定の理由は docs/09 §21。
+
+```yaml
+security:
+  roles: [admin, staff, candidate]
+  principal:
+    id: UUID
+    claims:
+      - { name: company_id, type: UUID, required: false }
+
+queries:
+  - name: company_jobs
+    from: Job
+    authorize: { roles: [admin, staff] }        # ロールの確認は何かを読むより前
+    where:
+      - { field: company_id, op: eq, principal: company_id }   # 行を呼び出し元の会社に絞る（SQL でもインメモリでも同じ条件）
+      - { field: status, op: eq, param: status }
+    order_by: [{ field: posted_at, direction: desc }]
+    scenarios:
+      - name: own_company_only
+        given:
+          principal: { roles: [staff], claims: { company_id: "00000000-0000-4000-8000-0000000000c1" } }
+          aggregates: [...]
+        then: { items: [...] }
+  - name: my_applications
+    from: Application
+    authorize: authenticated
+    where: [{ field: candidate_id, op: eq, principal: id }]      # principal.id（JWT の sub）で絞る
+  - name: open_jobs
+    from: Job
+    authorize: public                           # principal なし
+    rate_limit: { requests: 30, per: minute, by: ip }
+```
+
+| `authorize` | 意味 | 生成される `execute` |
+|---|---|---|
+| `public` | 誰でも | `execute(input)`（今までどおり） |
+| `authenticated` | 認証済みなら誰でも | `execute(input, principal)` |
+| `{ roles: [...] }` | いずれかのロールを持つ principal | `execute(input, principal)` |
+
+- `internal` は書けない（クエリは読み取りのエンドポイント。プロセス内の処理はリーダーを直接使う）。`allow_if` も書けない（`invalid-authorize`）: 1行ずつの条件はページを切ったあとの行を落とし、キーセットのページングを壊す。行は `where` の `principal:` で絞る。
+- **`where: { field, op, principal }`**: `principal` は `id` か宣言したクレーム（`List[String]` と `roles` は不可）。型はフィールドと同じでなければならない（`Ref[X]` は X の識別子の型と比べる。違えば `type-mismatch`、無いメンバーは `unknown-field`）。省略可能なパラメータと違い**いつも効く**（SQL は `列 = $n` で `IS NULL OR` を付けない）。`required: false` のクレームを持たない principal は、何も読む前に `NotAuthorized`（`details: { action, missingClaim }`）。`security` がない・`authorize: public` のクエリでは書けない（`security-not-declared` / `invalid-principal-filter`）。
+- **順序**: `authorize(principal, …)`（なければ `Unauthenticated`、ロールがなければ `NotAuthorized`）→ 絞り込みに使うクレームの確認 → 入力の検証 → カーソルの検証 → 読み込み。
+- **カーソル**: 保護されたクエリのカーソルの指紋には principal の id と絞り込みの値が入る。別の principal（同じロール・同じ会社でも）が使うと `InvalidCursor`。
+- **HTTP**（TypeScript の `typescript.api`）: 契約の `auth` / `rateLimit` と `errors` の `unauthenticated: 401` / `not_authorized: 403`。ハンドラが資格情報のない要求に 401（`WWW-Authenticate: Bearer`）、使い切った制限に 429（`Retry-After`・`RateLimit`）を返し、principal をクエリに渡す。レート制限のポリシー名はクエリ名（`read_<aggregate>` と同じ名前のクエリは `duplicate-name`）。クライアントと `infiniteQueryOptions` の形は変わらない（トークンは `getToken`）。
+- **シナリオ**: `given.principal`（`{ id, roles, claims }`）で実行する。省略すると `authorize.roles` を持ち、クレームが既定値（省略可能なものは null）の principal。必要なロールを持たない principal、`null`（未認証）、絞り込みに使うクレームのない principal はエラー（`invalid-scenario`。それらのエラーは生成テストが確かめる）。`public` のクエリの `given.principal` は警告 `unused-principal`。
+- **生成テスト**: 未認証で `Unauthenticated`、ロールのない principal で `NotAuthorized`（必要なロール）、絞り込みのクレームのない principal で `NotAuthorized`（`missingClaim`）— どれも読み込むと失敗するリーダーで、何も読む前に拒否されることを確かめる。カーソルを別の principal で使うと `InvalidCursor`。HTTP では 401（challenge 付き）・403・429。
 
 ## 11. 認証・認可・レート制限（`security`）
 
-トップレベルの `security` を書くと、Principal（呼び出し元）の型、Use case と Aggregate の読み取りの認可、HTTP API の認証とレート制限を生成する（決定の理由と出典は docs/09 §20、生成物とエラーの対応は docs/05 §8）。書かなければ生成物は以前とバイト単位で同じ。
+トップレベルの `security` を書くと、Principal（呼び出し元）の型、Use case・Aggregate の読み取り・クエリ（§10.5）の認可、HTTP API の認証とレート制限を生成する（決定の理由と出典は docs/09 §20、生成物とエラーの対応は docs/05 §8）。書かなければ生成物は以前とバイト単位で同じ。
 
 ```yaml
 security:
@@ -576,7 +631,7 @@ contexts:
 | `authenticated` | 認証済みの principal なら誰でも | `execute(command, principal)` |
 | `{ roles: [...], allow_if: <式> }` | いずれかのロールを持ち（any-of。省略で誰でも）、`allow_if` が成り立つ principal | `execute(command, principal)` |
 
-**既定は拒否**: `security` を書いたら、すべての Use case と Aggregate に `authorize` が要る。書かないとエラー `missing-authorize`（実行時にいつも拒否するコードを作るより、誰に許すかをモデルに書かせる）。公開するものは `authorize: public` と明示する。ポリシーが動かす Use case は principal なしで動くので、`authorize: internal`（または `public`）でなければエラー `policy-needs-principal`。
+**既定は拒否**: `security` を書いたら、すべての Use case・Aggregate・クエリ（§10.5）に `authorize` が要る。書かないとエラー `missing-authorize`（実行時にいつも拒否するコードを作るより、誰に許すかをモデルに書かせる）。公開するものは `authorize: public` と明示する。ポリシーが動かす Use case は principal なしで動くので、`authorize: internal`（または `public`）でなければエラー `policy-needs-principal`。
 
 **`allow_if`**: 認可のルール。型付きの式（§4）で、次を読める。
 

@@ -357,14 +357,15 @@ tests/generated/security.test.ts
 - **冪等性**: principal が要る Use case の冪等性キーは principal ごと（`"<principal.id>:<key>"`）。認可は記録の参照より前なので、別の principal が同じキーで記録した結果を受け取ることはない。
 - **エラー**: `NotAuthorized`（コード `not_authorized`）の `details` は `{ action, requiredRoles }`（Python は `required_roles`）か `{ action, rule: "allow_if" }`。比べた値は入れない。`Unauthenticated`（`unauthenticated`）の `details` は `{ action }`、認証器が拒否したトークンなら `{ error: "invalid_token" }`。どちらも Domain Error なので、既存のエラー処理（`ALL_ERRORS` とは別の `SECURITY_ERRORS`）で扱える。
 - **読み取り**: `authorize` が principal を要る Aggregate は、`read_<aggregate>(repository, id, principal)` / `read<Aggregate>(repository, id, principal)` を生成する。ロールを確かめてから読み込み、見つかれば `allow_if` を確かめる。`public` の Aggregate は生成しない（リポジトリをそのまま読む）。
+- **クエリ**（§9、docs/10 §10.5、docs/09 §21）: `authorize` が `authenticated` か `{ roles }` のクエリは `execute(input, principal)`（Python は `execute(params, principal)`）。`public` のクエリは `execute(input)` のまま。`execute` の最初の文が `authorize(principal, "<query>", roles)` で、次に `where` の `principal:` が使う省略可能なクレームを確かめ（なければ `NotAuthorized`、`details: { action, missingClaim }` / `missing_claim`）、それから入力・カーソルを検証してリーダーを呼ぶ。絞り込みの値（`principal.id` やクレーム）は `QueryScope { principal, values }` として `runQuery` / `run_query` に渡り、リーダーには `request.scope` で届き、カーソルの指紋に入る。
 - **テストダブル**: 既存のインメモリのダブルはそのまま。生成テストは `Principal.create(...)` / `Principal(...)` を作って渡す。
 
 #### HTTP API（TypeScript、`typescript.api`）
 
-- **契約**: エンドポイントごとに `auth`（`{ kind: "public" }` か `{ kind: "principal", roles }`）と `rateLimit`（`{ name, requests, windowSeconds, by }` か `null`）を持つ。principal が要るエンドポイントの `errors` に `unauthenticated: 401` と `not_authorized: 403` が入る。`internal` の Use case はエンドポイントを持たない（契約・サーバー・クライアント・mutations のどれにも出ない）。
+- **契約**: エンドポイント（Use case の POST、Aggregate の GET、クエリの GET）ごとに `auth`（`{ kind: "public" }` か `{ kind: "principal", roles }`）と `rateLimit`（`{ name, requests, windowSeconds, by }` か `null`）を持つ。principal が要るエンドポイントの `errors` に `unauthenticated: 401` と `not_authorized: 403` が入る（クエリは `constraint_violation: 400, invalid_cursor: 400` に続けて）。`internal` の Use case はエンドポイントを持たない（契約・サーバー・クライアント・mutations のどれにも出ない）。
 - **サーバー**: `createApiHandler(dependencies, { authenticate, rateLimiter, clientIp, onError })`。
   - `authenticate: Authenticator<Principal>`（`(request) => Promise<Principal | null>`）。資格情報がなければ `null`、不正なら `Unauthenticated`（`details.error: "invalid_token"`）を投げる。`scheme: bearer_jwt` なら生成した `createBearerJwtAuthenticator({ jwksUrl | key | getKey, issuer?, audience?, clockTolerance? })` を渡す。`scheme: custom`（セッションの Cookie や API キーなど）は自分で書く。渡さなければ principal が要るエンドポイントはすべて 401。
-  - 1リクエストの流れ: ルートの照合 → `by: ip` / `global` のレート制限（認証より前なので、認証器と JWKS の取得も守る）→ principal が要るなら認証（なければ 401）→ `by: principal` のレート制限 → Use case / 読み取りのアクセス（ここで認可。403）→ レスポンスに RateLimit ヘッダーを付ける。`public` のエンドポイントは認証しない（`by: principal` の既定は IP ごとに数える）。
+  - 1リクエストの流れ: ルートの照合 → `by: ip` / `global` のレート制限（認証より前なので、認証器と JWKS の取得も守る）→ principal が要るなら認証（なければ 401）→ `by: principal` のレート制限 → Use case / 読み取りのアクセス / クエリ（ここで認可。403）→ レスポンスに RateLimit ヘッダーを付ける。クエリのルート（`queryRoute`、`api/query-runtime.ts`）も同じ `Route<D, P>` で、ハンドラが認証・レート制限をしてから principal を `execute(input, principal)` に渡す。`public` のエンドポイントは認証しない（`by: principal` の既定は IP ごとに数える）。
   - `rateLimiter`（既定はハンドラごとのインメモリ）、`clientIp`（既定は不明で、`by: ip` のリクエストはすべて同じバケットを使う。`X-Forwarded-For` は既定では読まない。信頼できるプロキシが上書きするときだけ読む。Bun なら `(r) => server.requestIP(r)?.address`）。
 - **JWT の検証**（`api/authentication.ts`、RFC 8725）: jose の `jwtVerify` に、モデルの `algorithms` だけ（`none` は宣言できない）、`issuer`・`audience`、`clockTolerance`、必須のクレーム `exp`・`sub` を渡す。鍵は JWKS の URL（jose がキャッシュと更新をする）、1つの鍵（公開鍵の `CryptoKey`、HS* なら秘密のバイト列）、自前の鍵の取得関数のどれか。`sub` が `id`、`roles_claim` がロール（宣言していないロールは捨てる）、宣言したクレームが値になり、Principal のスキーマに合わなければ不正なトークン。JWKS が取得できないのは呼び出し側の誤りではないので 500。
 - **エラーの対応**（docs/05 §8 の表に足す）:
@@ -377,7 +378,7 @@ tests/generated/security.test.ts
 | レート制限を使い切った | 429（RFC 6585） | `Retry-After`（秒、RFC 9110 §10.2.3）、`RateLimit-Policy`、`RateLimit` | `{ code: "rate_limited", message, details: { retryAfter } }` |
 | 制限のあるエンドポイントのそのほかの応答 | | `RateLimit-Policy: "<name>";q=<requests>;w=<秒>`、`RateLimit: "<name>";r=<残り>;t=<秒>`（IETF draft-ietf-httpapi-ratelimit-headers） | |
 
-  `<name>` は Use case 名か `read_<aggregate>`。`t` は許可なら満杯に戻るまで、拒否なら次のトークンまでの秒数（`Retry-After` と同じ）。
+  `<name>` は Use case 名、`read_<aggregate>`、クエリ名。`t` は許可なら満杯に戻るまで、拒否なら次のトークンまでの秒数（`Retry-After` と同じ）。
 - **トークンバケット**: 容量 `requests`、`windowSeconds` の間に均等に補充。キーは `<policy>\0<by>\0<principal id | IP | *>`。`takeToken(state, policy, now)` は純粋関数なので、ストアの実装はそれを原子的に実行すればよい。`RateLimitStore.consume(key, policy, now)` はキーごとに原子的でなければならない（2つのリクエストが最後の1つを取らない）。生成した `InMemoryRateLimitStore` は1プロセス用（満杯のバケットは `maxKeys` を超えたら捨てる）。複数のインスタンスでは共有のストアを実装する: Redis / Upstash なら、`{ tokens, updatedAt }` を1つのキーに保存し、`takeToken` と同じ計算を Lua スクリプト（`EVAL`）で行い、`PEXPIRE` を `windowSeconds` にする（Upstash の `@upstash/ratelimit` の token bucket もこの形）。Cloudflare なら Durable Object の中で `takeToken` を呼ぶ。
 - **クライアント**: `createApiClient({ getToken })` は、リクエストのたびに `getToken()` を呼んで `Authorization: Bearer <token>` を付ける（更新したトークンがすぐ使われる。`null` / `undefined` なら付けない）。401 は `Unauthenticated`、403 は `NotAuthorized`（どちらも `code` から復元する Domain Error）、429 は `RateLimitedError`（`ApiError` のサブクラス、`retryAfter` は秒か `undefined`）で reject する。
 - **再試行の方針**（生成した options には入れない。TkDodo のとおりアプリの `QueryClient` の既定に書く）:
@@ -393,7 +394,7 @@ const queryClient = new QueryClient({ defaultOptions: { queries: { retry: apiRet
 
 - 認可はアプリケーション層なので TypeScript と同じ（`execute(command, principal)`、`read_<aggregate>`）。
 - `authentication.py` の `BearerJwtAuthenticator(key=... | jwks_url=..., issuer=None, audience=None, leeway=...)` は PyJWT で検証する（`algorithms` はモデルのものだけ、`require: exp, sub, iss, aud`、`leeway`）。`authenticate(authorization_header)` は principal か `None` を返し、不正なトークンは `Unauthenticated(error="invalid_token")`。依存に `pyjwt[crypto]`（RS256 / ES256 / EdDSA は cryptography が要る）を足す。
-- `rate_limit.py` の `RateLimiter(store, clock)` と `security.RATE_LIMITS`（エンドポイント名 → `RateLimit`）。
+- `rate_limit.py` の `RateLimiter(store, clock)` と `security.RATE_LIMITS`（エンドポイント名 → `RateLimit`。クエリはクエリ名）。
 
 FastAPI の例（Starlette でも同じ考え方）:
 
@@ -444,7 +445,7 @@ def accept(command: AcceptInvitation, who: Principal | None = Depends(principal)
 #### 移行メモ（2026-10-06、`security`）
 
 - `security` を書かないプロジェクトは何も変わらない。
-- 書くと、すべての Use case と Aggregate に `authorize` が要る（`ddd validate` が示す）。principal が要る Use case の `execute` に引数が増える（`ddd diff` は破壊的変更として表示する）。呼び出し側（ハンドラ、ジョブ、手書きのテスト）は principal を渡す。ポリシーが動かす Use case は `authorize: internal`。
+- 書くと、すべての Use case・Aggregate・クエリに `authorize` が要る（`ddd validate` が示す）。principal が要る Use case の `execute` に引数が増える（`ddd diff` は破壊的変更として表示する）。呼び出し側（ハンドラ、ジョブ、手書きのテスト）は principal を渡す。ポリシーが動かす Use case は `authorize: internal`。
 - TypeScript の HTTP API で `scheme: bearer_jwt` なら、顧客所有の `package.json` に `"jose": "^6.1.0"` を手で足す（新しいプロジェクトの scaffold には入る）。Python で `bearer_jwt` なら `pyjwt[crypto]>=2.8` を足す（例の `pyproject.toml` を参照）。
 - `internal` にした Use case はエンドポイントがなくなる（`mutations.<context>.<useCase>` も消える）。
 
@@ -504,17 +505,17 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 
 ### 読み取りの契約
 
-- **Query（アプリケーションサービス）**: `new <Query>Query({ reader, cursors })`、`execute(input)`（Python は `<Query>Query(reader=..., cursors=...)`、`execute(<Query>Input(...))`）。入力をスキーマで検証し（`ConstraintViolation`）、検索テキストの前後の空白を除き（空なら検索しない）、`limit` を既定値と上限で決め、カーソルを検証・復号して、リーダーを呼び、次のページのカーソルを作る。戻り値は `Page<Item>`（`{ items, nextCursor }` / Python `Page(items, next_cursor)`）。
-- **リーダー（ポート）**: `read(request): Awaitable<QueryResult<Item>>`。`request` は `{ params, search, after, limit }`（`after` は前のページの最後の行のキー、`limit` は確定した大きさ）。結果は `{ items, last }`（`last` は次のページがあるときだけ、最後の項目のキー）。リーダーは `limit + 1` 行読んで次があるかを知る。実装は `Postgres<Query>Reader(client)` と `InMemory<Query>Reader(repository)`。
+- **Query（アプリケーションサービス）**: `new <Query>Query({ reader, cursors })`、`execute(input)`（Python は `<Query>Query(reader=..., cursors=...)`、`execute(<Query>Input(...))`）。`security` があって `authorize` が `public` でないクエリは `execute(input, principal)`（§8「認証・認可・レート制限」。ロールの確認が最初の文）。入力をスキーマで検証し（`ConstraintViolation`）、検索テキストの前後の空白を除き（空なら検索しない）、`limit` を既定値と上限で決め、カーソルを検証・復号して、リーダーを呼び、次のページのカーソルを作る。戻り値は `Page<Item>`（`{ items, nextCursor }` / Python `Page(items, next_cursor)`）。
+- **リーダー（ポート）**: `read(request): Awaitable<QueryResult<Item>>`。`request` は `{ params, search, after, limit }`（`after` は前のページの最後の行のキー、`limit` は確定した大きさ）。`security` のあるモデルでは、保護されたクエリの `request.scope` に呼び出し元の値（`where` の `principal:` が比べる `principal.id` やクレーム、メンバー名がキー）が入る。結果は `{ items, last }`（`last` は次のページがあるときだけ、最後の項目のキー）。リーダーは `limit + 1` 行読んで次があるかを知る。実装は `Postgres<Query>Reader(client)` と `InMemory<Query>Reader(repository)`。
 - **項目**: `returns` のフィールドの検証済みの値（`<Query>ItemSchema` / `<Query>Item` の Pydantic モデル）。行から作るときに Value Object・Enum・制約を検証する。
-- **指紋**: クエリ名・有効な並び順・検索テキスト・null でないパラメータ（名前順、正規の文字列）の正規 JSON の SHA-256（22 文字）。`limit` は含めない。
+- **指紋**: クエリ名・有効な並び順・検索テキスト・null でないパラメータ（名前順、正規の文字列）の正規 JSON の SHA-256（22 文字）。`limit` は含めない。保護されたクエリでは、さらに principal の id と絞り込みの値（`QueryScope`）を含める: カーソルは発行した principal に結び付き、別の principal が使うと `InvalidCursor`（`mismatch`）。
 
 ### カーソル（トークン）の形式と安全性
 
 `base64url(JSON {"v":1,"keys":[...],"fp":"...","exp"?:n}) + "." + base64url(HMAC-SHA256(secret, その base64url))`。
 
 - **不透明**: クライアントは中身を解釈せず、`nextCursor` をそのまま `cursor` に渡す。キーは読める（暗号化はしない）ので、並び順のキーに秘密を置かない。
-- **完全性**: 署名を定数時間で比べ（`timingSafeEqual` / `hmac.compare_digest`）、合わなければ `InvalidCursor`（`details.reason`: `malformed` / `signature` / `expired` / `mismatch`）。指紋が違えば（別のパラメータ・検索テキスト・並び順）`mismatch`、キーの数が違っても `mismatch`。長さは 4096 文字まで。
+- **完全性**: 署名を定数時間で比べ（`timingSafeEqual` / `hmac.compare_digest`）、合わなければ `InvalidCursor`（`details.reason`: `malformed` / `signature` / `expired` / `mismatch`）。指紋が違えば（別のパラメータ・検索テキスト・並び順・principal）`mismatch`、キーの数が違っても `mismatch`。長さは 4096 文字まで。
 - **秘密**: 32 文字以上。`secrets[0]` で署名し、どれでも検証する。ローテーションは新しい秘密を先頭に足し、古いカーソルが使われなくなったら古い秘密を外す。`ttlSeconds` で期限（`exp`、秒）を付けられる（既定はなし）。
 - **範囲**: 発行した実装の中でだけ有効（TypeScript と Python で指紋の正規化が違う）。キーセットの値は DB の値なので、行が消えたり変わったりしてもカーソルは壊れない（その位置の後ろから読む）。
 
@@ -524,6 +525,7 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 - 文字列の並びは `COLLATE "C"`（コードポイント順）。ORDER BY・キーセットの条件・インデックスで同じにする。ORDER BY の列はテーブル名で修飾する（素の名前は SELECT の出力列 — `to_char(created_at …) AS created_at` — を指してしまう）。
 - SELECT はドライバに依存しない形: 日時は UTC の ISO 8601（マイクロ秒）、日付は `YYYY-MM-DD`、numeric は text、キーは `_k0`, `_k1`… の text（スコアは `float8` の text で float4 の値をそのまま往復させ、次のページでは `$n::real` に戻す）。
 - キーセット: 向きがそろえば行値の比較 `(a, b, id) < ($1, $2, $3)`（btree が1回のシークで使える）、混ざれば `(a > $1) OR (a = $1 AND b < $2) OR …`。OFFSET は使わない。
+- 呼び出し元での絞り込み（`where` の `principal:`）は `列 = $n::t` で、`IS NULL OR` を付けない（いつも効く。値が NULL なら1行も一致しない。サービスはその前に `NotAuthorized` にする）。引数は `{ principal: "<member>" }`（Python は `("principal", "<member>")`）で、`request.scope` から読む。
 - 省略可能なパラメータは `($n::t IS NULL OR 列 = $n::t)`。検索あり・なし × 最初・次のページで4つの文に分ける（検索の条件が `IS NULL OR` の中に入らないので、パラメータの値が分かる計画でも汎用の計画でも trigram のインデックスを使える）。
 - trigram の検索: `CROSS JOIN LATERAL (SELECT GREATEST(similarity(lower(c1), lower($q)), …) AS _score) AS _s` でスコアを1回だけ計算し、`(lower(c1) % lower($q) OR …)`（GIN で絞る）と `_s._score >= min_similarity`（決め手）で絞る。`%` は `pg_trgm.similarity_threshold`（既定 0.3）以上を通すので、`min_similarity` が 0.3 未満なら `%` を出さない（出すと行を取りこぼす）。
 - **psycopg の注意**: psycopg 3 は同じ文を5回実行すると準備済みの文にし、PostgreSQL は汎用の計画を選ぶことがある。`IS NULL OR` のフィルタは汎用の計画でインデックスを使いにくい。大きなテーブルでは `prepare_threshold=None` か、フィルタの組み合わせごとのクエリに分けることを検討する。
@@ -541,7 +543,7 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 
 - `CREATE EXTENSION IF NOT EXISTS pg_trgm`（trigram の検索があるとき。拡張を作る権限が要る）、`CREATE SCHEMA IF NOT EXISTS <context>`。
 - テーブルごとに主キー（識別子）、Enum の CHECK、`version bigint NOT NULL`。
-- インデックス: trigram は `USING gin (lower(列) gin_trgm_ops)`、prefix は `(lower(列) text_pattern_ops)`、exact は `(lower(列))`、並び順（relevance を除くキー）は `(列 COLLATE "C" DESC, …, id DESC)`。
+- インデックス: trigram は `USING gin (lower(列) gin_trgm_ops)`、prefix は `(lower(列) text_pattern_ops)`、exact は `(lower(列))`、並び順（relevance を除くキー）は `(列 COLLATE "C" DESC, …, id DESC)`。`where` の `principal:` が等値（`eq`）で絞る列は、並び順のインデックスの先頭に置く（`(company_id, posted_at DESC, id DESC)`: 呼び出し元ごとに1つの範囲を順に読む）。
 
 ### インデックスの助言
 
@@ -552,10 +554,11 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 
 ### インメモリのリーダー（テスト用）
 
-生成した SQL と同じ意味論: フィルタ（NULL は一致しない、渡さないパラメータは無視）、検索（小文字にして、英数字の並びを単語とし、前に空白2つ・後ろに1つを足したトリグラムの集合で、共通 / 全体を float4 で — pg_trgm と同じ）、並び（文字列はコードポイント順）、キーセット、`limit + 1`。行は Aggregate をリポジトリと同じ行の形にしたもので、項目は同じ `<query>ItemFromRow` で作る。PGlite（WebAssembly の PostgreSQL 18 と pg_trgm）での生成器のテストが、同じデータに対するページごとの結果の一致を確かめる。`lower()` はデータベースのロケールに従うので、英数字以外の大文字小文字の扱いが違うことがある。
+生成した SQL と同じ意味論: フィルタ（NULL は一致しない、渡さないパラメータは無視、呼び出し元での絞り込みはいつも効き、値がなければ何も一致しない）、検索（小文字にして、英数字の並びを単語とし、前に空白2つ・後ろに1つを足したトリグラムの集合で、共通 / 全体を float4 で — pg_trgm と同じ）、並び（文字列はコードポイント順）、キーセット、`limit + 1`。行は Aggregate をリポジトリと同じ行の形にしたもので、項目は同じ `<query>ItemFromRow` で作る。PGlite（WebAssembly の PostgreSQL 18 と pg_trgm）での生成器のテストが、同じデータに対するページごとの結果の一致を確かめる。`lower()` はデータベースのロケールに従うので、英数字以外の大文字小文字の扱いが違うことがある。
 
 ### 移行メモ（2026-10-06）
 
 - 既存のモデルは何も変わらない（`queries:` を書いたコンテキストだけが対象）。
+- `security` のあるモデルのクエリには `authorize` が要る（2026-10-06、docs/09 §21）。`public` 以外のクエリの `execute` に principal の引数が増え（`ddd diff` が破壊的変更として示す）、`persistence.ts` / `_persistence.py` の `runQuery` / `run_query` と指紋に省略可能な `scope` が加わる（`security` のないモデルの生成物は変わらない）。
 - `queries:` を足すと、そのコンテキストに `sql/<context>.sql` と永続化のファイルが増える。TypeScript の API を使っていれば `api/runtime.ts` の `send` が export され、`api/query-runtime.ts` が増え、保存する Use case のエラーの一覧に `concurrency_conflict: 409` が加わる。
 - 依存は増えない（TypeScript は `node:crypto`、Python は標準ライブラリ）。PostgreSQL のドライバ（`pg` / PGlite / psycopg）はアプリが選んで入れる。
