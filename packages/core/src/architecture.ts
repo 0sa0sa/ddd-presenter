@@ -68,6 +68,8 @@ export interface ArchRelation {
   path?: Path;
   /** Dashed in the diagrams (events, implemented-by, optional dependencies). */
   dashed?: boolean;
+  /** Laid out against its direction (an adapter implementing a port sits below the port it points to). */
+  upward?: boolean;
 }
 
 export interface ArchGroup {
@@ -669,13 +671,13 @@ export function deriveArchitecture(model: ModelIR, analysis?: Analysis, options:
     const memory = id("adapter", "memory");
     const pg = id("adapter", "postgres");
     for (const ag of ctx.aggregates) {
-      V.link(memory, id("port", `${ag.name}Repository`), t("implements", "実装"), { dashed: true });
-      V.link(pg, id("port", `${ag.name}Repository`), t("implements", "実装"), { dashed: true });
+      V.link(memory, id("port", `${ag.name}Repository`), t("implements", "実装"), { dashed: true, upward: true });
+      V.link(pg, id("port", `${ag.name}Repository`), t("implements", "実装"), { dashed: true, upward: true });
     }
-    for (const q of ctx.queries) V.link(pg, id("port", `${pascal(q.name)}Reader`), t("implements", "実装"), { dashed: true });
+    for (const q of ctx.queries) V.link(pg, id("port", `${pascal(q.name)}Reader`), t("implements", "実装"), { dashed: true, upward: true });
     V.link(pg, "ctr:postgres", "SQL", { technology: tenancy ? (tenancy.rls ? "SQL, tenant_id + RLS" : "SQL, tenant_id") : "SQL" });
-    if (ctx.extensionPoints.length) V.link(id("adapter", "extensions"), id("port", "Extensions"), t("implements", "実装"), { dashed: true });
-    for (const up of aclUpstreams) V.link(id("adapter", "extensions"), id("port", `${up}Translator`), t("implements", "実装"), { dashed: true });
+    if (ctx.extensionPoints.length) V.link(id("adapter", "extensions"), id("port", "Extensions"), t("implements", "実装"), { dashed: true, upward: true });
+    for (const up of aclUpstreams) V.link(id("adapter", "extensions"), id("port", `${up}Translator`), t("implements", "実装"), { dashed: true, upward: true });
     contexts.push(V.build());
   }
 

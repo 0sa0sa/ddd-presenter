@@ -52,10 +52,11 @@ export function layoutArchitecture(view: ArchView): Record<string, Point> {
   const seen = new Set<string>();
   for (const r of view.relations) {
     if (!index.has(r.source) || !index.has(r.target) || r.source === r.target) continue;
-    const key = `${r.source}\u0000${r.target}`;
+    const [from, to] = r.upward ? [r.target, r.source] : [r.source, r.target];
+    const key = `${from}\u0000${to}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.get(r.source)!.push(r.target);
+    out.get(from)!.push(to);
   }
   // Break cycles: drop edges to a node on the DFS stack.
   const state = new Map<string, 1 | 2>();
@@ -362,7 +363,10 @@ function wrapUnits(text: string, maxUnits: number, maxLines: number): string[] {
     }
   }
   if (line) lines.push(line);
-  if (lines.length > maxLines) return [...lines.slice(0, maxLines - 1), clip(lines[maxLines - 1]!, maxUnits - 1) + (lines[maxLines - 1]!.endsWith("…") ? "" : "…")];
+  if (lines.length > maxLines) {
+    const last = clip(lines[maxLines - 1]!, maxUnits - 1);
+    return [...lines.slice(0, maxLines - 1), last.endsWith("…") ? last : `${last}…`];
+  }
   return lines;
 }
 

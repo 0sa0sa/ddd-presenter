@@ -2318,6 +2318,7 @@ input[aria-invalid="true"] {
 }
 .main.has-notice {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
 
 /* ------------------------------------------------------------------ account menu (top bar) */
 
@@ -2550,4 +2551,14 @@ input[aria-invalid="true"] {
     border-left: 0;
     border-top: 1px solid var(--line);
   }
+}
+.arch-panel > * {
+  min-width: 0;
+}
+.arch-panel .badge-chip {
+  overflow-wrap: anywhere;
+}
+.arch-list .linklike {
+  text-align: left;
+  overflow-wrap: anywhere;
 }

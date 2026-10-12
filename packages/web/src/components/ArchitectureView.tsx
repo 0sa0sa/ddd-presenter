@@ -27,7 +27,7 @@ import {
   type RelationshipPattern,
   type SubdomainKind,
 } from "@ddd/core";
-import { Background, ConnectionMode, Controls, Handle, MarkerType, Position, ReactFlow, type Connection, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { Background, ConnectionMode, Controls, Handle, MarkerType, Position, ReactFlow, type Connection, type Edge, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, describeError } from "../api.ts";
 import {
@@ -68,7 +68,7 @@ const KIND_JA: Record<ArchKind, string> = {
 };
 
 type Layouts = Record<string, { version: number; positions: Record<string, Point> }>;
-type ANode = Node<{ e: ArchElement; connectable: boolean; drillable: boolean }, "arch">;
+type ANode = Node<{ e: ArchElement; connectable: boolean; drillable: boolean; onDrill: (id: string) => void }, "arch">;
 
 function ArchNode({ data, selected }: NodeProps<ANode>) {
   const { e, connectable } = data;
@@ -81,6 +81,7 @@ function ArchNode({ data, selected }: NodeProps<ANode>) {
     <div
       className={`anode anode-${e.kind}${selected ? " selected" : ""}`}
       style={{ width: size.w, height: size.h, background: c.fill, color: c.text, borderColor: c.stroke }}
+      onDoubleClick={() => data.drillable && data.onDrill(e.id)}
       title={[e.label, e.technology && `[${e.technology}]`, e.description, data.drillable ? "ダブルクリックで中身を表示" : ""].filter(Boolean).join("\n")}
     >
       <div className="anode-label">{e.label}</div>
@@ -175,19 +176,38 @@ export function ArchitectureView({
   useEffect(() => setSelection(undefined), [view.level]);
 
   // --- nodes and edges -------------------------------------------------------------------
+  const flow = useRef<ReactFlowInstance<ANode> | undefined>(undefined);
+  // A new element (e.g. an added context) may land outside the visible area: refit when the view gains elements.
+  const elementCount = useRef<{ level: string; n: number }>({ level: "", n: 0 });
+  useEffect(() => {
+    const prev = elementCount.current;
+    elementCount.current = { level: view.level, n: view.elements.length };
+    if (prev.level === view.level && view.elements.length > prev.n) setTimeout(() => void flow.current?.fitView({ padding: 0.15, duration: 250 }), 60);
+  }, [view.level, view.elements.length]);
+  /** Double-click handler of the nodes (the node component calls it; React Flow's node double-click is unreliable after a selection re-render). */
+  const drillRef = useRef<(id: string) => void>(() => undefined);
   const [nodes, setNodes] = useState<ANode[]>([]);
   const connectableLevel = canEdit && view.level === "system";
   useEffect(() => {
-    setNodes(
-      view.elements.map((e) => ({
-        id: e.id,
-        type: "arch",
-        position: positions[e.id]!,
-        data: { e, connectable: connectableLevel && e.kind === "context", drillable: !!e.drill && e.drill !== view.level },
-        draggable: canEdit,
-        selected: selection?.type === "node" && selection.id === e.id,
-        ariaLabel: `${KIND_JA[e.kind]} ${e.label}`,
-      })),
+    // Existing nodes are updated in place: a fresh node object loses React Flow's measurements and is hidden until it
+    // is measured again (a double-click would then land on the pane).
+    setNodes((prev) =>
+      view.elements.map((e) => {
+        const size = archNodeSize(e);
+        const old = prev.find((n) => n.id === e.id);
+        return {
+          ...old,
+          id: e.id,
+          type: "arch" as const,
+          position: positions[e.id]!,
+          width: size.w,
+          height: size.h,
+          data: { e, connectable: connectableLevel && e.kind === "context", drillable: !!e.drill && e.drill !== view.level, onDrill: (nid: string) => drillRef.current(nid) },
+          draggable: canEdit,
+          selected: selection?.type === "node" && selection.id === e.id,
+          ariaLabel: `${KIND_JA[e.kind]} ${e.label}`,
+        };
+      }),
     );
   }, [view, positions, canEdit, connectableLevel, selection]);
 
@@ -293,6 +313,7 @@ export function ArchitectureView({
   const drill = (e: ArchElement | undefined) => {
     if (e?.drill && e.drill !== view.level && architectureView(arch, e.drill)) setLevel(e.drill);
   };
+  drillRef.current = (nid: string) => drill(view.elements.find((e) => e.id === nid));
 
   const onConnect = (c: Connection) => {
     if (!canEdit || view.level !== "system" || !c.source || !c.target) return;
@@ -443,9 +464,8 @@ export function ArchitectureView({
               )
             }
             onNodeDragStop={(_, n) => onDragStop(n.id, n.position)}
-            onNodeClick={(_, n) => setSelection({ type: "node", id: n.id })}
-            onNodeDoubleClick={(_, n) => drill(view.elements.find((e) => e.id === n.id))}
-            onEdgeClick={(_, e) => setSelection({ type: "edge", id: e.id })}
+            onNodeClick={(_, n) => setSelection((s) => (s?.type === "node" && s.id === n.id ? s : { type: "node", id: n.id }))}
+            onEdgeClick={(_, e) => setSelection((s) => (s?.type === "edge" && s.id === e.id ? s : { type: "edge", id: e.id }))}
             onSelectionChange={({ nodes: ns, edges: es }) => {
               if (ns[0]) setSelection((s) => (s?.type === "node" && s.id === ns[0]!.id ? s : { type: "node", id: ns[0]!.id }));
               else if (es[0]) setSelection((s) => (s?.type === "edge" && s.id === es[0]!.id ? s : { type: "edge", id: es[0]!.id }));
@@ -456,14 +476,13 @@ export function ArchitectureView({
             fitViewOptions={{ padding: 0.15 }}
             minZoom={0.15}
             proOptions={{ hideAttribution: true }}
+            onInit={(instance) => {
+              flow.current = instance;
+            }}
           >
             <Background gap={24} size={1} color="var(--line)" />
             <Controls showInteractive={false} />
           </ReactFlow>
-          <div className="arch-legend small muted">
-            {view.level === "system" && canEdit ? "コンテキストの点から別のコンテキストへドラッグすると関係を追加できます。" : ""}
-            ダブルクリック（または選んで Enter）で中身を表示{canEdit ? "・ドラッグで配置（意味は変わりません）" : ""}
-          </div>
         </div>
         <aside className="arch-panel" aria-label="選択した要素">
           {opError && (
@@ -524,7 +543,7 @@ export function ArchitectureView({
               }}
             />
           ) : (
-            <ViewSummary view={view} />
+            <ViewSummary view={view} canEdit={canEdit} />
           )}
         </aside>
       </div>
@@ -589,7 +608,7 @@ function Badges({ badges }: { badges: string[] }) {
   );
 }
 
-function ViewSummary({ view }: { view: ArchView }) {
+function ViewSummary({ view, canEdit }: { view: ArchView; canEdit: boolean }) {
   const counts = new Map<ArchKind, number>();
   for (const e of view.elements) counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
   return (
@@ -605,6 +624,12 @@ function ViewSummary({ view }: { view: ArchView }) {
         <li>関係: {view.relations.length}</li>
       </ul>
       <p className="small muted">要素や線を選ぶと、ここに詳細と操作が出ます。</p>
+      <ul className="small muted arch-list">
+        <li>ダブルクリック（または選んで Enter）で中身を表示。上のパンくずで戻れます</li>
+        {canEdit && <li>ドラッグで配置を変えられます（意味は変わりません。配置はレベルごとに保存されます）</li>}
+        {canEdit && view.level === "system" && <li>コンテキストの縁の点から別のコンテキストへドラッグすると関係を追加できます（パネルからも追加できます）</li>}
+        <li>実線は呼び出し・依存、破線はイベント・実装・外部への問い合わせ</li>
+      </ul>
     </section>
   );
 }
@@ -719,8 +744,8 @@ function ElementPanel({
               <ul className="small arch-list">
                 {files.slice(0, 14).map((f) => (
                   <li key={f}>
-                    <button className="linklike" onClick={() => onOpenFile(f)}>
-                      {f}
+                    <button className="linklike" onClick={() => onOpenFile(f)} title={`${f} を生成プレビューで開く`}>
+                      {f.replace(/^.*?\/generated\//, "…/generated/")}
                     </button>
                   </li>
                 ))}
