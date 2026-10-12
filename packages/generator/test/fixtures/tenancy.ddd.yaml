@@ -1,0 +1,295 @@
+schema_version: 1
+project: tenant-hiring
+description: Multi-tenancy (row isolation, tenant-scoped repositories, queries and events) and RBAC (permissions, role inheritance, platform roles)
+generation:
+  package: tenant_hiring
+
+security:
+  tenancy:
+    claim: org_id
+    type: UUID
+    isolation: row
+  roles:
+    admin: { inherits: [staff], permissions: [invitation.revoke] }
+    staff: { permissions: [invitation.issue, invitation.read, invitation.list] }
+    candidate: { permissions: [invitation.accept] }
+  platform_roles:
+    operator: { permissions: [invitation.read, template.manage] }
+    support: { inherits: [operator], permissions: [invitation.revoke] }
+  principal:
+    id: String
+    claims:
+      - { name: email, type: String, required: false }
+  authentication:
+    scheme: bearer_jwt
+    issuer: https://auth.example.com/
+    audience: tenant-hiring
+    algorithms: [RS256]
+  rate_limits:
+    default: { requests: 60, per: minute, by: tenant }
+
+contexts:
+  - name: Hiring
+    errors:
+      - { name: InvitationNotFound, code: invitation_not_found, message: invitation not found }
+      - { name: InvitationClosed, code: invitation_closed, message: the invitation is closed }
+    enums:
+      - { name: InvitationStatus, values: [pending, accepted, revoked] }
+    value_objects:
+      - name: EmailAddress
+        fields:
+          - { name: value, type: String, constraints: { min_length: 3, max_length: 254 } }
+        normalize: { value: [strip, lower] }
+    aggregates:
+      # Shared reference data: every tenant reads the same templates; only platform roles change them.
+      - name: InvitationTemplate
+        identity: id
+        tenancy: global
+        authorize: authenticated
+        fields:
+          - { name: id, type: UUID }
+          - { name: title, type: String }
+        factories:
+          - name: define
+            parameters: [{ name: id, type: UUID }, { name: title, type: String }]
+            fields: { id: id, title: title }
+            emits: [{ name: TemplateDefined, fields: [id, title] }]
+      - name: Invitation
+        identity: id
+        authorize:
+          permissions: [invitation.read]
+          allow_if: has_permission(principal, "invitation.read") or (principal.email != null and principal.email == email.value)
+        fields:
+          - { name: id, type: UUID }
+          - { name: email, type: EmailAddress }
+          - { name: status, type: InvitationStatus }
+          - { name: template_id, type: "Ref[InvitationTemplate]", required: false }
+          - { name: created_at, type: DateTime }
+        state_guards:
+          - { name: is_open, expression: status == pending, error: InvitationClosed }
+        factories:
+          - name: issue
+            parameters: [{ name: id, type: UUID }, { name: email, type: EmailAddress }, { name: at, type: DateTime }]
+            fields: { id: id, email: email, status: pending, created_at: at }
+            emits: [{ name: InvitationIssued, fields: [id, email] }]
+        operations:
+          - name: accept
+            require: [is_open]
+            changes: { status: accepted }
+            emits: [{ name: InvitationAccepted, fields: [id] }]
+          - name: revoke
+            require: [is_open]
+            changes: { status: revoked }
+            emits: [{ name: InvitationRevoked, fields: [id] }]
+    use_cases:
+      - name: issue_invitation
+        command: IssueInvitation
+        authorize: { permissions: [invitation.issue] }
+        rate_limit: { requests: 10, per: minute, by: tenant }
+        idempotency_key: request_id
+        input:
+          - { name: request_id, type: UUID }
+          - { name: email, type: EmailAddress }
+        steps:
+          - create: { aggregate: Invitation, factory: issue, as: invitation, args: { id: ids.new, email: email, at: clock.now } }
+          - save: invitation
+          - publish_after_commit: InvitationIssued
+          - return: invitation.id
+        scenarios:
+          - name: staff_issues_in_their_tenant
+            given: { clock: "2026-01-01T10:00:00+00:00", ids: ["00000000-0000-4000-8000-0000000000aa"] }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f1", email: { value: new@example.com } } }
+            then:
+              returns: "00000000-0000-4000-8000-0000000000aa"
+              state: [{ aggregate: Invitation, id: "00000000-0000-4000-8000-0000000000aa", fields: { status: pending } }]
+              emits: [{ event: InvitationIssued, fields: { email: { value: new@example.com } } }]
+          - name: admin_inherits_staff_permissions
+            given:
+              clock: "2026-01-01T10:00:00+00:00"
+              ids: ["00000000-0000-4000-8000-0000000000ab"]
+              principal: { id: admin-1, roles: [admin] }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f2", email: { value: other@example.com } } }
+            then: { returns: "00000000-0000-4000-8000-0000000000ab" }
+          - name: candidate_cannot_issue
+            given: { clock: "2026-01-01T10:00:00+00:00", principal: { id: candidate-1, roles: [candidate] } }
+            when: { input: { request_id: "00000000-0000-4000-8000-0000000000f3", email: { value: new@example.com } } }
+            then: { raises: NotAuthorized }
+      - name: accept_invitation
+        command: AcceptInvitation
+        authorize:
+          permissions: [invitation.accept]
+          allow_if: principal.email != null and principal.email == invitation.email.value
+        input: [{ name: invitation_id, type: UUID }]
+        steps:
+          - load: { aggregate: Invitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - invoke: { target: invitation, operation: accept }
+          - save: invitation
+          - publish_after_commit: InvitationAccepted
+        scenarios:
+          - name: invited_candidate_accepts
+            given:
+              principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com } }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then:
+              state: [{ aggregate: Invitation, id: "00000000-0000-4000-8000-000000000001", fields: { status: accepted } }]
+              emits: [{ event: InvitationAccepted, fields: { id: "00000000-0000-4000-8000-000000000001" } }]
+          - name: another_tenant_sees_no_invitation
+            description: The candidate's token names another tenant, so the invitation does not exist for it (no existence leak)
+            given:
+              principal: { id: candidate-1, roles: [candidate], claims: { email: staff@example.com }, tenant: "00000000-0000-4000-8000-0000000000b2" }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then: { raises: InvitationNotFound }
+      - name: revoke_invitation
+        command: RevokeInvitation
+        authorize: { permissions: [invitation.revoke] }
+        input: [{ name: invitation_id, type: UUID }]
+        steps:
+          - load: { aggregate: Invitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - invoke: { target: invitation, operation: revoke }
+          - save: invitation
+          - publish_after_commit: InvitationRevoked
+        scenarios:
+          - name: admin_revokes
+            given:
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then:
+              state: [{ aggregate: Invitation, id: "00000000-0000-4000-8000-000000000001", fields: { status: revoked } }]
+          - name: staff_lacks_revoke
+            given:
+              principal: { roles: [staff] }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then: { raises: NotAuthorized }
+      # Platform support acting inside one named tenant: explicit, limited to platform roles, audited.
+      - name: support_revoke_invitation
+        command: SupportRevokeInvitation
+        authorize: { permissions: [invitation.revoke], cross_tenant: true }
+        input: [{ name: invitation_id, type: UUID }]
+        steps:
+          - load: { aggregate: Invitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - invoke: { target: invitation, operation: revoke }
+          - save: invitation
+          - publish_after_commit: InvitationRevoked
+        scenarios:
+          - name: support_revokes_in_the_named_tenant
+            given:
+              principal: { id: support-1, roles: [], platform_roles: [support], tenant: null }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { tenant_id: "00000000-0000-4000-8000-0000000000a1", invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then:
+              state: [{ aggregate: Invitation, id: "00000000-0000-4000-8000-000000000001", fields: { status: revoked } }]
+          - name: tenant_admin_cannot_act_across_tenants
+            given:
+              principal: { id: admin-1, roles: [admin] }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { tenant_id: "00000000-0000-4000-8000-0000000000a1", invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then: { raises: NotAuthorized }
+      - name: inspect_invitation
+        command: InspectInvitation
+        authorize: { permissions: [invitation.read], cross_tenant: true }
+        input: [{ name: invitation_id, type: UUID }]
+        steps:
+          - load: { aggregate: Invitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - return: invitation.status
+        scenarios:
+          - name: operator_reads_status
+            given:
+              principal: { id: operator-1, platform_roles: [operator] }
+              aggregates:
+                - type: Invitation
+                  fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: staff@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+            when: { input: { tenant_id: "00000000-0000-4000-8000-0000000000a1", invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then: { returns: pending }
+      - name: define_template
+        command: DefineTemplate
+        authorize: { permissions: [template.manage] }
+        input: [{ name: title, type: String }]
+        steps:
+          - create: { aggregate: InvitationTemplate, factory: define, as: template, args: { id: ids.new, title: title } }
+          - save: template
+          - return: template.id
+        scenarios:
+          - name: operator_defines_shared_template
+            given: { ids: ["00000000-0000-4000-8000-0000000000cc"], principal: { id: operator-1, platform_roles: [operator], tenant: null } }
+            when: { input: { title: Welcome } }
+            then: { returns: "00000000-0000-4000-8000-0000000000cc" }
+    queries:
+      - name: search_invitations
+        from: Invitation
+        authorize: { permissions: [invitation.list] }
+        params:
+          - { name: status, type: InvitationStatus }
+        where:
+          - { field: status, op: eq, param: status }
+        search: { param: q, fields: [email.value], mode: trigram }
+        order_by: [relevance, { field: created_at, direction: desc }]
+        page: { size: 2, max_size: 50 }
+        returns: [id, email, status, created_at]
+        scenarios:
+          - name: own_tenant_newest_first
+            given:
+              aggregates:
+                - fields: { id: "00000000-0000-4000-8000-000000000001", email: { value: alice@example.com }, status: pending, created_at: "2026-01-01T10:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-000000000002", email: { value: bob@example.com }, status: accepted, created_at: "2026-01-02T10:00:00+00:00" }
+                - fields: { id: "00000000-0000-4000-8000-000000000003", email: { value: carol@example.com }, status: pending, created_at: "2026-01-03T10:00:00+00:00" }
+            when: { limit: 2, pages: 2 }
+            then:
+              items: ["00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"]
+              next_cursor: absent
+
+  - name: Staffing
+    aggregates:
+      - name: StaffMember
+        identity: id
+        authorize: { roles: [admin] }
+        fields:
+          - { name: id, type: UUID }
+          - { name: invitation_id, type: UUID }
+        factories:
+          - name: register
+            parameters: [{ name: id, type: UUID }, { name: invitation_id, type: UUID }]
+            fields: { id: id, invitation_id: invitation_id }
+            emits: [{ name: StaffRegistered, fields: [id, invitation_id] }]
+    use_cases:
+      - name: register_staff
+        command: RegisterStaff
+        authorize: internal
+        input: [{ name: invitation_id, type: UUID }]
+        steps:
+          - create: { aggregate: StaffMember, factory: register, as: staff, args: { id: ids.new, invitation_id: invitation_id } }
+          - save: staff
+          - publish_after_commit: StaffRegistered
+          - return: staff.id
+        scenarios:
+          - name: registers_in_the_event_tenant
+            given: { ids: ["00000000-0000-4000-8000-0000000000bb"] }
+            when: { input: { invitation_id: "00000000-0000-4000-8000-000000000001" } }
+            then:
+              returns: "00000000-0000-4000-8000-0000000000bb"
+              emits: [{ event: StaffRegistered, fields: { invitation_id: "00000000-0000-4000-8000-000000000001" } }]
+    policies:
+      - name: register_staff_on_acceptance
+        when: Hiring.InvitationAccepted
+        run: register_staff
+        args: { invitation_id: event.id }
+
+relationships:
+  - upstream: Hiring
+    downstream: Staffing
+    pattern: customer_supplier
+    events: [InvitationAccepted]

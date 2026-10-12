@@ -6,10 +6,12 @@
  * Design and sources: docs/09 §19; DSL: docs/10 §10; contract: docs/05 §9.
  */
 import type { DiagnosticBag, Path } from "./diagnostics.ts";
-import type { AggregateIR, AuthorizeIR, ContextIR, FieldIR, RateLimitIR, ScenarioPrincipalIR, SecurityIR } from "./ir.ts";
+import { TENANT_FIELD, type AggregateIR, type AuthorizeIR, type ContextIR, type FieldIR, type RateLimitIR, type ScenarioPrincipalIR, type SecurityIR } from "./ir.ts";
 import type { Reader } from "./parse.ts";
 import { assignable, closest, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
-import { checkRateLimitUse, checkRoles, principalMembers, scenarioPrincipal } from "./security.ts";
+import { aggregateScope, checkRateLimitUse, checkRoles, checkTenantRateLimit, isTenantScoped, principalMembers, satisfies, scenarioPrincipal } from "./security.ts";
+
+
 
 // ---------------------------------------------------------------------------
 // IR
@@ -285,6 +287,16 @@ export interface TableIR {
   identity: ColumnIR;
   /** Every column except `version`, in field order (the identity among them). */
   columns: ColumnIR[];
+  /**
+   * The `tenant_id` column of a tenant-scoped aggregate (with `security.tenancy`; docs/09 §22). Not among `columns`:
+   * it is set from the caller's tenant, never from a field, and every statement filters by it.
+   */
+  tenant?: ColumnIR;
+}
+
+/** The tenant column of a tenant-scoped aggregate's table (`security.tenancy.type` decides uuid or text). */
+export function tenantColumn(type: "UUID" | "String"): ColumnIR {
+  return { name: TENANT_FIELD, path: [TENANT_FIELD], type: type === "UUID" ? T.UUID : T.String, nullable: false, sql: type === "UUID" ? "uuid" : "text" };
 }
 
 /** Name of the optimistic-locking column every table has. */
@@ -323,7 +335,7 @@ export function scalarSqlType(ctx: ContextIR, fieldTypes: Map<string, Map<string
  * column per field (`email.value` → `email_value`, recursively); an optional value object, a list or an entity is
  * one jsonb column holding its JSON form (model field names). Enums are text with a CHECK constraint.
  */
-export function tableOf(ctx: ContextIR, fieldTypes: Map<string, Map<string, Type>>, aggregate: AggregateIR): TableIR {
+export function tableOf(ctx: ContextIR, fieldTypes: Map<string, Map<string, Type>>, aggregate: AggregateIR, security?: SecurityIR): TableIR {
   const columns: ColumnIR[] = [];
   const enumValues = (t: Type) => (t.k === "enum" ? ctx.enums.find((e) => e.name === t.name)?.values : undefined);
   const visit = (path: string[], t: Type, nullable: boolean) => {
@@ -342,7 +354,8 @@ export function tableOf(ctx: ContextIR, fieldTypes: Map<string, Map<string, Type
   };
   for (const [f, t] of fieldTypes.get(aggregate.name) ?? new Map<string, Type>()) visit([f], t, false);
   const identity = columns.find((c) => c.path.length === 1 && c.path[0] === aggregate.identity) ?? { name: aggregate.identity, path: [aggregate.identity], type: T.UUID, nullable: false, sql: "uuid" as const };
-  return { schema: snake(ctx.name), name: snake(aggregate.name), aggregate: aggregate.name, identity, columns };
+  const tenant = security?.tenancy && isTenantScoped(security, aggregate) ? { tenant: tenantColumn(security.tenancy.type) } : {};
+  return { schema: snake(ctx.name), name: snake(aggregate.name), aggregate: aggregate.name, identity, columns, ...tenant };
 }
 
 /** The column a field path maps to, or why it maps to none. */
@@ -379,10 +392,10 @@ export interface QueryPlan {
 }
 
 /** Resolves a validated query. Returns undefined if something does not resolve (the model has errors). */
-export function planQuery(ctx: ContextIR, fieldTypes: Map<string, Map<string, Type>>, q: QueryIR): QueryPlan | undefined {
+export function planQuery(ctx: ContextIR, fieldTypes: Map<string, Map<string, Type>>, q: QueryIR, security?: SecurityIR): QueryPlan | undefined {
   const aggregate = ctx.aggregates.find((a) => a.name === q.from);
   if (!aggregate) return undefined;
-  const table = tableOf(ctx, fieldTypes, aggregate);
+  const table = tableOf(ctx, fieldTypes, aggregate, security);
   const col = (field: string) => {
     const r = columnAt(table, field.split("."));
     return "column" in r ? r.column : undefined;
@@ -510,7 +523,7 @@ export function checkQueries(h: QueryValidationHost): void {
 }
 
 function checkTable(h: QueryValidationHost, ag: AggregateIR): void {
-  const table = tableOf(h.ctx, h.fieldTypes, ag);
+  const table = tableOf(h.ctx, h.fieldTypes, ag, h.security);
   const el = h.el(ag.name);
   const byName = new Map<string, string>();
   for (const c of table.columns) {
@@ -522,6 +535,9 @@ function checkTable(h: QueryValidationHost, ag: AggregateIR): void {
     byName.set(c.name, field);
     if (c.name === VERSION_COLUMN) {
       h.bag.error("reserved-name", `Field ${field} of ${ag.name} maps to the column "version", which holds the optimistic-locking version`, ag.path, { element: el, hint: "Rename the field, e.g. revision" });
+    }
+    if (table.tenant && c.name === table.tenant.name) {
+      h.bag.error("reserved-name", `Field ${field} of ${ag.name} maps to the column "${c.name}", which holds the tenant`, ag.path, { element: el, hint: "Rename the field" });
     }
     if (c.name.length > MAX_IDENTIFIER_LENGTH) {
       h.bag.error("invalid-name", `Column "${c.name}" of ${ag.name} is longer than PostgreSQL's ${MAX_IDENTIFIER_LENGTH}-byte identifier limit`, ag.path, { element: el, hint: "Use shorter field names" });
@@ -801,8 +817,11 @@ function checkQueryAccess(h: QueryValidationHost, q: QueryIR, el: string): Map<s
       hint: "Scope the rows in where with the caller instead: - { field: company_id, op: eq, principal: company_id }",
     });
   }
-  checkRoles(h.bag, sec, a, el);
+  const from = h.ctx.aggregates.find((x) => x.name === q.from);
+  const scope = from ? aggregateScope(sec, from) : "none";
+  checkRoles(h.bag, sec, a, el, { kind: "query", scope });
   checkRateLimitUse(h.bag, q, el);
+  checkTenantRateLimit(h.bag, sec, q, scope, el);
   if (a.kind === "public") {
     for (const f of scoped) {
       h.bag.error("invalid-principal-filter", `A public query has no principal to compare ${f.field} with`, [...f.path, "principal"], { element: el, hint: "Use authorize: authenticated or { roles: [...] }" });
@@ -858,8 +877,14 @@ function checkQueryScenarioPrincipal(h: QueryValidationHost, q: QueryIR, sc: Que
   if (p) h.checkGivenPrincipal(p, el);
   const resolved = scenarioPrincipal(sec, q, sc);
   const roles = q.authorize.roles;
-  if (p && roles.length && !roles.some((r) => resolved.roles.includes(r))) {
-    h.bag.error("invalid-scenario", `The principal holds none of ${roles.join(", ")}: ${q.name} raises NotAuthorized (the generated tests check that)`, [...p.path, "roles"], { element: el, hint: `Give it one of the roles ${roles.join(", ")}` });
+  const from = h.ctx.aggregates.find((x) => x.name === q.from);
+  const scope = from ? aggregateScope(sec, from) : "none";
+  if (p && scope === "tenant" && resolved.tenant === null) {
+    h.bag.error("invalid-scenario", `${q.name} reads tenant-scoped data; a principal without a tenant raises Unauthenticated (the generated tests check that)`, p.path, { element: el, hint: "Leave given.principal.tenant out (the default test tenant) or give one" });
+  }
+  if (p && (roles.length || q.authorize.permissions?.length) && !satisfies(sec, q.authorize, resolved, scope)) {
+    const required = [...roles, ...(q.authorize.permissions ?? [])];
+    h.bag.error("invalid-scenario", `The principal holds none of ${required.join(", ")}: ${q.name} raises NotAuthorized (the generated tests check that)`, [...p.path, "roles"], { element: el, hint: q.authorize.permissions?.length ? `Give it a role granting one of ${required.join(", ")}` : `Give it one of the roles ${roles.join(", ")}` });
   }
   const members = scopeMembers(sec);
   for (const member of queryScope(q)) {

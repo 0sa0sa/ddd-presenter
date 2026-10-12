@@ -1,4 +1,4 @@
-import { pascal, T, toSnake, type TExpr, type Type } from "@ddd/core";
+import { pascal, T, toSnake, type AccessScope, type TExpr, type Type } from "@ddd/core";
 
 export { pascal, toSnake };
 
@@ -245,6 +245,11 @@ export interface ExprContext {
   ports?: { clock: string; ids: string; extensions: string };
   /** How guards are consumed: boolean check (default) or raising. */
   guardMode?: "checks" | "assert_holds";
+  /**
+   * Authorization rules of a model with permissions or tenancy (docs/09 §22): `has_role` resolves inherited roles and
+   * `has_permission` checks the roles that count where the rule runs (tenant roles, platform roles, or either).
+   */
+  access?: { securityModule: string; scope: AccessScope; platformRoles: boolean };
 }
 
 /** Python precedence levels: or < and < not < comparison < + - < * / < unary - < atom. */
@@ -393,7 +398,25 @@ function emit(e: TExpr, ctx: ExprContext): [string, Prec] {
     case "principal":
       return [`principal.${e.member}`, ATOM];
     case "hasRole":
+      if (ctx.access) {
+        ctx.imports.from(ctx.access.securityModule, "has_role");
+        return [`has_role(principal, ${pyString(e.role)})`, ATOM];
+      }
       return [`${pyString(e.role)} in principal.roles`, 3];
+    case "hasPermission": {
+      const access = ctx.access!;
+      if (access.scope === "cross_tenant") {
+        ctx.imports.from(access.securityModule, "has_platform_permission");
+        return [`has_platform_permission(principal, ${pyString(e.permission)})`, ATOM];
+      }
+      ctx.imports.from(access.securityModule, "has_permission");
+      if (access.scope === "global" && access.platformRoles) {
+        ctx.imports.from(access.securityModule, "has_platform_permission");
+        return [`has_permission(principal, ${pyString(e.permission)}) or has_platform_permission(principal, ${pyString(e.permission)})`, 0];
+      }
+      return [`has_permission(principal, ${pyString(e.permission)})`, ATOM];
+    }
+
     case "enumValue":
       ctx.imports.from(ctx.typeModule("enum", e.enumName), e.enumName);
       return [`${e.enumName}.${enumMember(e.value)}`, ATOM];

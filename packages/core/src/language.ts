@@ -9,6 +9,7 @@ import type { QueryIR } from "./queries.ts";
 import { PRIMITIVES, resolveType, typeToString, type Type } from "./types.ts";
 import { analyzeModel, parseEventRef, type Analysis } from "./validate.ts";
 import { formatPath, type Path } from "./diagnostics.ts";
+import { allPermissions } from "./security.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,6 +79,9 @@ type Container =
   | "principalClaim"
   | "security:authentication"
   | "security:rateLimits"
+  | "security:tenancy"
+  | "security:roles"
+  | "roleDef"
   | "rateLimit"
   | "authorize"
   | "given:principal"
@@ -149,7 +153,14 @@ type Container =
 const TRANSITIONS: Partial<Record<Container, Record<string, Container>>> = {
   root: { generation: "generation", security: "security", contexts: "context", relationships: "relationship" },
   generation: { typescript: "generation:typescript" },
-  security: { principal: "security:principal", authentication: "security:authentication", rate_limits: "security:rateLimits" },
+  security: {
+    principal: "security:principal",
+    authentication: "security:authentication",
+    rate_limits: "security:rateLimits",
+    tenancy: "security:tenancy",
+    roles: "security:roles",
+    platform_roles: "security:roles",
+  },
   "security:principal": { claims: "principalClaim" },
   "security:rateLimits": { default: "rateLimit" },
   "generation:typescript": { api: "generation:typescript:api" },
@@ -214,6 +225,11 @@ function containerOf(chain: string[]): Container {
       c = "data:nested";
       continue;
     }
+    // The map form of roles / platform_roles: every key is a role name.
+    if (c === "security:roles") {
+      c = "roleDef";
+      continue;
+    }
     c = TRANSITIONS[c]?.[k] ?? "unknown";
   }
   return c;
@@ -228,7 +244,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("project", "プロジェクトID（生成物のマニフェストに記録）"),
     K("description", "説明"),
     K("generation", "生成設定（パッケージ名・出力先）"),
-    K("security", "認証・認可・レート制限（roles・principal・authentication・rate_limits）。宣言すると全 Use case / Aggregate に authorize が必要"),
+    K("security", "認証・認可・レート制限（tenancy・roles・platform_roles・principal・authentication・rate_limits）。宣言すると全 Use case / Aggregate に authorize が必要"),
     K("contexts", "Bounded context の一覧"),
     K("relationships", "コンテキストマップ（コンテキスト間の関係とイベント契約）"),
   ],
@@ -248,7 +264,9 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("client", "クライアントのライブラリ: tanstack-query（既定・唯一。@tanstack/react-query v5）"),
   ],
   security: [
-    K("roles", "宣言するロール（snake_case）。authorize.roles と has_role(principal, ロール) で使う"),
+    K("tenancy", "マルチテナント: { claim, type, isolation: row }。テナントは検証したトークンのクレームだけから決まり、Aggregate は既定でテナントごとに分離される"),
+    K("roles", "宣言するロール（snake_case）。リスト、またはマップ { admin: { inherits: [staff], permissions: [invitation.issue] } }（継承と権限）。authorize.roles / permissions と has_role で使う。tenancy があるとアクティブなテナントの中だけで効く"),
+    K("platform_roles", "テナントをまたぐプラットフォームのロール（運用・サポート）: { operator: { permissions: [...] } }。cross_tenant の Use case と共有データの変更だけで効く（tenancy が必要）"),
     K("principal", "呼び出し元の型: id（String / UUID）と claims（allow_if で principal.<名前> として読める）"),
     K("authentication", "認証の方式: scheme（bearer_jwt / custom）・issuer・audience・algorithms・roles_claim・clock_tolerance"),
     K("rate_limits", "レート制限の既定: default: { requests, per, by }"),
@@ -270,16 +288,35 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("clock_tolerance", "exp / nbf の許容する時計のずれ（秒。既定 30、最大 300）"),
   ],
   "security:rateLimits": [K("default", "rate_limit を書かないエンドポイントの制限: { requests, per, by }")],
+  "security:tenancy": [
+    K("claim", "アクティブなテナントを運ぶ JWT のクレーム（例: org_id）。テナントはこのクレームだけから決まる"),
+    K("type", "テナント ID の型: String / UUID（省略で同じクレームを読む principal の claims の型、なければ String）"),
+    K("isolation", "分離の方式: row（既定・唯一。共有スキーマ + tenant_id 列 + PostgreSQL の行レベルセキュリティ）"),
+    K("platform_roles_claim", "プラットフォームのロールを読むクレーム（既定 platform_roles。roles_claim とは別）"),
+  ],
+  roleDef: [
+    K("inherits", "継承するロール（NIST RBAC1 の階層。上位のロールは継承したロールの権限も持ち、authorize.roles のそのロールも満たす）。同じ種類のロールだけ"),
+    K("permissions", "このロールが与える権限（ドット区切りの小文字: invitation.issue）"),
+    K("description", "説明"),
+  ],
   rateLimit: [
     K("requests", "窓あたりのリクエスト数（トークンバケットの容量）"),
     K("per", "窓: second / minute / hour / day"),
-    K("by", "数える単位: principal（既定）/ ip / global"),
+    K("by", "数える単位: principal（既定）/ ip / global / tenant（テナントごと。tenancy が必要）"),
   ],
   authorize: [
-    K("roles", "いずれかを持てば実行できるロール（省略で認証済みなら誰でも）"),
+    K("roles", "いずれかを持てば実行できるロール（省略で認証済みなら誰でも。継承したロールも満たす）"),
+    K("permissions", "いずれかを持てば実行できる権限（ロールが与える。roles と any-of）"),
+    K("cross_tenant", "true: 入力の tenant_id のテナントの中で動く（プラットフォームのロールだけ。監査のフックを呼ぶ）"),
     K("allow_if", "読み込み後に確認する条件式（principal.*・has_role(principal, ロール)・入力・先頭の load の変数）"),
   ],
-  "given:principal": [K("id", "principal.id（省略で既定の ID）"), K("roles", "持っているロール"), K("claims", "クレームの値")],
+  "given:principal": [
+    K("id", "principal.id（省略で既定の ID）"),
+    K("roles", "持っているロール"),
+    K("claims", "クレームの値"),
+    K("tenant", "アクティブなテナント（tenancy があるとき。省略で既定のテスト用テナント、null でなし）"),
+    K("platform_roles", "持っているプラットフォームのロール（tenancy があるとき）"),
+  ],
   context: [
     K("name", "コンテキスト名（PascalCase）"),
     K("description", "責務の説明"),
@@ -321,8 +358,9 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("factories", "新しいAggregateを作る操作"),
     K("operations", "状態を変える名前付き操作"),
     K("scenarios", "Aggregate単体のGiven-When-Then（テストになる）"),
-    K("authorize", "識別子で読む（生成される読み取りと GET）ことを許す相手: public / authenticated / { roles, allow_if }（security を宣言したら必須）"),
+    K("authorize", "識別子で読む（生成される読み取りと GET）ことを許す相手: public / authenticated / { roles, permissions, allow_if }（security を宣言したら必須）"),
     K("rate_limit", "GET のレート制限: { requests, per, by } / none"),
+    K("tenancy", "tenant（既定。行はテナントのもので tenant_id を持つ）/ global（全テナントで共有する参照データ）。security.tenancy が必要"),
   ],
   entity: [K("name", "Entity名"), K("description", "説明"), K("identity", "識別子フィールド"), K("fields", "フィールド"), K("invariants", "不変条件")],
   invariant: [
@@ -428,7 +466,10 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("value", "比べるリテラル（いつも効く）"),
     K("principal", "比べる principal のメンバー: id か宣言したクレーム（いつも効く。クレームがなければ NotAuthorized）"),
   ],
-  queryAuthorize: [K("roles", "いずれかを持てば実行できるロール（ロールの確認は読む前。allow_if はクエリでは使えない）")],
+  queryAuthorize: [
+    K("roles", "いずれかを持てば実行できるロール（ロールの確認は読む前。allow_if はクエリでは使えない）"),
+    K("permissions", "いずれかを持てば実行できる権限（ロールが与える。roles と any-of）"),
+  ],
   querySearch: [
     K("param", "検索パラメータの名前（既定 q。省略可能な String）"),
     K("fields", "検索する String のフィールド（Value Object のフィールドも可）"),
@@ -909,7 +950,21 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
       { label: "principal", kind: "value" as const, detail: "既定。認証済みの principal ごと（公開エンドポイントでは IP ごと）", sortRank: 0 },
       { label: "ip", kind: "value" as const, detail: "クライアントの IP ごと（clientIp で取り出す）", sortRank: 1 },
       { label: "global", kind: "value" as const, detail: "全員で 1 つ", sortRank: 2 },
+      ...(s.model?.security?.tenancy ? [{ label: "tenant", kind: "value" as const, detail: "呼び出し元のアクティブなテナントごと（ノイジーネイバー対策）", sortRank: 3 }] : []),
     ];
+  if (c === "aggregate" && key === "tenancy")
+    return [
+      { label: "tenant", kind: "value" as const, detail: "既定。行はテナントのもの（tenant_id・行レベルセキュリティ）", sortRank: 0 },
+      { label: "global", kind: "value" as const, detail: "全テナントで共有する参照データ", sortRank: 1 },
+    ];
+  if (c === "security:tenancy" && key === "type") return ["UUID", "String"].map((v, i) => ({ label: v, kind: "value" as const, sortRank: i }));
+  if (c === "security:tenancy" && key === "isolation") return [{ label: "row", kind: "value" as const, detail: "共有スキーマ + tenant_id 列 + PostgreSQL の行レベルセキュリティ", sortRank: 0 }];
+  if (c === "roleDef" && key === "inherits") return (s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" }));
+  if ((c === "authorize" || c === "queryAuthorize") && key === "permissions" && s.model?.security)
+    return allPermissions(s.model.security).map((p) => ({ label: p, kind: "value" as const, detail: "権限" }));
+  if (c === "authorize" && key === "cross_tenant") return [{ label: "true", kind: "value" as const, detail: "入力の tenant_id のテナントで動く（プラットフォームのロールだけ）", sortRank: 0 }];
+  if (c === "given:principal" && key === "platform_roles")
+    return (s.model?.security?.platformRoles ?? []).map((r) => ({ label: r.name, kind: "value" as const, detail: "プラットフォームのロール" }));
   if ((c === "useCase" || c === "aggregate") && key === "authorize")
     return [
       { label: "public", kind: "value" as const, detail: "誰でも（principal なし）", sortRank: 0 },
@@ -930,7 +985,10 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
     ];
   }
   if (((c === "authorize" || c === "queryAuthorize") && key === "roles") || (c === "given:principal" && key === "roles"))
-    return (s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" }));
+    return [
+      ...(s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" })),
+      ...(c === "given:principal" ? [] : (s.model?.security?.platformRoles ?? []).map((r) => ({ label: r.name, kind: "value" as const, detail: "プラットフォームのロール" }))),
+    ];
   if (c === "authorize" && key === "allow_if" && s.model?.security) {
     const sec = s.model.security;
     const principal: CompletionItem[] = [
@@ -938,7 +996,9 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
       { label: "principal.roles", kind: "variable", detail: "List[String]", sortRank: 0 },
       ...sec.principal.claims.map((cl) => ({ label: `principal.${cl.name}`, kind: "variable" as const, detail: cl.required ? cl.type : `Optional[${cl.type}]`, sortRank: 0 })),
       ...sec.roles.map((r) => ({ label: `has_role(principal, ${r})`, kind: "function" as const, detail: "Boolean", sortRank: 1 })),
+      ...(sec.roleDefs || sec.platformRoles.length ? allPermissions(sec).map((p) => ({ label: `has_permission(principal, "${p}")`, kind: "function" as const, detail: "Boolean", sortRank: 1 })) : []),
     ];
+
     return [...principal, ...expressionCompletions(s, scope, pos)];
   }
   if (key === "raises" && c === "then:useCase" && s.model?.security)
@@ -1354,7 +1414,7 @@ function keyCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { kind
     return (uc?.input ?? []).filter((f) => !present.has(f.name)).map((f, i) => ({ label: f.name, kind: "field" as const, detail: `${f.type}${f.required ? "" : "（省略可）"}`, insertText: `${f.name}: `, sortRank: i }));
   }
   // authorize / rate_limit / given.principal only mean something once the model declares security.
-  const securityKeys = new Set(s.model?.security ? [] : ["authorize", "rate_limit", "principal"]);
+  const securityKeys = new Set(s.model?.security ? (s.model.security.tenancy ? [] : ["tenancy"]) : ["authorize", "rate_limit", "principal", "tenancy"]);
   const keys = (KEYS[pos.container] ?? []).filter((k) => !(securityKeys.has(k.key) && ["aggregate", "useCase", "given:useCase", "query", "queryFilter", "given:query"].includes(pos.container)));
   // Hide keys already present in the same mapping.
   const present = new Set(siblingKeys(s, pos));

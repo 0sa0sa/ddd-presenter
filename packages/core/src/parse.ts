@@ -23,6 +23,9 @@ import type {
   RelationshipIR,
   RelationshipPattern,
   RateLimitIR,
+  RoleDefIR,
+  TenancyIR,
+  AggregateTenancy,
   ScenarioPrincipalIR,
   ScenarioThenIR,
   SecurityIR,
@@ -33,7 +36,7 @@ import type {
   ValueObjectIR,
 } from "./ir.ts";
 import { readQueries } from "./queries.ts";
-import { API_CLIENTS, AUTH_SCHEMES, GENERATION_TARGETS, RATE_LIMIT_KEYS, RATE_LIMIT_UNITS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
+import { AGGREGATE_TENANCIES, API_CLIENTS, AUTH_SCHEMES, GENERATION_TARGETS, TENANT_ID_TYPES, TENANT_ISOLATIONS, RATE_LIMIT_KEYS, RATE_LIMIT_UNITS, type ApiSettings, RELATIONSHIP_PATTERNS, SCHEMA_VERSION, SUBDOMAIN_KINDS, TEST_RUNNERS, type SubdomainKind } from "./ir.ts";
 
 export interface ParseResult {
   model?: ModelIR;
@@ -378,7 +381,7 @@ function readAggregateScenario(r: Reader, value: unknown, path: Path): Aggregate
 function readAggregate(r: Reader, value: unknown, path: Path): AggregateIR | undefined {
   const o = r.obj(value, path, "aggregate");
   if (!o) return undefined;
-  const base = readEntity(r, o, path, ["entities", "state_guards", "factories", "operations", "scenarios", "authorize", "rate_limit"]);
+  const base = readEntity(r, o, path, ["entities", "state_guards", "factories", "operations", "scenarios", "authorize", "rate_limit", "tenancy"]);
   if (!base) return undefined;
   const entities = r.list(o, "entities", path).flatMap(({ value: ev, path: ep }) => {
     const eo = r.obj(ev, ep, "entity");
@@ -431,7 +434,12 @@ function readAggregate(r: Reader, value: unknown, path: Path): AggregateIR | und
     ];
   });
   const scenarios = r.list(o, "scenarios", path).flatMap(({ value: sv, path: sp }) => readAggregateScenario(r, sv, sp) ?? []);
-  return { ...base, entities, stateGuards, factories, operations, scenarios, ...readAccess(r, o, path) };
+  const tenancy = r.str(o, "tenancy", path, false);
+  if (tenancy !== undefined && !(AGGREGATE_TENANCIES as readonly string[]).includes(tenancy)) {
+    r.bag.error("invalid-value", `Unknown aggregate tenancy "${tenancy}"`, [...path, "tenancy"], { hint: "Use tenant (rows belong to one tenant; the default with security.tenancy) or global (shared reference data)" });
+  }
+  const t = tenancy === "tenant" || tenancy === "global" ? { tenancy: tenancy as AggregateTenancy } : {};
+  return { ...base, entities, stateGuards, factories, operations, scenarios, ...readAccess(r, o, path), ...t };
 }
 
 function readSteps(r: Reader, items: { value: unknown; path: Path }[]): StepIR[] {
@@ -755,7 +763,7 @@ function readSecurity(r: Reader, value: unknown): SecurityIR | undefined {
   const path = ["security"];
   const o = r.obj(value, path, "security");
   if (!o) return undefined;
-  r.keys(o, ["roles", "principal", "authentication", "rate_limits"], path, "security");
+  r.keys(o, ["tenancy", "roles", "platform_roles", "principal", "authentication", "rate_limits"], path, "security");
   const ppath = [...path, "principal"];
   const po = o.principal === undefined || o.principal === null ? {} : r.obj(o.principal, ppath, "security.principal") ?? {};
   r.keys(po, ["id", "claims"], ppath, "security.principal");
@@ -829,13 +837,66 @@ function readSecurity(r: Reader, value: unknown): SecurityIR | undefined {
       }
     }
   }
+  // roles: the list form (flat roles, exactly as before permissions existed) or the map form (inheritance, permissions).
+  let roles: string[];
+  let roleDefs: RoleDefIR[] | undefined;
+  if (isObj(o.roles)) {
+    roleDefs = readRoleDefs(r, o.roles, [...path, "roles"], "role");
+    roles = roleDefs.map((d) => d.name);
+  } else {
+    roles = r.strList(o, "roles", path);
+  }
+  let platformRoles: RoleDefIR[] = [];
+  if (o.platform_roles !== undefined && o.platform_roles !== null) {
+    const pr = r.obj(o.platform_roles, [...path, "platform_roles"], "security.platform_roles");
+    if (pr) platformRoles = readRoleDefs(r, pr, [...path, "platform_roles"], "platform role");
+  }
+  let tenancy: TenancyIR | undefined;
+  if (o.tenancy !== undefined && o.tenancy !== null) {
+    const tpath = [...path, "tenancy"];
+    const to = r.obj(o.tenancy, tpath, "security.tenancy");
+    if (to) {
+      r.keys(to, ["claim", "type", "isolation", "platform_roles_claim"], tpath, "security.tenancy");
+      const claim = r.str(to, "claim", tpath, true) ?? "tenant_id";
+      const declared = r.str(to, "type", tpath, false);
+      if (declared !== undefined && !(TENANT_ID_TYPES as readonly string[]).includes(declared)) {
+        r.bag.error("invalid-value", `tenancy.type must be String or UUID, got "${declared}"`, [...tpath, "type"], { hint: "The tenant id is compared with the tenant_id column; use UUID when your identity provider issues UUID organization ids" });
+      }
+      // Without `type`, a principal claim read from the same JWT claim decides it (else String).
+      const fromClaim = claims.find((c) => (c.claim ?? c.name) === claim)?.type;
+      const type = declared === "UUID" || declared === "String" ? declared : fromClaim === "UUID" ? "UUID" : "String";
+      const isolation = r.str(to, "isolation", tpath, false) ?? "row";
+      if (!(TENANT_ISOLATIONS as readonly string[]).includes(isolation)) {
+        r.bag.error("invalid-value", `Unknown tenant isolation "${isolation}"`, [...tpath, "isolation"], {
+          hint: "Only row is supported (shared tables with a tenant_id column and PostgreSQL row level security); schema- or database-per-tenant is not generated",
+        });
+      }
+      tenancy = { claim, type, isolation: "row", platformRolesClaim: r.str(to, "platform_roles_claim", tpath, false) ?? "platform_roles", path: tpath };
+    }
+  }
   return {
-    roles: r.strList(o, "roles", path),
+    roles,
+    ...(roleDefs ? { roleDefs } : {}),
+    platformRoles,
+    ...(tenancy ? { tenancy } : {}),
     principal: { idType: idType === "UUID" ? "UUID" : "String", claims, path: ppath },
     ...(authentication ? { authentication } : {}),
     rateLimits,
     path,
   };
+}
+
+/** `name: { inherits: [...], permissions: [...], description }` entries (a null value is a role without either). */
+function readRoleDefs(r: Reader, o: Obj, path: Path, what: string): RoleDefIR[] {
+  return Object.entries(o).flatMap(([name, value]) => {
+    const p = [...path, name];
+    if (value === null || value === undefined) return [{ name, inherits: [], permissions: [], path: p }];
+    const d = r.obj(value, p, what);
+    if (!d) return [];
+    r.keys(d, ["inherits", "permissions", "description"], p, what);
+    const description = r.str(d, "description", p, false);
+    return [{ name, inherits: r.strList(d, "inherits", p), permissions: r.strList(d, "permissions", p), ...(description !== undefined ? { description } : {}), path: p }];
+  });
 }
 
 /** `authorize` and `rate_limit` of a use case or aggregate (only the keys that are present). */
@@ -861,13 +922,21 @@ function readAuthorize(r: Reader, value: unknown, path: Path): AuthorizeIR | und
   }
   const o = r.obj(value, path, "authorize");
   if (!o) return undefined;
-  r.keys(o, ["roles", "allow_if"], path, "authorize");
+  r.keys(o, ["roles", "permissions", "allow_if", "cross_tenant"], path, "authorize");
   const allowIf = r.expr(o, "allow_if", path, false);
-  if (o.roles === undefined && allowIf === undefined) {
-    r.bag.error("invalid-value", "authorize needs roles or allow_if", path, { hint: 'Write "authorize: authenticated" for any authenticated principal' });
+  if (o.roles === undefined && o.permissions === undefined && allowIf === undefined) {
+    r.bag.error("invalid-value", "authorize needs roles, permissions or allow_if", path, { hint: 'Write "authorize: authenticated" for any authenticated principal' });
     return undefined;
   }
-  return { kind: "principal", roles: r.strList(o, "roles", path), ...(allowIf !== undefined ? { allowIf } : {}), path };
+  const crossTenant = r.bool(o, "cross_tenant", path, false);
+  return {
+    kind: "principal",
+    roles: r.strList(o, "roles", path),
+    ...(o.permissions !== undefined ? { permissions: r.strList(o, "permissions", path) } : {}),
+    ...(crossTenant ? { crossTenant } : {}),
+    ...(allowIf !== undefined ? { allowIf } : {}),
+    path,
+  };
 }
 
 function readRateLimit(r: Reader, value: unknown, path: Path): RateLimitIR | "none" | undefined {
@@ -905,8 +974,16 @@ function readScenarioPrincipal(r: Reader, go: Obj, gpath: Path): ScenarioPrincip
   if (go.principal === null) return { anonymous: true, roles: [], claims: {}, path };
   const o = r.obj(go.principal, path, "given.principal");
   if (!o) return undefined;
-  r.keys(o, ["id", "roles", "claims"], path, "given.principal");
-  return { anonymous: false, ...(o.id !== undefined ? { id: o.id } : {}), roles: r.strList(o, "roles", path), claims: r.dataMap(o, "claims", path), path };
+  r.keys(o, ["id", "roles", "claims", "tenant", "platform_roles"], path, "given.principal");
+  return {
+    anonymous: false,
+    ...(o.id !== undefined ? { id: o.id } : {}),
+    roles: r.strList(o, "roles", path),
+    claims: r.dataMap(o, "claims", path),
+    ...("tenant" in o ? { tenant: o.tenant } : {}),
+    ...(o.platform_roles !== undefined ? { platformRoles: r.strList(o, "platform_roles", path) } : {}),
+    path,
+  };
 }
 
 function readRelationship(r: Reader, value: unknown, path: Path): RelationshipIR | undefined {

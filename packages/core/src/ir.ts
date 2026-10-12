@@ -30,8 +30,11 @@ export const JWT_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS5
 export const RATE_LIMIT_UNITS = ["second", "minute", "hour", "day"] as const;
 export type RateLimitUnit = (typeof RATE_LIMIT_UNITS)[number];
 export const RATE_LIMIT_UNIT_SECONDS: Record<RateLimitUnit, number> = { second: 1, minute: 60, hour: 3600, day: 86400 };
-/** What a rate limit counts per: the authenticated principal, the client IP, or all callers together. */
-export const RATE_LIMIT_KEYS = ["principal", "ip", "global"] as const;
+/**
+ * What a rate limit counts per: the authenticated principal, the client IP, all callers together, or the caller's
+ * active tenant (`tenant`, only with `security.tenancy`: one bucket per tenant, for noisy-neighbour fairness).
+ */
+export const RATE_LIMIT_KEYS = ["principal", "ip", "global", "tenant"] as const;
 export type RateLimitKey = (typeof RATE_LIMIT_KEYS)[number];
 /** Types a principal claim may have (claims are shared by every context, so only context-free types). */
 export const PRINCIPAL_CLAIM_TYPES = ["String", "UUID", "Integer", "Boolean", "List[String]"] as const;
@@ -39,9 +42,33 @@ export const PRINCIPAL_ID_TYPES = ["String", "UUID"] as const;
 /** Errors every context can raise once `security` is declared (`then.raises` may name them). */
 export const SECURITY_ERRORS = ["NotAuthorized", "Unauthenticated"] as const;
 
+/** Types the tenant id may have (`security.tenancy.type`). */
+export const TENANT_ID_TYPES = ["String", "UUID"] as const;
+/** How tenants are isolated: `row` = shared schema, a `tenant_id` column and PostgreSQL row level security. */
+export const TENANT_ISOLATIONS = ["row"] as const;
+/** Name of the implicit tenant field of tenant-scoped aggregates, events and cross-tenant commands (reserved). */
+export const TENANT_FIELD = "tenant_id";
+/** Whether an aggregate's rows belong to one tenant (`tenant`, the default with tenancy) or are shared (`global`). */
+export const AGGREGATE_TENANCIES = ["tenant", "global"] as const;
+export type AggregateTenancy = (typeof AGGREGATE_TENANCIES)[number];
+/** Permission names: dotted lowercase segments (`invitation.issue`). */
+export const PERMISSION_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+
 export interface SecurityIR extends Located {
-  /** Declared roles (snake_case); `authorize.roles` and `has_role` may only name these. */
+  /**
+   * Declared (tenant) roles (snake_case); `authorize.roles` and `has_role` may only name these (or platform roles).
+   * With `tenancy`, a role holds only in the caller's active tenant.
+   */
   roles: string[];
+  /**
+   * The map form of `roles` (`admin: { inherits: [staff], permissions: [...] }`); absent for the list form, which
+   * declares flat roles without permissions (and generates exactly what it did before permissions existed).
+   */
+  roleDefs?: RoleDefIR[];
+  /** Global (cross-tenant) roles such as an operator or support; never tenant-scoped. Only with `tenancy`. */
+  platformRoles: RoleDefIR[];
+  /** Multi-tenancy (`security.tenancy`); absent → single-tenant, nothing tenant-related is generated. */
+  tenancy?: TenancyIR;
   principal: {
     /** Type of `principal.id` (the JWT `sub`): String (default) or UUID. */
     idType: "String" | "UUID";
@@ -51,6 +78,25 @@ export interface SecurityIR extends Located {
   };
   authentication?: AuthenticationIR;
   rateLimits: { default?: RateLimitIR };
+}
+
+/** A role of the map form: the roles it inherits (NIST RBAC1 hierarchy) and the permissions it grants itself. */
+export interface RoleDefIR extends Located {
+  name: string;
+  inherits: string[];
+  /** Dotted lowercase permission names (`invitation.issue`). */
+  permissions: string[];
+  description?: string;
+}
+
+export interface TenancyIR extends Located {
+  /** JWT claim carrying the caller's active tenant (e.g. `org_id`). */
+  claim: string;
+  /** Type of the tenant id: `type`, else the type of a principal claim read from the same JWT claim, else String. */
+  type: "String" | "UUID";
+  isolation: "row";
+  /** JWT claim holding the platform roles (default `platform_roles`). */
+  platformRolesClaim: string;
 }
 
 export interface PrincipalClaimIR extends Located {
@@ -90,7 +136,12 @@ export interface RateLimitIR extends Located {
  */
 export interface AuthorizeIR extends Located {
   kind: "public" | "internal" | "principal";
+  /** Any of these roles (or a role inheriting one), or any of `permissions`, admits the principal. */
   roles: string[];
+  /** Any of these permissions (granted by a held role, directly or by inheritance) admits the principal. */
+  permissions?: string[];
+  /** The use case acts inside the tenant its input names (`tenant_id`); only platform roles may (use cases only). */
+  crossTenant?: boolean;
   allowIf?: string;
 }
 
@@ -214,6 +265,8 @@ export interface AggregateIR extends EntityIR {
   authorize?: AuthorizeIR;
   /** Rate limit of its GET endpoint; `"none"` opts out of the default. */
   rateLimit?: RateLimitIR | "none";
+  /** `tenancy: tenant | global` as written (with `security.tenancy` the default is tenant; see `isTenantScoped`). */
+  tenancy?: AggregateTenancy;
 }
 
 export type CheckTiming = "construct" | "transition";
@@ -385,4 +438,8 @@ export interface ScenarioPrincipalIR extends Located {
   id?: ScenarioValue;
   roles: string[];
   claims: Record<string, ScenarioValue>;
+  /** The active tenant (`tenant:`, with `security.tenancy`). Absent → the default test tenant; null → none. */
+  tenant?: ScenarioValue;
+  /** Platform roles (`platform_roles:`, with `security.tenancy`). */
+  platformRoles?: string[];
 }

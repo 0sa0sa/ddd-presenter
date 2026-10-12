@@ -63,6 +63,8 @@ export type TExpr = { type: Type } & (
   | { t: "principal"; member: string }
   /** `has_role(principal, admin)`: the principal holds a declared role. */
   | { t: "hasRole"; role: string }
+  /** `has_permission(principal, "invitation.read")`: a held role grants the permission (map-form roles). */
+  | { t: "hasPermission"; permission: string }
 );
 
 /** What authorization rules (`allow_if`) may read about the caller (docs/09 §20). */
@@ -70,6 +72,8 @@ export interface PrincipalEnv {
   /** `principal.id`, `principal.roles` and the declared claims, with their types (optional claims wrapped). */
   members: Map<string, Type>;
   roles: string[];
+  /** Permissions roles grant (map-form roles); `has_permission` is available only then. */
+  permissions?: string[];
 }
 
 /** A `field=value` argument; `fieldType` is the declared type of the field. */
@@ -474,6 +478,7 @@ class Checker {
       if (isType(name)) return this.checkConstruct(node, name, narrowed);
       if (name === "with") return this.checkWith(node, narrowed);
       if (name === "has_role" && env.principal && !node.named) return this.checkHasRole(node, env.principal);
+      if (name === "has_permission" && env.principal?.permissions && !node.named) return this.checkHasPermission(node, env.principal);
       if (node.named) {
         return this.fail(node, `${name}() does not take named arguments`, "Named arguments (field=value) are for building values: Money(amount=1, currency=\"JPY\") and with(entity, field=value)");
       }
@@ -564,6 +569,23 @@ class Checker {
       return this.fail(role, `Unknown role "${name}"`, s ? `Did you mean "${s}"?` : `Declared roles: ${principal.roles.join(", ")}`);
     }
     return { t: "hasRole", role: name, type: BOOL };
+  }
+
+  /** `has_permission(principal, "invitation.read")` (or `invitation.read` unquoted): a permission some role grants. */
+  checkHasPermission(node: Extract<Expr, { t: "call" }>, principal: PrincipalEnv): TExpr | undefined {
+    const known = principal.permissions ?? [];
+    const usage = `has_permission(principal, "${known[0] ?? "resource.action"}")`;
+    const [who, perm] = node.args;
+    if (node.args.length !== 2 || !who || !perm) return this.fail(node, "has_permission() takes 2 arguments", `Usage: ${usage}`);
+    if (who.t !== "name" || who.name !== "principal") return this.fail(who, 'The first argument of has_permission() is "principal"', `Usage: ${usage}`);
+    const dotted = (e: Expr): string | undefined => (e.t === "name" ? e.name : e.t === "member" ? ((o) => (o === undefined ? undefined : `${o}.${e.name}`))(dotted(e.object)) : undefined);
+    const name = perm.t === "lit" && perm.kind === "string" ? String(perm.value) : dotted(perm);
+    if (name === undefined) return this.fail(perm, "The permission of has_permission() is a permission name", `Usage: ${usage}`);
+    if (!known.includes(name)) {
+      const s = closest(name, known);
+      return this.fail(perm, `Unknown permission "${name}"`, s ? `Did you mean "${s}"?` : `Granted permissions: ${known.join(", ") || "none"}`);
+    }
+    return { t: "hasPermission", permission: name, type: BOOL };
   }
 
   /** Checks `field=value` arguments against a field map (used by constructors and `with`). */
@@ -951,6 +973,7 @@ export function exprChildren(e: TExpr): TExpr[] {
     case "item":
     case "principal":
     case "hasRole":
+    case "hasPermission":
       return [];
   }
 }

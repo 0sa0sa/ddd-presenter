@@ -87,7 +87,9 @@ describe("security: deny by default and declared roles", () => {
   test("rate limits: units and keys are checked; none opts out", () => {
     expect(codes(FIXTURE.replace("rate_limit: { requests: 5, per: minute, by: principal }", "rate_limit: { requests: 5, per: fortnight, by: principal }"))).toContain("invalid-value");
     expect(codes(FIXTURE.replace("rate_limit: { requests: 5, per: minute, by: principal }", "rate_limit: { requests: 0, per: minute }"))).toContain("invalid-value");
-    expect(codes(FIXTURE.replace("rate_limit: { requests: 5, per: minute, by: principal }", "rate_limit: { requests: 5, per: minute, by: tenant }"))).toContain("invalid-value");
+    expect(codes(FIXTURE.replace("rate_limit: { requests: 5, per: minute, by: principal }", "rate_limit: { requests: 5, per: minute, by: session }"))).toContain("invalid-value");
+    // by: tenant counts per tenant and needs security.tenancy (docs/09 §22).
+    expect(codes(FIXTURE.replace("rate_limit: { requests: 5, per: minute, by: principal }", "rate_limit: { requests: 5, per: minute, by: tenant }"))).toContain("tenancy-not-declared");
   });
 });
 
@@ -151,9 +153,9 @@ describe("security: completion and JSON Schema", () => {
   const at = (text: string, marker: string) => complete(text.replace(marker, ""), text.indexOf(marker)).items;
 
   test("keys and values of the security block, authorize and rate_limit are offered", () => {
-    // Keys already present are not offered again: without rate_limits, it is the one offered.
+    // Keys already present are not offered again: without rate_limits, it is offered with the multi-tenancy keys (docs/09 §22).
     const withoutLimits = FIXTURE.replace("  rate_limits:\n    default: { requests: 60, per: minute, by: principal }\n", "  |\n");
-    expect(at(withoutLimits, "|").map((i) => i.label)).toEqual(["rate_limits"]);
+    expect(at(withoutLimits, "|").map((i) => i.label)).toEqual(["tenancy", "platform_roles", "rate_limits"]);
     const claim = at(FIXTURE.replace("      - { name: email, type: String, required: false }\n", "      - { name: email, type: String, required: false }\n      - |\n"), "|").map((i) => i.label);
     expect(claim).toEqual(["name", "type", "required", "claim", "description"]);
     const authorize = at(FIXTURE.replace("        authorize: public\n", "        authorize: |\n"), "|").map((i) => i.label);

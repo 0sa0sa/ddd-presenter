@@ -1,4 +1,5 @@
-import { exprChildren, type TExpr, type Type } from "@ddd/core";
+import { exprChildren, type AccessScope, type TExpr, type Type } from "@ddd/core";
+
 import { tsString, type TsImports } from "./code.ts";
 import type { TsLayout } from "./layout.ts";
 import { ident, prop } from "./names.ts";
@@ -29,6 +30,8 @@ export interface ExprContext {
   guardMode?: "checks" | "assertHolds";
   /** Inside an element callback (`(item) => …`): narrowed property paths need a non-null assertion. */
   callbacks?: number;
+  /** Where an authorization rule runs (`has_permission` checks the roles that count there; docs/09 §22). */
+  scope?: AccessScope;
 }
 
 /** Precedence: conditional < || < && < equality < relational < additive < multiplicative < unary < member/call. */
@@ -302,6 +305,21 @@ function emit(e: TExpr, ctx: ExprContext): Out {
     case "hasRole":
       ctx.imports.value(ctx.L.security, "hasRole");
       return [`hasRole(principal, ${tsString(e.role)})`, P.atom];
+    case "hasPermission": {
+      // In a tenant: the tenant roles; across tenants: the platform roles; for shared data: either.
+      const tenant = `hasPermission(principal, ${tsString(e.permission)})`;
+      const platform = `hasPlatformPermission(principal, ${tsString(e.permission)})`;
+      if (ctx.scope === "cross_tenant") {
+        ctx.imports.value(ctx.L.security, "hasPlatformPermission");
+        return [platform, P.atom];
+      }
+      ctx.imports.value(ctx.L.security, "hasPermission");
+      if (ctx.scope === "global" && ctx.L.model.security?.platformRoles.length) {
+        ctx.imports.value(ctx.L.security, "hasPlatformPermission");
+        return [`${tenant} || ${platform}`, P.or];
+      }
+      return [tenant, P.atom];
+    }
     case "enumValue": {
       ctx.imports.value(ctx.L.typeModule("enum"), e.enumName);
       const member = /^[A-Za-z_$][\w$]*$/.test(e.value) ? `.${e.value}` : `[${tsString(e.value)}]`;

@@ -20,6 +20,7 @@ import type {
   UseCaseScenarioIR,
   ValueObjectIR,
 } from "./ir.ts";
+import { TENANT_FIELD } from "./ir.ts";
 import { parseModel, type ParseResult } from "./parse.ts";
 import { parseExpr, type Expr } from "./expr.ts";
 import {
@@ -32,6 +33,15 @@ import {
   principalEnv,
   requiresPrincipal,
   SECURITY_TYPE_NAMES,
+  RBAC_TYPE_NAMES,
+  aggregateScope,
+  checkTenantRateLimit,
+  isTenantScoped,
+  touchedAggregates,
+  useCaseScope,
+  eventIsTenantScoped,
+
+
 } from "./security.ts";
 import { checkQueries } from "./queries.ts";
 import { assignable, closest, resolveType, sameType, T, typeToString, type Type } from "./types.ts";
@@ -255,11 +265,30 @@ class Validator {
     this.checkPolicyCycles();
     this.checkContractUsage();
     checkSecurityBlock(this.bag, m);
+    this.checkEventTenancy();
     // Claims become attributes of the generated Principal: the same naming rules as fields (keywords, Pydantic members).
     for (const c of m.security?.principal.claims ?? []) {
       if (/^[a-z][a-z0-9_]*$/.test(c.name) && !["id", "roles"].includes(c.name)) checkSnakeName(this.bag, c.name, "Claim name", [...c.path, "name"], "Security");
     }
     if (m.generation.target === "typescript") this.checkTypeScriptNames();
+  }
+
+  /** An event is emitted by tenant-scoped or by shared aggregates, not both (its tenant_id is always present or never). */
+  checkEventTenancy(): void {
+    const sec = this.model.security;
+    if (!sec?.tenancy) return;
+    for (const ca of this.contexts.values()) {
+      for (const ev of ca.events.values()) {
+        const kinds = new Set(ev.sources.map((s) => ca.ir.aggregates.find((a) => a.name === s.aggregate)).filter((a): a is AggregateIR => !!a).map((a) => isTenantScoped(sec, a)));
+        if (kinds.size > 1) {
+          const ag = ca.ir.aggregates.find((a) => a.name === ev.sources[0]!.aggregate)!;
+          this.bag.error("mixed-event-tenancy", `Event ${ev.name} is emitted by tenant-scoped and by shared (tenancy: global) aggregates`, [...ag.path, "name"], {
+            element: `${ca.ir.name} › ${ev.name}`,
+            hint: "Use separate events: a tenant-scoped event carries the tenant_id, a shared one does not",
+          });
+        }
+      }
+    }
   }
 
   // -- context map ------------------------------------------------------------
@@ -387,6 +416,13 @@ class Validator {
           hint: `Add it to the contract: events: [${[...r.events, event.name].join(", ")}] (relationships[${this.model.relationships.indexOf(r)}])`,
         });
       }
+    }
+    const sec = this.model.security;
+    if (sec?.tenancy && uc && useCaseScope(sec, ctx, uc) === "tenant" && !eventIsTenantScoped(sec, evCtx.ir, event.sources)) {
+      this.bag.error("policy-without-tenant", `Policy ${p.name} runs ${uc.name}, which works on tenant-scoped data, but ${event.name} comes from shared (tenancy: global) data and carries no tenant`, wpath, {
+        element: el,
+        hint: "React to an event of a tenant-scoped aggregate, or make the use case touch only shared data",
+      });
     }
     const info: PolicyInfo = { event: { context: evCtx.ir.name, name: event.name }, crossContext: cross, relationship, usesClock: false, usesIds: false };
     if (uc) this.checkPolicyArgs(ctx, ca, p, uc, event, evCtx, info, el);
@@ -727,6 +763,9 @@ class ContextValidator {
       }
       if (this.security && (SECURITY_TYPE_NAMES as readonly string[]).includes(name)) {
         this.bag.error("reserved-name", `"${name}" is defined by the generated security code`, path, { element: this.el(name), hint: `Rename the ${kind}` });
+      }
+      if ((this.security?.tenancy || this.security?.roleDefs) && (RBAC_TYPE_NAMES as readonly string[]).includes(name)) {
+        this.bag.error("reserved-name", `"${name}" is defined by the generated security code (permissions / tenancy)`, path, { element: this.el(name), hint: `Rename the ${kind}` });
       }
       if (RESERVED_TYPES.has(name)) {
         this.bag.error("reserved-name", `"${name}" is reserved by the generator`, path, { element: this.el(name), hint: `Rename the ${kind}` });
@@ -1097,6 +1136,7 @@ class ContextValidator {
     const selfEnv = () => makeEnv(this.ctx, { self: { name: ag.name, fields: types, aggregate: ag } });
     this.checkInvariants(ag.invariants, selfEnv(), el, types, false);
     this.checkAggregateAccess(ag, types, el);
+    this.checkAggregateTenancy(ag, el);
 
     for (const g of ag.stateGuards) {
       const gel = `${el} › ${g.name}`;
@@ -1305,8 +1345,10 @@ class ContextValidator {
       return;
     }
     checkAggregateAuthorize(this.bag, ag, el);
-    checkRoles(this.bag, sec, ag.authorize, el);
+    const scope = aggregateScope(sec, ag);
+    checkRoles(this.bag, sec, ag.authorize, el, { kind: "aggregate", scope });
     checkRateLimitUse(this.bag, ag, el);
+    checkTenantRateLimit(this.bag, sec, ag, scope, el);
     if (ag.authorize.allowIf !== undefined) {
       const env = makeEnv(this.ctx, { self: { name: ag.name, fields: types }, principal: principalEnv(sec) });
       this.expr(ag.authorize.allowIf, [...ag.authorize.path, "allow_if"], env, T.Boolean, el);
@@ -1329,8 +1371,28 @@ class ContextValidator {
       });
       return;
     }
-    checkRoles(this.bag, sec, a, el);
+    const scope = useCaseScope(sec, this.ctx, uc);
+    const touched = touchedAggregates(uc);
+    const isShared = (n: string) => {
+      const ag = this.ctx.aggregates.find((x) => x.name === n);
+      return !!ag && !isTenantScoped(sec, ag);
+    };
+    const sharedSaves = [...touched.saved].filter(isShared);
+    checkRoles(this.bag, sec, a, el, { kind: "use case", scope, writesGlobal: sharedSaves.length > 0 });
     checkRateLimitUse(this.bag, uc, el);
+    checkTenantRateLimit(this.bag, sec, uc, scope, el);
+    if (sec.tenancy) {
+      const touchesTenant = [...touched.all].some((n) => this.ctx.aggregates.some((x) => x.name === n) && !isShared(n));
+      if (a.crossTenant && !touchesTenant) {
+        this.bag.error("invalid-authorize", `Use case ${uc.name} touches no tenant-scoped aggregate, so there is no tenant to act in across tenants`, [...a.path, "cross_tenant"], { element: el, hint: "Remove cross_tenant" });
+      }
+      if ((scope === "tenant" || scope === "cross_tenant") && sharedSaves.length) {
+        this.bag.error("tenant-writes-global", `Use case ${uc.name} runs in a tenant but saves shared (tenancy: global) data: ${sharedSaves.join(", ")}`, [...uc.path, "name"], {
+          element: el,
+          hint: "Change shared data in a separate use case limited to platform roles (or internal)",
+        });
+      }
+    }
     if (a.allowIf === undefined) return;
     const leading = leadingLoads(uc.steps);
     const locals = new Map(inputTypes);
@@ -1368,6 +1430,61 @@ class ContextValidator {
     this.expr(a.allowIf, path, makeEnv(this.ctx, { locals, allowReceiverGuards: true, principal: principalEnv(sec) }), T.Boolean, el);
   }
 
+  /**
+   * Multi-tenancy of an aggregate (docs/09 §22): `tenancy:` needs security.tenancy; tenant_id is the implicit tenant
+   * field; shared (global) data cannot point at one tenant's data.
+   */
+  checkAggregateTenancy(ag: AggregateIR, el: string): void {
+    const sec = this.security;
+    if (ag.tenancy !== undefined && !sec?.tenancy) {
+      this.bag.error("tenancy-not-declared", "tenancy needs security.tenancy", [...ag.path, "tenancy"], { element: el, hint: "Declare security.tenancy (claim, type) first" });
+    }
+    if (!sec?.tenancy) return;
+    for (const en of [ag, ...ag.entities]) {
+      for (const f of en.fields) {
+        if (f.name === TENANT_FIELD) {
+          this.bag.error("reserved-name", `"${TENANT_FIELD}" is the implicit tenant field once tenancy is declared`, [...f.path, "name"], {
+            element: el,
+            hint: "Tenant-scoped aggregates get tenant_id automatically (set from the caller's tenant); remove or rename the field",
+          });
+        }
+      }
+    }
+    for (const m of [...ag.factories, ...ag.operations]) {
+      for (const prm of m.parameters) {
+        if (prm.name === TENANT_FIELD) this.bag.error("reserved-name", `"${TENANT_FIELD}" is set from the caller's tenant, never passed in`, [...prm.path, "name"], { element: el });
+      }
+      for (const e of m.emits) {
+        for (const f of e.fields) {
+          if (f.name === TENANT_FIELD) this.bag.error("reserved-name", `"${TENANT_FIELD}" is added to the events of tenant-scoped aggregates automatically`, f.path, { element: el });
+        }
+      }
+    }
+    if (isTenantScoped(sec, ag)) return;
+    // Shared data must not reference one tenant's data: every tenant would see the reference.
+    for (const en of [ag, ...ag.entities]) {
+      for (const f of en.fields) {
+        const refs: string[] = [];
+        const collect = (x: Type | undefined) => {
+          if (!x) return;
+          if (x.k === "ref") refs.push(x.target);
+          else if (x.k === "optional") collect(x.inner);
+          else if (x.k === "list") collect(x.item);
+        };
+        collect(this.fieldTypes.get(en.name)?.get(f.name));
+        for (const target of refs) {
+          const other = this.ctx.aggregates.find((a) => a.name === target);
+          if (other && isTenantScoped(sec, other)) {
+            this.bag.error("global-references-tenant", `Shared aggregate ${ag.name} (tenancy: global) references tenant-scoped ${target}`, [...f.path, "type"], {
+              element: el,
+              hint: `Make ${ag.name} tenant-scoped, or reference it from the tenant side (a field of ${target} of type Ref[${ag.name}])`,
+            });
+          }
+        }
+      }
+    }
+  }
+
   /** `given.principal` of a use case scenario: declared roles, an id and claims of the declared types. */
   checkScenarioPrincipal(uc: UseCaseIR, sc: UseCaseScenarioIR, el: string): void {
     const sec = this.security;
@@ -1396,6 +1513,16 @@ class ContextValidator {
     const sec = this.security;
     if (!sec) return;
     if (p.id !== undefined) this.checkValue(p.id, sec.principal.idType === "UUID" ? T.UUID : T.String, [...p.path, "id"], el);
+    if (!sec.tenancy && (p.tenant !== undefined || p.platformRoles !== undefined)) {
+      this.bag.error("tenancy-not-declared", "given.principal.tenant and platform_roles need security.tenancy", p.path, { element: el });
+    }
+    if (sec.tenancy && p.tenant !== undefined && p.tenant !== null) this.checkValue(p.tenant, sec.tenancy.type === "UUID" ? T.UUID : T.String, [...p.path, "tenant"], el);
+    const platformNames = sec.platformRoles.map((d) => d.name);
+    (p.platformRoles ?? []).forEach((r, i) => {
+      if (platformNames.includes(r)) return;
+      const s = closest(r, platformNames);
+      this.bag.error("unknown-role", `Unknown platform role "${r}"`, [...p.path, "platform_roles", i], { element: el, hint: s ? `Did you mean "${s}"?` : `Declared platform roles: ${platformNames.join(", ") || "none"}` });
+    });
     p.roles.forEach((r, i) => {
       if (!sec.roles.includes(r)) {
         const s = closest(r, sec.roles);
@@ -1424,6 +1551,9 @@ class ContextValidator {
       }
       if (this.security && x.name === "has_role") {
         this.bag.error("reserved-name", '"has_role" is the built-in role check of authorization rules', [...x.path, "name"], { element: el });
+      }
+      if ((this.security?.roleDefs || this.security?.tenancy) && x.name === "has_permission") {
+        this.bag.error("reserved-name", '"has_permission" is the built-in permission check of authorization rules', [...x.path, "name"], { element: el });
       }
       this.params(x.parameters, el);
       const rt = this.resolve(x.returns, [...x.path, "returns"], undefined, el);
@@ -1464,6 +1594,9 @@ class ContextValidator {
       for (const f of uc.input) {
         if (f.name === "principal") {
           this.bag.error("reserved-name", '"principal" is the caller of the use case once security is declared', [...f.path, "name"], { element: el, hint: "Rename the input (e.g. principal_id)" });
+        }
+        if (f.name === TENANT_FIELD && this.security.tenancy) {
+          this.bag.error("reserved-name", `"${TENANT_FIELD}" is never an input: the tenant comes from the caller's token (a cross_tenant use case gets it as the target tenant)`, [...f.path, "name"], { element: el });
         }
       }
     }
@@ -1951,7 +2084,11 @@ class ContextValidator {
         this.bag.error("incomplete-scenario", `Use case ${uc.name} calls extension ${name}; stub it in given.extensions or declare test_default`, g.path, { element: el });
       }
     }
-    this.checkRecord(sc.when.input, this.fieldTypes.get(uc.command) ?? new Map(), sc.when.path, el, uc.command, true);
+    const inputFields = this.fieldTypes.get(uc.command) ?? new Map<string, Type>();
+    // A cross_tenant use case also takes the target tenant (the implicit tenant_id input).
+    const tenancy = this.security?.tenancy;
+    const withTenant = uc.authorize?.crossTenant && tenancy ? new Map([...inputFields, [TENANT_FIELD, tenancy.type === "UUID" ? T.UUID : T.String]]) : inputFields;
+    this.checkRecord(sc.when.input, withTenant, sc.when.path, el, uc.command, true);
     const then = sc.then;
     this.checkThenCommon(then, el, !!this.security && requiresPrincipal(uc));
     this.checkScenarioPrincipal(uc, sc, el);

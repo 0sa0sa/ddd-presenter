@@ -352,6 +352,9 @@ export function evaluateOnValues(e: TExpr, self: Rec, principal?: EvalPrincipal)
       return principal.claims[e.member] ?? null;
     case "hasRole":
       return principal ? principal.roles.includes(e.role) : undefined;
+    case "hasPermission":
+      // Depends on the role hierarchy: not evaluated statically.
+      return undefined;
     default:
       // Parameters, locals, guards, ports and extensions have no value in a constructed object.
       return undefined;
