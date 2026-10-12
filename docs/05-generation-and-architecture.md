@@ -636,7 +636,7 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 
 ### テナントのデータ（`security.tenancy`, 2026-10-12）
 
-テナントの Aggregate のテーブルは `tenant_id`（`tenancy.type` が UUID なら uuid、String なら text）・`UNIQUE (tenant_id, id)`・（`rls: on` なら）`ENABLE` / `FORCE ROW LEVEL SECURITY` と `tenant_isolation` ポリシー（`USING` / `WITH CHECK` とも `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`。冪等にするため `DROP POLICY IF EXISTS` してから作る）を持つ。リポジトリの SELECT / UPDATE は `WHERE tenant_id = $1 AND id = $2`、INSERT は `tenant_id` を最初の値にし、UPDATE で `tenant_id` は変えない。クエリの文は WHERE の先頭が `tenant_id = $n`（引数 `{ tenant: true }` / `("tenant", None)`）、並び順のインデックスは `tenant_id` が先頭。共有（`tenancy: global`）のテーブルには何も足さない。インメモリのリーダーも `request.tenant` の行だけを読む（テナントのない要求は0行）。接続のロールとトランザクションの要件は §8「マルチテナントと権限」。
+テナントの Aggregate のテーブルは `tenant_id`（`tenancy.type` が UUID なら uuid、String なら text）・`UNIQUE (tenant_id, id)`・（`rls: on` なら）`ENABLE` / `FORCE ROW LEVEL SECURITY` と `tenant_isolation` ポリシー（`USING` / `WITH CHECK` とも `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`。String のテナントでは `::uuid` なし。冪等にするため `DROP POLICY IF EXISTS` してから作る）を持つ。リポジトリの SELECT / UPDATE は `WHERE tenant_id = $1 AND id = $2`、INSERT は `tenant_id` を最初の値にし、UPDATE で `tenant_id` は変えない。クエリの文は WHERE の先頭が `tenant_id = $n`（引数 `{ tenant: true }` / `("tenant", None)`）、並び順のインデックスは `tenant_id` が先頭。共有（`tenancy: global`）のテーブルには何も足さない。インメモリのリーダーも `request.tenant` の行だけを読む（テナントのない要求は0行）。接続のロールとトランザクションの要件は §8「マルチテナントと権限」。
 
 ### 移行メモ（2026-10-06）
 
