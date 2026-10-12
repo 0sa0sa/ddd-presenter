@@ -56,6 +56,10 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [conflict, setConflict] = useState<Conflict>();
   /** A generated file to show when the preview opens (from the architecture tab's links). */
   const [previewFocus, setPreviewFocus] = useState<string>();
+  // The file link applies to one visit of the preview only.
+  useEffect(() => {
+    if (tabParam !== "preview") setPreviewFocus(undefined);
+  }, [tabParam]);
   const lastGoodModel = useRef<ModelIR>(undefined);
   const [coach, setCoach] = useState(() => tutorialStore.get().projectId === id);
   const [ai, setAi] = useState<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>();

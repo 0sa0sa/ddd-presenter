@@ -668,4 +668,4 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 | L3 | 集約・Use case（authorize・レート制限・cross-tenant・冪等キー）・クエリ（検索の方式・ページ・authorize）・ポリシー、ポート（リポジトリ・リーダー・Extensions・Clock・IdGenerator・EventPublisher・UnitOfWork・IdempotencyStore・CrossTenantAudit・腐敗防止層の Translator）、生成されるアダプタ（HTTP ルート・インメモリ・PostgreSQL・顧客の拡張） | 生成されるものだけ |
 
 - `ddd generate --target` で `generation.target` と違うターゲットを選ぶと、文書もそのターゲットを描く。
-- 文書を足しただけで、ほかの生成物は1バイトも変わらない（例のプロジェクトでは `ARCHITECTURE.md` とマニフェストの1行だけが増えた）。生成器のテストが、L2 のコンテナと実際に生成されるファイル（`api/server.ts`、`security.*`、`authentication.*`、`sql/*.sql`、`policies.*`）が一致することを全フィクスチャ・両ターゲットで確かめる。
+- 文書を足しただけで、ほかの生成物は1バイトも変わらない（例のプロジェクトでは `ARCHITECTURE.md` とマニフェストの1項目だけが増えた）。生成器のテストが、L2 のコンテナと実際に生成されるファイル（`api/server.ts`、`security.*`、`authentication.*`、`sql/*.sql`、`policies.*`）が一致することを全フィクスチャ・両ターゲットで確かめる。

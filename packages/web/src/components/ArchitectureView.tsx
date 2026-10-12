@@ -249,12 +249,14 @@ export function ArchitectureView({
   );
 
   // --- layout persistence (debounced, optimistic concurrency, conflict → retry with ours on top) ---
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // One timer per level: arranging another level within the debounce must not cancel this level's save.
+  const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const persist = useCallback(
     (lvl: string, next: Record<string, Point>) => {
       setLayouts((l) => ({ ...l, [lvl]: { version: l[lvl]?.version ?? 0, positions: next } }));
-      clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
+      clearTimeout(saveTimers.current.get(lvl));
+      saveTimers.current.set(lvl, setTimeout(async () => {
+        saveTimers.current.delete(lvl);
         const attempt = async (base: number, retry: boolean): Promise<void> => {
           try {
             const r = await api.saveArchitectureLayout(projectId, lvl, next, base);
@@ -272,7 +274,7 @@ export function ArchitectureView({
           }
         };
         await attempt(layoutsRef.current[lvl]?.version ?? 0, true);
-      }, 400);
+      }, 400));
     },
     [projectId, onStatus],
   );
