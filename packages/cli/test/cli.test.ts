@@ -22,7 +22,7 @@ function project() {
 /** The sample without its revoke_invitation use case (the last use case of CleaningStaff, before its queries). */
 function withoutRevoke(text: string): string {
   const start = text.indexOf("      - name: revoke_invitation");
-  const ends = ["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
+  const ends = ["\n      - name: inspect_invitation", "\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
   return text.slice(0, start) + text.slice(Math.min(...ends) + 1);
 }
 
