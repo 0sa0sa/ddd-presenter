@@ -26,6 +26,10 @@
       "sha256": "1b0757365ca27fd439e9e01c5c0837fdc19832747aeac50927c78908f9b6525f"
     },
     {
+      "path": "src/cleaning_platform/generated/ARCHITECTURE.md",
+      "sha256": "1c5641b07e6ecb3c277efafa3858adf17ecc1ba3465ae38dc71f021225b87341"
+    },
+    {
       "path": "src/cleaning_platform/generated/authentication.py",
       "sha256": "8ae0c5c4fdff7d38b0af153d3b5b900a7081e4494638f52641ec8e0bcf1b706a"
     },

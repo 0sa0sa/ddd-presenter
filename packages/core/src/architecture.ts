@@ -11,7 +11,7 @@
  * bundle uses it. Design and sources: docs/09 §23; contract of ARCHITECTURE.md: docs/05.
  */
 import type { Path } from "./diagnostics.ts";
-import type { AuthorizeIR, ContextIR, ModelIR, RateLimitIR, StepIR, UseCaseIR } from "./ir.ts";
+import type { AuthorizeIR, ContextIR, GenerationTarget, ModelIR, RateLimitIR, StepIR, UseCaseIR } from "./ir.ts";
 import type { Analysis } from "./validate.ts";
 import { effectiveRateLimit, isTenantScoped, servedOverHttp, touchedAggregates } from "./security.ts";
 
@@ -87,7 +87,7 @@ export interface ArchView {
 export interface Architecture {
   project: string;
   description?: string;
-  target: ModelIR["generation"]["target"];
+  target: GenerationTarget;
   system: ArchView;
   containers: ArchView;
   /** One component view per context, in model order. */
@@ -104,14 +104,14 @@ export function architectureView(arch: Architecture, level: ArchLevel): ArchView
 }
 
 /** Whether the model generates the TypeScript HTTP API (and its TanStack Query client). */
-export function generatesHttpApi(model: ModelIR): boolean {
-  return model.generation.target === "typescript" && !!model.generation.typescript.api;
+export function generatesHttpApi(model: ModelIR, target: GenerationTarget = model.generation.target): boolean {
+  return target === "typescript" && !!model.generation.typescript.api;
 }
 
 /** Whether the generated code verifies bearer JWTs (Python: PyJWT authenticator; TypeScript: only with the HTTP API). */
-export function generatesJwt(model: ModelIR): boolean {
+export function generatesJwt(model: ModelIR, target: GenerationTarget = model.generation.target): boolean {
   if (model.security?.authentication?.scheme !== "bearer_jwt") return false;
-  return model.generation.target === "python" || generatesHttpApi(model);
+  return target === "python" || generatesHttpApi(model, target);
 }
 
 /** `rate 60/min by tenant` */
@@ -239,15 +239,16 @@ class ViewBuilder {
  * Derives the three levels. `analysis` (from a model without errors) refines which ports a use case uses; without it
  * (e.g. the Web editor showing the last valid model) the same picture comes from the IR.
  */
-export function deriveArchitecture(model: ModelIR, analysis?: Analysis, options: { lang?: ArchLang } = {}): Architecture {
+export function deriveArchitecture(model: ModelIR, analysis?: Analysis, options: { lang?: ArchLang; target?: GenerationTarget } = {}): Architecture {
   const ja = options.lang === "ja";
   const t = (en: string, jaText: string) => (ja ? jaText : en);
   const sec = model.security;
   const tenancy = sec?.tenancy;
-  const target = model.generation.target;
+  /** The generator's target (`ddd generate --target` may differ from `generation.target`). */
+  const target = options.target ?? model.generation.target;
   const lang = target === "typescript" ? "TypeScript" : "Python";
-  const http = generatesHttpApi(model);
-  const jwt = generatesJwt(model);
+  const http = generatesHttpApi(model, target);
+  const jwt = generatesJwt(model, target);
   const withQueries = model.contexts.filter((c) => c.queries.length > 0);
   const trigram = withQueries.some((c) => c.queries.some((q) => q.search?.mode === "trigram"));
   const defaultRate = sec?.rateLimits.default;

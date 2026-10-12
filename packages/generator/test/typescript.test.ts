@@ -154,6 +154,11 @@ describe("TypeScript target: golden output", () => {
     expect(out.files.some((f) => f.path.includes("/generated/api/") || f.path.endsWith("-api.test.ts"))).toBe(false);
     for (const f of out.files) {
       if (f.ownership !== "generated") continue;
+      // ARCHITECTURE.md describes what is generated: no HTTP API container without the API.
+      if (f.path.endsWith("/ARCHITECTURE.md")) {
+        expect(f.content).not.toContain("HTTP API");
+        continue;
+      }
       expect({ path: f.path, content: f.content }).toEqual({ path: f.path, content: readFileSync(join(EXAMPLE, f.path), "utf8") });
     }
     const pkg = JSON.parse(out.files.find((f) => f.path === "package.json")!.content);
