@@ -17,3 +17,5 @@ export * from "./workshop.ts";
 export * from "./sync.ts";
 export * from "./drawio.ts";
 export * from "./security.ts";
+export * from "./architecture.ts";
+export * from "./architecture-render.ts";
