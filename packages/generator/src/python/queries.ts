@@ -19,16 +19,19 @@ import {
   type QueryScenarioIR,
   type TableIR,
   type Type,
+  usesPermissions,
 } from "@ddd/core";
-import { rolesText, rolesTuple, securityModule } from "./security.ts";
-import { principalPy } from "./tests.ts";
+import { requirementKwargs, requirementText, rolesTuple, securityModule } from "./security.ts";
+import { constructAggregate, defaultTenantPy, otherTenantPy, principalPy, tenantPy } from "./tests.ts";
+
 import { psycopgText, queryStatements, repositorySql, type SqlArg } from "../sql.ts";
 import { fieldLines, type PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
-import { assertEquals, Code, Imports, pascal, pyString, pyType, pyValue, toSnake, type ValueContext } from "./support.ts";
+import { assertEquals, Code, Imports, MAX_LINE, pascal, pyString, pyType, pyValue, toSnake, type ValueContext } from "./support.ts";
+
 
 export function pyContextPlans(L: Layout): QueryPlan[] {
-  return (L.ca.ir.queries ?? []).map((q) => planQuery(L.ca.ir, L.ca.fieldTypes, q)!);
+  return (L.ca.ir.queries ?? []).map((q) => planQuery(L.ca.ir, L.ca.fieldTypes, q, L.model.security)!);
 }
 
 export function pyHasQueries(L: Layout): boolean {
@@ -54,7 +57,7 @@ function otherPrincipalId(L: Layout, id: string): string {
 }
 
 function tables(L: Layout): TableIR[] {
-  return L.ca.ir.aggregates.map((a) => tableOf(L.ca.ir, L.ca.fieldTypes, a));
+  return L.ca.ir.aggregates.map((a) => tableOf(L.ca.ir, L.ca.fieldTypes, a, L.model.security));
 }
 
 const Q = (plan: QueryPlan) => pascal(plan.query.name);
@@ -187,6 +190,7 @@ export function pyQueriesFile(L: Layout): PyFile {
       );
       c.line(`size=${q.page.size},`);
       c.line(`max_size=${q.page.maxSize},`);
+      if (plan.table.tenant) c.line(`tenant=${pyString(plan.table.tenant.name)},`);
     });
     c.line(")");
     // Reader port.
@@ -202,6 +206,8 @@ export function pyQueriesFile(L: Layout): PyFile {
     const scope = scopeMembers(L, plan);
     const required = secured || plan.params.some((p) => p.type.k !== "optional");
     const auth = q.authorize;
+    const tenant = !!plan.table.tenant;
+    const rbac = usesPermissions(L.model.security) || !!L.model.security?.tenancy;
     c.line().line();
     c.line(`class ${queryClass(plan)}:`);
     c.indent(() => {
@@ -212,7 +218,7 @@ export function pyQueriesFile(L: Layout): PyFile {
           ...(secured
             ? [
                 "",
-                `Authorize: ${rolesText(auth!.roles)}. \`principal\` is checked first, before anything is read: Unauthenticated without one${[...(auth!.roles.length ? ["without a required role"] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${m.member}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${m.member}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal.`,
+                `Authorize: ${requirementText(auth!.roles, auth!.permissions ?? [])}. \`principal\` is checked first, before anything is read: Unauthenticated without one${tenant ? " or without an active tenant" : ""}${[...(auth!.roles.length || auth!.permissions?.length ? [`without a required ${auth!.permissions?.length ? "role or permission" : "role"}`] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${m.member}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${tenant ? " The rows are those of the caller's tenant only." : ""}${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${m.member}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal${tenant ? " and its tenant" : ""}.`,
               ]
             : L.model.security && auth?.kind === "public"
               ? ["", "Authorize: public (no principal needed)."]
@@ -241,9 +247,17 @@ export function pyQueriesFile(L: Layout): PyFile {
         c.line(`) -> Page[${itemName(plan)}]:`);
       }
       c.indent(() => {
-        if (secured) {
+        if (secured && rbac && tenant) {
+          imp.from(securityModule(L.model), "authorize_in_tenant");
+          c.line(`principal, tenant = authorize_in_tenant(principal, ${pyString(q.name)}${requirementKwargs(auth!.roles, auth!.permissions ?? [])})`);
+        } else if (secured && rbac) {
+          imp.from(securityModule(L.model), "authorize");
+          c.line(`principal = authorize(principal, ${pyString(q.name)}${requirementKwargs(auth!.roles, auth!.permissions ?? [])})`);
+        } else if (secured) {
           imp.from(securityModule(L.model), "authorize");
           c.line(`principal = authorize(principal, ${pyString(q.name)}, ${rolesTuple(auth!.roles)})`);
+        }
+        if (secured) {
           for (const m of scope.filter((x) => x.optional)) {
             imp.from(securityModule(L.model), "NotAuthorized");
             c.line(`${m.member} = principal.${m.member}`);
@@ -264,13 +278,14 @@ export function pyQueriesFile(L: Layout): PyFile {
           if (secured) {
             imp.from(L.persistenceRuntime, "QueryScope");
             const values = scope.map((m) => `${pyString(m.member)}: ${m.optional ? m.member : `principal.${m.member}`}`);
-            const one = `scope=QueryScope(principal=str(principal.id), values={${values.join(", ")}}),`;
+            const one = `scope=QueryScope(principal=str(principal.id), values={${values.join(", ")}}${tenant ? ", tenant=tenant" : ""}),`;
             if (12 + one.length <= 100) c.line(one);
             else {
               c.line("scope=QueryScope(");
               c.indent(() => {
                 c.line("principal=str(principal.id),");
                 c.line(`values={${values.join(", ")}},`);
+                if (tenant) c.line("tenant=tenant,");
               });
               c.line("),");
             }
@@ -339,14 +354,17 @@ export function pyRowsFile(L: Layout): PyFile {
     if (json.length) imp.from(L.persistenceRuntime, "sql_json");
     c.line(`# Columns of ${t.schema}.${t.name} in the order the INSERT / UPDATE statements bind them.`);
     c.line(`${columnsName(ag)}: Final = (`);
-    c.indent(() => t.columns.forEach((x) => c.line(`${pyString(x.name)},`)));
+    c.indent(() => [...(t.tenant ? [t.tenant] : []), ...t.columns].forEach((x) => c.line(`${pyString(x.name)},`)));
     c.line(")");
     c.line().line();
     c.line(`def ${toRowName(ag)}(aggregate: ${ag}) -> dict[str, object]:`);
     c.indent(() => {
       c.docstring(`A ${ag} as a row: what the repository binds and the in-memory readers filter and order on. Value objects are flattened; lists, entities and optional value objects are JSON (model field names).`);
       c.line("return {");
-      c.indent(() => t.columns.forEach((col) => c.line(`${pyString(col.name)}: ${columnValue(t, col)},`)));
+      c.indent(() => {
+        if (t.tenant) c.line(`${pyString(t.tenant.name)}: aggregate.tenant_id,`);
+        t.columns.forEach((col) => c.line(`${pyString(col.name)}: ${columnValue(t, col)},`));
+      });
       c.line("}");
     });
     c.line().line();
@@ -362,7 +380,7 @@ export function pyRowsFile(L: Layout): PyFile {
       c.line(`return ${ag}.model_validate(`);
       c.indent(() => {
         c.line("{");
-        c.indent(() => c.lines_(rowDict(t, [...L.fieldTypes(ag).keys()])));
+        c.indent(() => c.lines_([...(t.tenant ? [`${pyString(t.tenant.name)}: row[${pyString(t.tenant.name)}],`] : []), ...rowDict(t, [...L.fieldTypes(ag).keys()])]));
         c.line("}");
       });
       c.line(")");
@@ -415,6 +433,8 @@ function argLiteral(L: Layout, a: SqlArg, imp: Imports): string {
       return `("value", ${literal(L, a.value, a.column, imp)})`;
     case "principal":
       return `("principal", ${pyString(a.name)})`;
+    case "tenant":
+      return '("tenant", None)';
     case "search":
       return '("search", None)';
     case "key":
@@ -437,7 +457,7 @@ export function pyPostgresFile(L: Layout): PyFile {
     const agIr = L.ca.ir.aggregates.find((a) => a.name === ag)!;
     const idType = pyType(L.fieldTypes(ag).get(agIr.identity)!, imp, L.typeModule, { field: false });
     const sql = repositorySql(t);
-    imp.from(L.persistenceRuntime, "PostgresStore", "TableMapping");
+    imp.from(L.persistenceRuntime, t.tenant ? "PostgresTenantStore" : "PostgresStore", "TableMapping");
     imp.from(L.mod("aggregates"), ag);
     imp.from(L.rows, toValuesName(ag), fromRowName(ag));
     c.line().line();
@@ -455,6 +475,27 @@ export function pyPostgresFile(L: Layout): PyFile {
     c.line(")");
     c.line().line();
     c.line(`class Postgres${ag}Repository:`);
+    if (t.tenant) {
+      imp.from(L.securityModule, "TenantId");
+      c.indent(() => {
+        c.docstring(
+          [
+            `${ag}Repository on PostgreSQL with optimistic locking, one tenant per call: every statement filters by the tenant (another tenant's ${ag} is not found; saving one for another tenant is TenantMismatch). Use one instance per unit of work (it remembers the versions it read).`,
+            ...(L.model.security?.tenancy?.rls ? ["", "Row level security: it sets `app.tenant_id` for the transaction before its statements, so the connection must be inside a transaction (the unit of work's)."] : []),
+          ].join("\n"),
+        );
+        c.line();
+        c.line("def __init__(self, connection: SqlConnection) -> None:");
+        c.indent(() => c.line(`self._store = PostgresTenantStore(connection, ${tableName(ag)})`));
+        c.line();
+        c.line(`def get(self, tenant: TenantId, ${agIr.identity}: ${idType}) -> ${ag} | None:`);
+        c.indent(() => c.line(`return self._store.get(tenant, ${agIr.identity})`));
+        c.line();
+        c.line(`def save(self, tenant: TenantId, aggregate: ${ag}) -> None:`);
+        c.indent(() => c.line("self._store.save(tenant, aggregate)"));
+      });
+      continue;
+    }
     c.indent(() => {
       c.docstring(
         `${ag}Repository on PostgreSQL with optimistic locking: \`save\` inserts what it did not load and updates what it loaded only if the row still has the loaded version (else ConcurrencyConflict). Use one instance per unit of work (it remembers the versions it read).`,
@@ -472,7 +513,8 @@ export function pyPostgresFile(L: Layout): PyFile {
   }
   const KEYS: Record<string, string> = { first: "first", next: "next", searchFirst: "search_first", searchNext: "search_next" };
   for (const plan of pyContextPlans(L)) {
-    imp.from(L.persistenceRuntime, "QueryRequest", "QueryResult", "QueryStatements", "SqlStatement", "read_sql");
+    const inTenant = !!plan.table.tenant && !!L.model.security?.tenancy?.rls;
+    imp.from(L.persistenceRuntime, "QueryRequest", "QueryResult", "QueryStatements", "SqlStatement", inTenant ? "read_sql_in_tenant" : "read_sql");
     imp.from(L.queries, specName(plan), itemName(plan));
     imp.from(L.rows, itemFromRow(plan));
     c.line().line();
@@ -492,7 +534,33 @@ export function pyPostgresFile(L: Layout): PyFile {
     c.line().line();
     c.line(`class Postgres${readerName(plan)}:`);
     c.indent(() => {
-      c.docstring(`${readerName(plan)} on PostgreSQL.`);
+      if (inTenant) {
+        imp.from(L.persistenceRuntime, "SqlTransactions");
+        c.docstring(
+          `${readerName(plan)} on PostgreSQL: each page is read in a transaction (\`connection.transaction()\`) with \`app.tenant_id\` set for row level security; the statement filters by the tenant as well.`,
+        );
+        c.line();
+        c.line("def __init__(self, connection: SqlTransactions) -> None:");
+        c.indent(() => c.line("self._connection = connection"));
+        c.line();
+        c.line(`def read(self, request: QueryRequest) -> QueryResult[${itemName(plan)}]:`);
+        c.indent(() => {
+          const call = `return read_sql_in_tenant(self._connection, ${specName(plan)}, ${sqlName(plan)}, request, ${itemFromRow(plan)})`;
+          const args = ["self._connection", specName(plan), sqlName(plan), "request", itemFromRow(plan)];
+          if (call.length + 8 <= MAX_LINE) c.line(call);
+          else if (args.join(", ").length + 12 <= MAX_LINE) {
+            c.line("return read_sql_in_tenant(");
+            c.indent(() => c.line(args.join(", ")));
+            c.line(")");
+          } else {
+            c.line("return read_sql_in_tenant(");
+            c.indent(() => args.forEach((a) => c.line(`${a},`)));
+            c.line(")");
+          }
+        });
+        return;
+      }
+      c.docstring(plan.table.tenant ? `${readerName(plan)} on PostgreSQL (every statement filters by the request's tenant).` : `${readerName(plan)} on PostgreSQL.`);
       c.line();
       c.line("def __init__(self, connection: SqlConnection) -> None:");
       c.indent(() => c.line("self._connection = connection"));
@@ -536,8 +604,7 @@ export function pyInMemoryReaders(L: Layout, c: Code, imp: Imports): void {
 // ---------------------------------------------------------------------------
 
 function construct(L: Layout, name: string, rec: Record<string, unknown>, imp: Imports): string {
-  const args = [...L.fieldTypes(name).entries()].filter(([k]) => k in rec).map(([k, t]) => `${k}=${pyValue(rec[k], t, vctxOf(L, imp))}`);
-  return `${name}(${args.join(", ")})`;
+  return constructAggregate(L, name, rec, vctxOf(L, imp), imp);
 }
 
 class Givens {
@@ -659,10 +726,25 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
     body.line("with pytest.raises(ConstraintViolation):");
     body.indent(() => body.line(`${inputCall(L, plan, params, imp, ["limit=0"])}`));
   });
+  if (plan.table.tenant) {
+    const sc = sample ?? q.scenarios[0];
+    const data = givens.name(sc?.given.aggregates ?? []);
+    body.line().line();
+    body.line("def test_tenancy_another_tenants_rows_are_not_read() -> None:");
+    body.indent(() => {
+      body.docstring(`Tenant isolation: the same data stored in another tenant (${otherTenantPy(L)}) is never read for a caller of ${defaultTenantPy(L)}.`);
+      caller(sc);
+      body.line(`elsewhere = tuple(a.model_copy(update={"tenant_id": ${tenantPy(L, imp, otherTenantPy(L))}}) for a in ${data})`);
+      body.line(`page = ${exec("_setup(elsewhere)", inputCall(L, plan, sc?.when.params ?? {}, imp))}`);
+      body.line("assert page.items == ()");
+      body.line("assert page.next_cursor is None");
+    });
+  }
   if (secured && (q.scenarios[0] || !plan.params.some((p) => p.type.k !== "optional"))) {
     const auth = q.authorize!;
     const base = scenarioPrincipal(sec!, q, q.scenarios[0] ?? { given: {} });
-    const lacking = auth.roles.length ? otherRoles(sec!, auth) : undefined;
+    const lacking = auth.roles.length || auth.permissions?.length ? otherRoles(sec!, auth) : undefined;
+    const tenant = !!plan.table.tenant;
     const missing = scopeMembers(L, plan).filter((m) => m.optional);
     const secMod = securityModule(L.model);
     imp.from(secMod, "Unauthenticated");
@@ -672,7 +754,7 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
     body.indent(() => {
       body.docstring(
         [
-          `${q.name} checks the caller first: without a principal Unauthenticated${lacking ? `, without ${auth.roles.join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${m.member}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
+          `${q.name} checks the caller first: without a principal Unauthenticated${tenant ? ", without an active tenant Unauthenticated" : ""}${lacking ? `, without ${[...auth.roles, ...(auth.permissions ?? [])].join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${m.member}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
           "",
           "Nothing is read before: the reader fails the test when called.",
         ].join("\n"),
@@ -682,19 +764,26 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
       body.line("with pytest.raises(Unauthenticated) as anonymous:");
       body.indent(() => body.line("query.execute(params, None)"));
       body.line(`assert anonymous.value.details == {"action": ${pyString(q.name)}}`);
+      if (tenant) {
+        body.line(`tenantless = ${principalPy(L, { ...base, tenant: null }, imp)}`);
+        body.line("with pytest.raises(Unauthenticated) as no_tenant:");
+        body.indent(() => body.line("query.execute(params, tenantless)"));
+        body.line(`assert no_tenant.value.details == {"action": ${pyString(q.name)}, "error": "missing_tenant"}`);
+      }
       if (lacking) {
-        body.line(`lacking = ${principalPy(L, makePrincipal(sec!, { id: base.id, roles: lacking, claims: base.claims }), imp)}`);
+        body.line(`lacking = ${principalPy(L, makePrincipal(sec!, { id: base.id, roles: lacking, claims: base.claims, ...(base.tenant !== undefined ? { tenant: base.tenant } : {}) }), imp)}`);
         body.line("with pytest.raises(NotAuthorized) as refused:");
         body.indent(() => body.line("query.execute(params, lacking)"));
         body.line(`assert refused.value.details == {`);
         body.indent(() => {
           body.line(`"action": ${pyString(q.name)},`);
-          body.line(`"required_roles": [${auth.roles.map(pyString).join(", ")}],`);
+          if (auth.roles.length) body.line(`"required_roles": [${auth.roles.map(pyString).join(", ")}],`);
+          if (auth.permissions?.length) body.line(`"required_permissions": [${auth.permissions.map(pyString).join(", ")}],`);
         });
         body.line("}");
       }
       missing.forEach((m) => {
-        const p = makePrincipal(sec!, { id: base.id, roles: base.roles, claims: { ...base.claims, [m.member]: null } });
+        const p = makePrincipal(sec!, { id: base.id, roles: base.roles, claims: { ...base.claims, [m.member]: null }, ...(base.tenant !== undefined ? { tenant: base.tenant } : {}) });
         body.line(`unscoped = ${principalPy(L, p, imp)}`);
         body.line("with pytest.raises(NotAuthorized) as missing:");
         body.indent(() => body.line("query.execute(params, unscoped)"));
@@ -757,9 +846,24 @@ export function pyQueryTestFile(L: Layout, plan: QueryPlan): PyFile {
         body.line(`assert len(${exec("query", inputCall(L, plan, params, imp, ["cursor=cursor", "limit=1"]))}.items) == 1`);
       });
     }
+    if (plan.table.tenant) {
+      const p = scenarioPrincipal(sec!, q, sample);
+      body.line().line();
+      body.line("def test_tenancy_a_cursor_is_rejected_in_another_tenant() -> None:");
+      body.indent(() => {
+        body.docstring("A cursor is bound to the tenant it was issued in: the same principal acting in another tenant gets InvalidCursor.");
+        body.line(`query = _setup(${data})`);
+        caller(sample);
+        body.line(`cursor = ${exec("query", inputCall(L, plan, params, imp, ["limit=1"]))}.next_cursor`);
+        body.line("assert cursor is not None");
+        body.line(`elsewhere = ${principalPy(L, { ...p, tenant: otherTenantPy(L) }, imp)}`);
+        body.line("with pytest.raises(InvalidCursor):");
+        body.indent(() => body.line(`query.execute(${inputCall(L, plan, params, imp, ["cursor=cursor"])}, elsewhere)`));
+      });
+    }
     if (secured) {
       const p = scenarioPrincipal(sec!, q, sample);
-      const other = makePrincipal(sec!, { id: otherPrincipalId(L, p.id), roles: p.roles, claims: p.claims });
+      const other = makePrincipal(sec!, { id: otherPrincipalId(L, p.id), roles: p.roles, claims: p.claims, ...(p.tenant !== undefined ? { tenant: p.tenant } : {}), ...(p.platformRoles ? { platformRoles: p.platformRoles } : {}) });
       body.line().line();
       body.line("def test_a_cursor_is_bound_to_the_principal_it_was_issued_to() -> None:");
       body.indent(() => {
@@ -840,6 +944,70 @@ function samples(L: Layout): Map<string, Record<string, unknown>> {
   for (const uc of L.ca.ir.useCases) for (const sc of uc.scenarios) for (const a of sc.given.aggregates) if (!out.has(a.type)) out.set(a.type, a.fields);
   for (const ag of L.ca.ir.aggregates) for (const sc of ag.scenarios) if (sc.given && !out.has(ag.name)) out.set(ag.name, sc.given.aggregate);
   return out;
+}
+
+/**
+ * The PostgreSQL repository of a tenant-scoped aggregate against a scripted connection: the tenant is the first value of
+ * every statement, saving for another tenant never reaches the database, optimistic locking as usual, and (with row
+ * level security) the tenant is set per transaction and checked to hold.
+ */
+function pyTenantRepositoryTests(L: Layout, c: Code, t: TableIR, aggregate: string, identity: string, imp: Imports): void {
+  const ag = t.aggregate;
+  const s = snake(ag);
+  const security = !!L.model.security?.tenancy?.rls;
+  const versionParam = `p${t.columns.length + 2}`;
+  imp.from(L.securityModule, "TenantMismatch");
+  const tenant = tenantPy(L, imp, defaultTenantPy(L));
+  const other = tenantPy(L, imp, otherTenantPy(L));
+  c.line().line();
+  c.line(`def test_${s}_tenant_bound_insert_update_and_conflicts() -> None:`);
+  c.indent(() => {
+    c.docstring(
+      `Optimistic locking per tenant: the tenant is the first value of every statement, what the repository did not load is inserted, what it loaded is updated at the loaded version, a lost race is a ConcurrencyConflict.${security ? " Each call first sets app.tenant_id for the transaction (row level security); the first one checks that it holds." : ""}`,
+    );
+    c.line(`aggregate = ${aggregate}`);
+    c.line(`tenant = ${tenant}`);
+    if (security) {
+      c.line("connection = _ScriptedConnection(");
+      c.indent(() => c.line('[], [{"tenant": str(tenant)}], [{"version": 1}], [], [{"version": 2}], [], []'));
+      c.line(")");
+    } else c.line('connection = _ScriptedConnection([{"version": 1}], [{"version": 2}], [])');
+    c.line(`repository: ${ag}Repository = Postgres${ag}Repository(connection)`);
+    c.line("repository.save(tenant, aggregate)");
+    c.line("repository.save(tenant, aggregate)");
+    c.line("with pytest.raises(ConcurrencyConflict):");
+    c.indent(() => c.line("repository.save(tenant, aggregate)"));
+    c.line("pairs = list(zip(connection.queries, connection.params, strict=True))");
+    c.line('data = [(q, p) for q, p in pairs if "app.tenant_id" not in q]');
+    c.line(`assert [q for q, _ in data] == [${tableName(ag)}.insert, ${tableName(ag)}.update, ${tableName(ag)}.update]`);
+    c.line('assert [p["p1"] for _, p in data] == [tenant, tenant, tenant]');
+    c.line(`assert [p.get(${pyString(versionParam)}) for _, p in data] == [None, 1, 2]`);
+    c.line(`row = {**_database_row(${toRowName(ag)}(aggregate)), "version": 7}`);
+    c.line(`loaded = _ScriptedConnection(${security ? '[], [{"tenant": str(tenant)}], ' : ""}[row])`);
+    c.line(`found = Postgres${ag}Repository(loaded).get(tenant, aggregate.${identity})`);
+    c.line("assert found is not None");
+    c.line("assert found.same_state_as(aggregate)");
+    c.line(`assert loaded.params[-1] == {"p1": tenant, "p2": aggregate.${identity}}`);
+  });
+  c.line().line();
+  c.line(`def test_${s}_saving_for_another_tenant_is_refused() -> None:`);
+  c.indent(() => {
+    c.docstring("An aggregate of one tenant is never stored for another: TenantMismatch before any statement.");
+    c.line("connection = _ScriptedConnection()");
+    c.line("with pytest.raises(TenantMismatch):");
+    c.indent(() => c.line(`Postgres${ag}Repository(connection).save(${other}, ${aggregate})`));
+    c.line("assert connection.queries == []");
+  });
+  if (security) {
+    c.line().line();
+    c.line(`def test_${s}_row_level_security_needs_a_transaction() -> None:`);
+    c.indent(() => {
+      c.docstring("Outside a transaction (autocommit) the tenant setting does not hold: the repository refuses to run instead of silently reading nothing.");
+      c.line('connection = _ScriptedConnection([], [{"tenant": ""}])');
+      c.line(`with pytest.raises(RuntimeError, match="transaction"):`);
+      c.indent(() => c.line(`Postgres${ag}Repository(connection).get(${tenant}, ${aggregate}.${identity})`));
+    });
+  }
 }
 
 /** `show_trgm('staff@example.com')` on PostgreSQL 18 (pg_trgm), sorted. */
@@ -923,6 +1091,10 @@ export function pyPersistenceTestFile(L: Layout): PyFile {
       c.line(`assert ${fromRowName(ag)}(${toRowName(ag)}(aggregate)).same_state_as(aggregate)`);
       c.line(`assert ${fromRowName(ag)}(_database_row(${toRowName(ag)}(aggregate))).same_state_as(aggregate)`);
     });
+    if (t.tenant) {
+      pyTenantRepositoryTests(L, c, t, construct(L, ag, rec, imp), agIr.identity, imp);
+      continue;
+    }
     const versionParam = `p${t.columns.length + 1}`;
     c.line().line();
     c.line(`def test_${s}_insert_update_at_the_loaded_version_and_conflicts() -> None:`);

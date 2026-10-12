@@ -250,12 +250,17 @@ export function eventsFile(L: Layout): PyFile {
     c.line().line();
     c.line(`class ${ev.name}(DomainEvent):`);
     c.indent(() => {
-      c.docstring(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.`);
+      c.docstring(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.${L.tenantScopedEvent(ev.name) ? "\n\nCarries the tenant (`tenant_id`) of the aggregate it comes from." : ""}`);
       c.line();
       const one = `${EVENT_TAG}: Literal[${tag}] = ${tag}`;
       // Too long for one line: parenthesize the value, as ruff format does.
       if (one.length + 4 <= MAX_LINE) c.line(one);
       else c.line(`${EVENT_TAG}: Literal[${tag}] = (`).indent(() => c.line(tag)).line(")");
+      // Events of tenant-scoped aggregates carry the tenant (docs/09 §22).
+      if (L.tenantScopedEvent(ev.name)) {
+        imp.from(L.securityModule, "TenantId");
+        c.line("tenant_id: TenantId");
+      }
       for (const f of ev.fields) {
         const ann = pyType(f.type, imp, L.typeModule, { field: true });
         c.line(`${f.name}: ${ann}${f.type.k === "optional" ? " = None" : ""}`);
@@ -308,9 +313,15 @@ export function commandsFile(L: Layout): PyFile {
   for (const uc of L.ca.ir.useCases) {
     c.line().line();
     c.line(`class ${uc.command}(DomainModel):`);
+    // A cross-tenant use case names the tenant it acts in (docs/09 §22).
+    const target = !!uc.authorize?.crossTenant && !!L.model.security?.tenancy;
     c.indent(() => {
-      c.docstring(`Input of use case \`${uc.name}\`${uc.actor ? ` (actor: ${uc.actor})` : ""}.`);
-      if (uc.input.length) c.line();
+      c.docstring(`Input of use case \`${uc.name}\`${uc.actor ? ` (actor: ${uc.actor})` : ""}.${target ? "\n\n`tenant_id` is the tenant it acts in (cross-tenant: platform roles only)." : ""}`);
+      if (uc.input.length || target) c.line();
+      if (target) {
+        imp.from(L.securityModule, "TenantId");
+        c.line("tenant_id: TenantId");
+      }
       c.lines_(fieldLines(L, uc.command, uc.input, imp));
     });
   }
@@ -359,13 +370,19 @@ function aggregate(L: Layout, c: Code, ag: AggregateIR, imp: Imports): void {
   c.line().line();
   c.line(`class ${ag.name}(AggregateRoot):`);
   c.indent(() => {
+    const tenant = L.tenantScoped(ag);
     const doc = [ag.description ?? `Aggregate root ${ag.name}.`, "", `Identity: ${ag.identity}. Instances are immutable; operations return a Transition with the new state.`];
     if (ag.entities.length) doc.push(`Internal entities: ${ag.entities.map((e) => e.name).join(", ")}.`);
+    if (tenant) doc.push("Tenant-scoped: `tenant_id` is the tenant it belongs to, set by its factory from the caller's tenant and never changed.");
     c.docstring(doc.join("\n"));
     c.line();
     imp.from("typing", "ClassVar");
     c.line(`identity_field: ClassVar[str] = ${pyString(ag.identity)}`);
     c.line();
+    if (tenant) {
+      imp.from(L.securityModule, "TenantId");
+      c.line("tenant_id: TenantId");
+    }
     c.lines_(fieldLines(L, ag.name, ag.fields, imp));
 
     // -- invariants
@@ -409,17 +426,21 @@ function aggregate(L: Layout, c: Code, ag: AggregateIR, imp: Imports): void {
     // -- factories
     for (const f of ag.factories) {
       imp.from(L.runtime, "Transition");
-      const sig = paramSig(L, f.parameters, ag, imp);
+      const sig = [...(tenant ? ["tenant_id: TenantId"] : []), ...(f.parameters.length ? [paramSig(L, f.parameters, ag, imp)] : [])].join(", ");
       c.line();
       c.line("@classmethod");
       c.line(`def ${f.name}(cls${sig ? `, ${sig}` : ""}) -> Transition[${ag.name}]:`);
       c.indent(() => {
         const d = [f.description ?? `Create a new ${ag.name}.`, "", "Factory: construct-time invariants are checked on the new instance."];
         if (f.emits.length) d.push(`Emits: ${f.emits.map((e) => e.name).join(", ")}.`);
+        if (tenant) d.push("`tenant_id` is the caller's tenant (the use case passes it; it never comes from the input).");
         c.docstring(d.join("\n"));
-        const args = ag.fields
-          .filter((fd) => f.fields[fd.name] !== undefined)
-          .map((fd) => `${fd.name}=${emitAs(X([...f.path, "fields", fd.name])!, L.fieldTypes(ag.name).get(fd.name), L.exprCtx(imp, "cls"))}`);
+        const args = [
+          ...(tenant ? ["tenant_id=tenant_id"] : []),
+          ...ag.fields
+            .filter((fd) => f.fields[fd.name] !== undefined)
+            .map((fd) => `${fd.name}=${emitAs(X([...f.path, "fields", fd.name])!, L.fieldTypes(ag.name).get(fd.name), L.exprCtx(imp, "cls"))}`),
+        ];
         c.line(`aggregate = cls(${args.join(", ")})`);
         emitEvents(L, c, ag, f.emits, new Set(f.parameters.map((p) => p.name)), imp);
       });
@@ -467,6 +488,8 @@ function emitEvents(L: Layout, c: Code, ag: AggregateIR, emits: EventEmissionIR[
       if (fd.value !== undefined) return `${fd.name}=${emitExpr(L.ca.exprs.get(formatPath([...fd.path, "value"]))!, L.exprCtx(imp, "aggregate"))}`;
       return `${fd.name}=${params.has(fd.name) ? fd.name : `aggregate.${fd.name}`}`;
     });
+    // Events of tenant-scoped aggregates carry the tenant, so their consumers (policies) act in it.
+    if (L.tenantScopedEvent(em.name)) args.unshift("tenant_id=aggregate.tenant_id");
     const create = `events.append(${em.name}(${args.join(", ")}))`;
     if (em.when !== undefined) {
       const w = L.ca.exprs.get(formatPath([...em.path, "when"]))!;
@@ -480,6 +503,7 @@ function emitEvents(L: Layout, c: Code, ag: AggregateIR, emits: EventEmissionIR[
 }
 
 export function rulesFile(L: Layout): PyFile {
+
   const mod = L.mod("rules");
   const imp = new ModuleImports(mod);
   imp.from("dataclasses", "dataclass");

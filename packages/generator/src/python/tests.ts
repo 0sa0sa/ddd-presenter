@@ -1,4 +1,23 @@
-import { claimType, deriveViolations, derivedTestName, makePrincipal, otherRoles, scenarioPrincipal, type ResolvedPrincipal, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import {
+  claimType,
+  DEFAULT_TENANT_IDS,
+  deriveViolations,
+  derivedTestName,
+  makePrincipal,
+  OTHER_TENANT_IDS,
+  otherRoles,
+  scenarioPrincipal,
+  TENANT_FIELD,
+  usesPermissions,
+  type ResolvedPrincipal,
+  type AggregateIR,
+  type AggregateScenarioIR,
+  type ScenarioThenIR,
+  type Type,
+  type UseCaseIR,
+  type UseCaseScenarioIR,
+} from "@ddd/core";
+
 import { depParams, repoAttr, resolveReturn, useCaseAuthorization, useCaseDeps } from "./application.ts";
 import { securityModule } from "./security.ts";
 import { paramTypes, type PyFile } from "./domain.ts";
@@ -62,6 +81,10 @@ export function testingFile(L: Layout): PyFile {
     const idType = pyType(L.fieldTypes(ag.name).get(ag.identity)!, imp, L.typeModule, { field: false });
     c.line().line();
     c.line(`class InMemory${ag.name}Repository:`);
+    if (L.tenantScoped(ag)) {
+      tenantRepository(L, c, ag.name, ag.identity, idType, imp);
+      continue;
+    }
     c.indent(() => {
       c.docstring(`In-memory ${ag.name}Repository. Writes are staged until the unit of work commits.`);
       c.line();
@@ -107,6 +130,21 @@ export function testingFile(L: Layout): PyFile {
 
   // In-memory readers of the context's queries (none without queries: the file stays as before).
   pyInMemoryReaders(L, c, imp);
+
+  if (L.ca.ir.useCases.some((u) => L.scopeOf(u) === "cross_tenant")) {
+    imp.from(L.securityModule, "CrossTenantAccess");
+    c.line().line();
+    c.line("class RecordingCrossTenantAudit:");
+    c.indent(() => {
+      c.docstring("CrossTenantAudit that keeps every recorded access (for assertions).");
+      c.line();
+      c.line("def __init__(self) -> None:");
+      c.indent(() => c.line("self.accesses: list[CrossTenantAccess] = []"));
+      c.line();
+      c.line("def record(self, access: CrossTenantAccess) -> None:");
+      c.indent(() => c.line("self.accesses.append(access)"));
+    });
+  }
 
   if (L.ca.ir.useCases.some((u) => u.idempotencyKey)) {
     imp.from(L.ports, "RecordedResult");
@@ -266,9 +304,104 @@ function recordAsserts(c: Code, target: string, rec: Record<string, unknown>, ty
   }
 }
 
-function construct(name: string, rec: Record<string, unknown>, types: Map<string, Type>, vctx: ValueContext): string {
-  const args = [...types.entries()].filter(([k]) => k in rec).map(([k, t]) => `${k}=${pyValue(rec[k], t, vctx)}`);
+function construct(name: string, rec: Record<string, unknown>, types: Map<string, Type>, vctx: ValueContext, tenant?: string): string {
+  const args = [...(tenant ? [`tenant_id=${tenant}`] : []), ...[...types.entries()].filter(([k]) => k in rec).map(([k, t]) => `${k}=${pyValue(rec[k], t, vctx)}`)];
   return `${name}(${args.join(", ")})`;
+}
+
+/** The in-memory repository of a tenant-scoped aggregate (the semantics of the PostgreSQL adapter). */
+function tenantRepository(L: Layout, c: Code, name: string, identity: string, idType: string, imp: Imports): void {
+  imp.from(L.securityModule, "TenantId", "TenantMismatch");
+  c.indent(() => {
+    c.docstring(
+      `In-memory ${name}Repository of tenant-scoped aggregates: \`get\` sees the given tenant's only (another tenant's is None), \`save\` refuses another tenant's aggregate or an id another tenant uses (TenantMismatch). Writes are staged until the unit of work commits.`,
+    );
+    c.line();
+    c.line("def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:");
+    c.indent(() => {
+      c.line(`self._committed: dict[${idType}, ${name}] = {}`);
+      c.line(`self._pending: dict[${idType}, ${name}] = {}`);
+      c.line("self._unit_of_work = unit_of_work");
+      c.line("if unit_of_work is not None:");
+      c.indent(() => c.line("unit_of_work.enlist(self)"));
+    });
+    c.line();
+    c.line(`def seed(self, *aggregates: ${name}) -> None:`);
+    c.indent(() => {
+      c.docstring("Stores aggregates (of any tenant: each keeps its own `tenant_id`).");
+      c.line("for aggregate in aggregates:");
+      c.indent(() => c.line(`self._committed[aggregate.${identity}] = aggregate`));
+    });
+    c.line();
+    c.line(`def get(self, tenant: TenantId, ${identity}: ${idType}) -> ${name} | None:`);
+    c.indent(() => {
+      c.line(`aggregate = self._pending.get(${identity}, self._committed.get(${identity}))`);
+      c.line("return aggregate if aggregate is not None and aggregate.tenant_id == tenant else None");
+    });
+    c.line();
+    c.line(`def save(self, tenant: TenantId, aggregate: ${name}) -> None:`);
+    c.indent(() => {
+      c.line(`existing = self._pending.get(aggregate.${identity}, self._committed.get(aggregate.${identity}))`);
+      c.line("if aggregate.tenant_id != tenant or (existing is not None and existing.tenant_id != tenant):");
+      c.indent(() => c.line("raise TenantMismatch"));
+      c.line("if self._unit_of_work is None:");
+      c.indent(() => c.line(`self._committed[aggregate.${identity}] = aggregate`));
+      c.line("else:");
+      c.indent(() => c.line(`self._pending[aggregate.${identity}] = aggregate`));
+    });
+    c.line();
+    c.line(`def all(self) -> list[${name}]:`);
+    c.indent(() => {
+      c.docstring("Every committed aggregate, of every tenant (in-memory readers filter by tenant).");
+      c.line("return list(self._committed.values())");
+    });
+    c.line();
+    c.line("def _commit(self) -> None:");
+    c.indent(() => {
+      c.line("self._committed.update(self._pending)");
+      c.line("self._pending.clear()");
+    });
+    c.line();
+    c.line("def _rollback(self) -> None:");
+    c.indent(() => c.line("self._pending.clear()"));
+  });
+}
+
+/** The tenant generated tests run in, another one, and a typed literal of a tenant id. */
+export function defaultTenantPy(L: Layout): string {
+  return DEFAULT_TENANT_IDS[L.model.security!.tenancy!.type];
+}
+export function otherTenantPy(L: Layout): string {
+  return OTHER_TENANT_IDS[L.model.security!.tenancy!.type];
+}
+export function tenantPy(L: Layout, imp: Imports, tenant: string): string {
+  imp.from(L.securityModule, "TenantId");
+  if (L.model.security!.tenancy!.type === "UUID") {
+    imp.from("uuid", "UUID");
+    return `TenantId(UUID(${pyString(tenant)}))`;
+  }
+  return `TenantId(${pyString(tenant)})`;
+}
+
+/** The tenant a use case scenario's data lives in: the target tenant of a cross-tenant use case, else the default. */
+function scenarioTenantPy(L: Layout, uc: UseCaseIR, sc: UseCaseScenarioIR): string | undefined {
+  if (!L.model.security?.tenancy) return undefined;
+  const target = sc.when.input[TENANT_FIELD];
+  return uc.authorize?.crossTenant && target !== undefined && target !== null ? String(target) : defaultTenantPy(L);
+}
+
+/** `X(tenant_id=…, …)` for a tenant-scoped aggregate (in `tenant`, the default test tenant unless given). */
+export function constructAggregate(L: Layout, name: string, rec: Record<string, unknown>, vctx: ValueContext, imp: Imports, tenant?: string): string {
+  const ag = L.aggregate(name);
+  const t = ag && L.tenantScoped(ag) ? tenantPy(L, imp, tenant ?? defaultTenantPy(L)) : undefined;
+  return construct(name, rec, L.fieldTypes(name), vctx, t);
+}
+
+/** The command of a scenario: a cross-tenant use case's command also names its target tenant. */
+function commandPy(L: Layout, uc: UseCaseIR, input: Record<string, unknown>, vctx: ValueContext, imp: Imports): string {
+  const target = input[TENANT_FIELD];
+  const tenant = uc.authorize?.crossTenant && L.model.security?.tenancy && target !== undefined && target !== null ? tenantPy(L, imp, String(target)) : undefined;
+  return construct(uc.command, input, L.fieldTypes(uc.command), vctx, tenant);
 }
 
 function scenarioDoc(sc: { description?: string }, lines: string[]): string {
@@ -305,13 +438,15 @@ function aggregateScenario(L: Layout, c: Code, ag: AggregateIR, sc: AggregateSce
   c.line(`def test_${sc.name}() -> None:`);
   c.indent(() => {
     c.docstring(scenarioDoc(sc, [...(sc.given ? ["Given: an existing aggregate"] : []), `When: ${whenText}`, `Then: ${describeThen(then).join("; ")}`]));
-    if (sc.given) c.line(`aggregate = ${construct(ag.name, sc.given.aggregate, types, vctx)}`);
+    if (sc.given) c.line(`aggregate = ${constructAggregate(L, ag.name, sc.given.aggregate, vctx, imp)}`);
     let call: string;
-    if (w.kind === "construct") call = construct(ag.name, w.fields, types, vctx);
+    if (w.kind === "construct") call = constructAggregate(L, ag.name, w.fields, vctx, imp);
     else {
       const member = w.kind === "operation" ? ag.operations.find((o) => o.name === w.operation)! : ag.factories.find((f) => f.name === w.factory)!;
       const pt = paramTypes(L, ag, member.parameters);
-      const args = member.parameters.filter((p) => p.name in w.args).map((p) => `${p.name}=${pyValue(w.args[p.name], pt.get(p.name)!, vctx)}`);
+      // A factory of a tenant-scoped aggregate takes the tenant it creates the aggregate in.
+      const tenantArg = w.kind === "factory" && L.tenantScoped(ag) ? [`tenant_id=${tenantPy(L, imp, defaultTenantPy(L))}`] : [];
+      const args = [...tenantArg, ...member.parameters.filter((p) => p.name in w.args).map((p) => `${p.name}=${pyValue(w.args[p.name], pt.get(p.name)!, vctx)}`)];
       call = w.kind === "operation" ? `aggregate.${w.operation}(${args.join(", ")})` : `${ag.name}.${w.factory}(${args.join(", ")})`;
     }
     if (then.raises) {
@@ -360,7 +495,7 @@ export function invariantTestFile(L: Layout): PyFile | undefined {
         ].join("\n"),
       );
       c.line(`with pytest.raises(${d.error}) as raised:`);
-      c.indent(() => c.line(construct(d.owner, d.record, L.fieldTypes(d.owner), vctx)));
+      c.indent(() => c.line(d.ownerKind === "aggregate" ? constructAggregate(L, d.owner, d.record, vctx, imp) : construct(d.owner, d.record, L.fieldTypes(d.owner), vctx)));
       c.line(`assert raised.value.details["rule"] == ${pyString(d.rule)}`);
     });
   }
@@ -407,9 +542,10 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       imp.from(L.testing, `InMemory${r}Repository`);
       c.line(`${repoAttr(r)} = InMemory${r}Repository(${deps.uow ? "unit_of_work" : ""})`);
     }
+    const tenant = scenarioTenantPy(L, uc, sc);
     for (const a of g.aggregates) {
       imp.from(L.mod("aggregates"), a.type);
-      c.line(`${repoAttr(a.type)}.seed(${construct(a.type, a.fields, L.fieldTypes(a.type), vctx)})`);
+      c.line(`${repoAttr(a.type)}.seed(${constructAggregate(L, a.type, a.fields, vctx, imp, tenant)})`);
     }
     if (deps.clock) {
       imp.from(L.testing, "FixedClock");
@@ -435,9 +571,13 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       imp.from(L.testing, "InMemoryIdempotencyStore");
       c.line(`idempotency_store = InMemoryIdempotencyStore(${deps.uow ? "unit_of_work" : ""})`);
     }
+    if (deps.audit) {
+      imp.from(L.testing, "RecordingCrossTenantAudit");
+      c.line("audit = RecordingCrossTenantAudit()");
+    }
     const params = depParams(deps);
     c.line(`use_case = ${cls}(${params.map((p) => `${p.name}=${p.name}`).join(", ")})`);
-    const cmd = construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx);
+    const cmd = commandPy(L, uc, sc.when.input, vctx, imp);
     c.line(`command = ${cmd}`);
     const caller = principalArg(L, c, uc, sc, imp);
     const call = `use_case.execute(command${caller})`;
@@ -459,11 +599,17 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       c.line(call);
       if (deps.uow) c.line("assert unit_of_work.committed");
     }
+    if (deps.audit) {
+      // Cross-tenant: the access was recorded (before anything was loaded), unless authorization refused it.
+      if (then.raises === "NotAuthorized" || then.raises === "Unauthenticated") c.line("assert audit.accesses == []");
+      else c.line(`assert [(access.action, access.tenant_id) for access in audit.accesses] == [(${pyString(uc.name)}, command.tenant_id)]`);
+    }
     if (Array.isArray(then.state)) {
       then.state.forEach((s, i) => {
         const ag = L.ca.ir.aggregates.find((a) => a.name === s.aggregate)!;
         const types = L.fieldTypes(ag.name);
-        c.line(`stored_${i} = ${repoAttr(ag.name)}.get(${pyValue(s.id, types.get(ag.identity)!, vctx)})`);
+        const bound = tenant !== undefined && L.tenantScoped(ag) ? `${tenantPy(L, imp, tenant)}, ` : "";
+        c.line(`stored_${i} = ${repoAttr(ag.name)}.get(${bound}${pyValue(s.id, types.get(ag.identity)!, vctx)})`);
         c.line(`assert stored_${i} is not None`);
         recordAsserts(c, `stored_${i}`, s.fields, types, vctx);
       });
@@ -473,8 +619,18 @@ function useCaseScenario(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioI
       else c.line(`# ${uc.name} publishes no events`);
     }
     if (uc.idempotencyKey && caller !== ", None") {
-      // Keys of a use case that needs a principal are kept per principal.
-      const key = caller ? `f"{principal.id}:{command.${uc.idempotencyKey}}"` : `str(command.${uc.idempotencyKey})`;
+      // Keys of a use case that needs a principal are kept per principal (and per tenant with tenancy).
+      const scope = L.scopeOf(uc);
+      const key =
+        scope === "tenant" && caller === ", principal"
+          ? `f"{principal.tenant_id}:{principal.id}:{command.${uc.idempotencyKey}}"`
+          : scope === "cross_tenant"
+            ? `f"{command.tenant_id}:{principal.id}:{command.${uc.idempotencyKey}}"`
+            : scope === "tenant"
+              ? `f"{context.tenant_id}:{command.${uc.idempotencyKey}}"`
+              : caller
+                ? `f"{principal.id}:{command.${uc.idempotencyKey}}"`
+                : `str(command.${uc.idempotencyKey})`;
       const recorded = `idempotency_store.get(${pyString(uc.name)}, ${key})`;
       if (then.raises) {
         c.line("# A failed run is not recorded, so a retry with the same key runs again.");
@@ -508,7 +664,10 @@ export function principalPy(L: Layout, p: ResolvedPrincipal, imp: Imports): stri
     if (typeof v === "boolean") return v ? "True" : "False";
     return typeof v === "string" ? pyString(v) : String(v);
   };
-  const parts = [`id=${value(p.id, sec.principal.idType)}`, `roles=(${p.roles.map(pyString).join(", ")}${p.roles.length === 1 ? "," : ""})`];
+  const parts = [`id=${value(p.id, sec.principal.idType)}`];
+  if (p.tenant !== undefined && p.tenant !== null) parts.push(`tenant_id=${tenantPy(L, imp, p.tenant)}`);
+  parts.push(`roles=(${p.roles.map(pyString).join(", ")}${p.roles.length === 1 ? "," : ""})`);
+  if (p.platformRoles?.length) parts.push(`platform_roles=(${p.platformRoles.map(pyString).join(", ")}${p.platformRoles.length === 1 ? "," : ""})`);
   for (const c of sec.principal.claims) {
     const v = p.claims[c.name];
     if (v !== null && v !== undefined) parts.push(`${c.name}=${value(v, c.type)}`);
@@ -519,6 +678,12 @@ export function principalPy(L: Layout, p: ResolvedPrincipal, imp: Imports): stri
 /** Declares `principal` for a scenario of a use case that needs one; returns the extra execute argument. */
 function principalArg(L: Layout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: Imports): string {
   const sec = L.model.security;
+  if (sec?.tenancy && !useCaseAuthorization(L, uc) && L.scopeOf(uc) === "tenant") {
+    // An internal use case on tenant data runs in the tenant it is given (as a policy would pass it).
+    imp.from(L.securityModule, "TenantContext");
+    c.line(`context = TenantContext(tenant_id=${tenantPy(L, imp, defaultTenantPy(L))})`);
+    return ", context";
+  }
   if (!sec || !useCaseAuthorization(L, uc)) return "";
   const p = scenarioPrincipal(sec, uc, sc);
   if (p.anonymous) return ", None";
@@ -535,15 +700,17 @@ function untouchedRepository(L: Layout, c: Code, aggregate: string, imp: Imports
   imp.from("typing", "NoReturn");
   imp.from(L.mod("aggregates"), aggregate);
   const idType = pyType(L.fieldTypes(ag.name).get(ag.identity)!, imp, L.typeModule, { field: false });
+  const tenant = L.tenantScoped(ag);
+  if (tenant) imp.from(L.securityModule, "TenantId");
   c.line().line();
   c.line(`class ${cls}:`);
   c.indent(() => {
     c.docstring(`A ${aggregate}Repository that fails the test when it is used: authorization comes first.`);
     c.line();
-    c.line(`def get(self, ${ag.identity}: ${idType}) -> NoReturn:`);
+    c.line(`def get(self, ${tenant ? "tenant: TenantId, " : ""}${ag.identity}: ${idType}) -> NoReturn:`);
     c.indent(() => c.line('raise AssertionError("loaded before authorization")'));
     c.line();
-    c.line(`def save(self, aggregate: ${aggregate}) -> NoReturn:`);
+    c.line(`def save(self, ${tenant ? "tenant: TenantId, " : ""}aggregate: ${aggregate}) -> NoReturn:`);
     c.indent(() => c.line('raise AssertionError("saved before authorization")'));
   });
   return cls;
@@ -563,7 +730,36 @@ function authorizationTests(L: Layout, c: Code, uc: UseCaseIR, imp: Imports, vct
   if (!uc.scenarios.some((s) => s.given.principal?.anonymous)) {
     cases.push({ name: "authorization_anonymous_is_unauthenticated", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "None", error: "Unauthenticated", details: `{"action": ${pyString(uc.name)}}` });
   }
-  if (auth.roles.length) {
+  const scope = L.scopeOf(uc);
+  const required = `${auth.roles.length ? `, "required_roles": [${auth.roles.map(pyString).join(", ")}]` : ""}${auth.permissions.length ? `, "required_permissions": [${auth.permissions.map(pyString).join(", ")}]` : ""}`;
+  if (sec.tenancy && scope === "tenant") {
+    const base = scenarioPrincipal(sec, uc, { given: {} });
+    cases.push({
+      name: "authorization_without_tenant_is_unauthenticated",
+      doc: `A principal whose token names no tenant (and so holds no tenant role) cannot act on tenant data: ${uc.name} raises Unauthenticated (missing_tenant) before it touches a repository.`,
+      principal: principalPy(L, { ...base, tenant: null }, imp),
+      error: "Unauthenticated",
+      details: `{"action": ${pyString(uc.name)}, "error": "missing_tenant"}`,
+    });
+  }
+  if (sec.tenancy && scope === "cross_tenant") {
+    cases.push({
+      name: "authorization_tenant_roles_do_not_act_across_tenants",
+      doc: `A principal holding every tenant role (${sec.roles.join(", ")}) but no platform role cannot run cross-tenant ${uc.name}: NotAuthorized before the access is recorded or anything is loaded.`,
+      principal: principalPy(L, makePrincipal(sec, { roles: [...sec.roles], claims: {} }), imp),
+      error: "NotAuthorized",
+      details: `{"action": ${pyString(uc.name)}${required}}`,
+    });
+  } else if (usesPermissions(sec) && (auth.roles.length || auth.permissions.length)) {
+    const roles = otherRoles(sec, uc.authorize!);
+    cases.push({
+      name: "authorization_missing_role_or_permission_is_refused",
+      doc: `A principal with ${roles.length ? `only the other roles (${roles.join(", ")})` : "no role"} lacks ${[...auth.roles, ...auth.permissions].join(" / ")}: ${uc.name} raises NotAuthorized naming the requirement, before it touches a repository.`,
+      principal: principalPy(L, makePrincipal(sec, { roles, claims: {} }), imp),
+      error: "NotAuthorized",
+      details: `{"action": ${pyString(uc.name)}${required}}`,
+    });
+  } else if (auth.roles.length) {
     const roles = otherRoles(sec, uc.authorize!);
     cases.push({
       name: "authorization_missing_role_is_refused",
@@ -606,18 +802,95 @@ function authorizationTests(L: Layout, c: Code, uc: UseCaseIR, imp: Imports, vct
           case "idempotency_store":
             imp.from(L.testing, "InMemoryIdempotencyStore");
             return "idempotency_store=InMemoryIdempotencyStore()";
+          case "audit":
+            imp.from(L.testing, "RecordingCrossTenantAudit");
+            return "audit=audit";
           default:
             return `${p.name}=${p.name}`;
         }
       });
+      if (deps.audit) {
+        imp.from(L.testing, "RecordingCrossTenantAudit");
+        c.line("audit = RecordingCrossTenantAudit()");
+      }
       c.line(`use_case = ${pascal(uc.name)}UseCase(${args.join(", ")})`);
-      c.line(`command = ${construct(uc.command, sc.when.input, L.fieldTypes(uc.command), vctx)}`);
+      c.line(`command = ${commandPy(L, uc, sc.when.input, vctx, imp)}`);
       if (k.principal !== "None") c.line(`principal = ${k.principal}`);
       c.line(`with pytest.raises(${k.error}) as raised:`);
       c.indent(() => c.line(`use_case.execute(command, ${k.principal === "None" ? "None" : "principal"})`));
       c.line(`assert raised.value.details == ${k.details}`);
       if (deps.uow) c.line("assert not unit_of_work.committed");
       if (deps.publisher) c.line("assert event_publisher.published == []");
+      if (deps.audit) c.line("assert audit.accesses == []");
     });
   }
+  otherTenantTest(L, c, uc, imp, vctx);
+}
+
+/**
+ * Tenant isolation of a use case (docs/09 §22): the first successful scenario that loads stored data, run by the same
+ * principal in another tenant, finds nothing (not found, no existence leak), and nothing is committed.
+ */
+function otherTenantTest(L: Layout, c: Code, uc: UseCaseIR, imp: Imports, vctx: ValueContext): void {
+  const sec = L.model.security;
+  if (!sec?.tenancy || L.scopeOf(uc) !== "tenant" || !useCaseAuthorization(L, uc)) return;
+  const first = uc.steps[0];
+  if (first?.kind !== "load" || !L.tenantScoped(L.aggregate(first.aggregate)!)) return;
+  const sc = uc.scenarios.find((s) => !s.then.raises && s.given.aggregates.some((a) => a.type === first.aggregate) && !s.given.principal?.anonymous && s.given.principal?.tenant === undefined);
+  if (!sc) return;
+  const deps = useCaseDeps(L, uc);
+  const error = first.notFound ?? "AggregateNotFound";
+  importError(L, imp, error);
+  imp.import("pytest");
+  imp.from(L.useCases, `${pascal(uc.name)}UseCase`);
+  imp.from(L.mod("commands"), uc.command);
+  c.line().line();
+  c.line(`def test_tenancy_another_tenants_${toSnakeName(first.aggregate)}_is_not_found() -> None:`);
+  c.indent(() => {
+    c.docstring(`Scenario \`${sc.name}\` run by the same principal in another tenant: the ${first.aggregate} of tenant ${defaultTenantPy(L)} does not exist there (${error}), and nothing is committed.`);
+    if (deps.uow) {
+      imp.from(L.testing, "FakeUnitOfWork");
+      c.line("unit_of_work = FakeUnitOfWork()");
+    }
+    const repos = new Set([...deps.repos, ...sc.given.aggregates.map((a) => a.type)]);
+    for (const r of [...repos].sort()) {
+      imp.from(L.testing, `InMemory${r}Repository`);
+      c.line(`${repoAttr(r)} = InMemory${r}Repository(${deps.uow ? "unit_of_work" : ""})`);
+    }
+    for (const a of sc.given.aggregates) {
+      imp.from(L.mod("aggregates"), a.type);
+      c.line(`${repoAttr(a.type)}.seed(${constructAggregate(L, a.type, a.fields, vctx, imp)})`);
+    }
+    const args = depParams(deps).map((p) => {
+      switch (p.name) {
+        case "clock":
+          imp.from(L.testing, "FixedClock");
+          return `clock=FixedClock(${pyValue(sc.given.clock ?? "1970-01-01T00:00:00+00:00", { k: "primitive", name: "DateTime" }, vctx)})`;
+        case "ids":
+          imp.from(L.testing, "SequentialIds");
+          return `ids=SequentialIds([${sc.given.ids.map((id) => pyValue(id, { k: "primitive", name: "UUID" }, vctx)).join(", ")}])`;
+        case "extensions":
+          imp.from(L.testing, "StubExtensions");
+          return "extensions=StubExtensions()";
+        case "event_publisher":
+          imp.from(L.testing, "CapturingEventPublisher");
+          return "event_publisher=CapturingEventPublisher()";
+        case "idempotency_store":
+          imp.from(L.testing, "InMemoryIdempotencyStore");
+          return "idempotency_store=InMemoryIdempotencyStore()";
+        default:
+          return `${p.name}=${p.name}`;
+      }
+    });
+    c.line(`use_case = ${pascal(uc.name)}UseCase(${args.join(", ")})`);
+    c.line(`command = ${commandPy(L, uc, sc.when.input, vctx, imp)}`);
+    c.line(`principal = ${principalPy(L, { ...scenarioPrincipal(sec, uc, sc), tenant: otherTenantPy(L) }, imp)}`);
+    c.line(`with pytest.raises(${error}):`);
+    c.indent(() => c.line("use_case.execute(command, principal)"));
+    if (deps.uow) c.line("assert not unit_of_work.committed");
+  });
+}
+
+function toSnakeName(name: string): string {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }

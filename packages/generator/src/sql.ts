@@ -150,7 +150,7 @@ function tenantRepositorySql(t: TableIR, tenant: ColumnIR): RepositorySql {
   const ref = tableRef(t);
   const id = t.identity;
   const all = [tenant, ...t.columns];
-  const selectList = [...t.columns.map(selectExpr), VERSION_COLUMN];
+  const selectList = [...all.map(selectExpr), VERSION_COLUMN];
   const select = {
     text: `${list(selectList, "", "SELECT ")}\nFROM ${ref}\nWHERE ${ident(tenant.name)} = $1::${cast(tenant.sql)} AND ${ident(id.name)} = $2::${cast(id.sql)}`,
     args: [{ kind: "column", column: tenant.name } as SqlArg, { kind: "column", column: id.name } as SqlArg],
@@ -222,7 +222,8 @@ function anyOf(parts: string[]): string {
 function compare(left: string[], op: string, right: string[]): string {
   if (left.length === 1) return `${left[0]} ${op} ${right[0]}`;
   const one = `(${left.join(", ")}) ${op} (${right.join(", ")})`;
-  if (one.length <= 90) return one;
+  // Also short enough with psycopg's longer placeholders (`%(p4)s`): the Python embedding stays within 100 columns.
+  if (one.length <= 90 && psycopgText(one).length <= 94) return one;
   return `(\n    ${left.join(",\n    ")}\n  ) ${op} (\n    ${right.join(",\n    ")}\n  )`;
 }
 

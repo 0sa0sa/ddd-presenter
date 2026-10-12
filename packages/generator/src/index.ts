@@ -110,7 +110,7 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   }
   if (withQueries) {
     const doc = docstringLines("Read side and PostgreSQL runtime: connection port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", "").join("\n");
-    gen(`${src}/${pkg}/generated/_persistence.py`, `${header(model)}\n\n${doc}\n\n${persistenceRuntime(`${pkg}.generated._runtime`, !!model.security)}`);
+    gen(`${src}/${pkg}/generated/_persistence.py`, `${header(model)}\n\n${doc}\n\n${persistenceRuntime(`${pkg}.generated._runtime`, !!model.security, model.security?.tenancy ? { rls: model.security.tenancy.rls, securityModule: `${pkg}.generated.security` } : undefined)}`);
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path));

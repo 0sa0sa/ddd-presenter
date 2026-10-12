@@ -3,7 +3,8 @@
  * (valid, expired, wrong issuer / audience, forged, `alg: none`, an HMAC token signed with the public key), the
  * authorization checks, the token bucket with a fake clock and the RateLimit headers.
  */
-import { claimType, type ModelIR } from "@ddd/core";
+import { claimType, DEFAULT_TENANT_IDS, roleIncludes, rolePermissions, usesPermissions, type ModelIR, type ResolvedPrincipal } from "@ddd/core";
+
 import type { PyFile } from "./domain.ts";
 import { assemble, type Layout } from "./layout.ts";
 import { authenticationModule, rateLimitModule, securityModule } from "./security.ts";
@@ -108,14 +109,50 @@ export function securityTestFile(model: ModelIR, Ls: Layout[]): PyFile | undefin
     const roles = sec.roles.slice(0, 2);
     const claims = sec.principal.claims.map((cl) => ({ cl, v: sampleClaim(cl.type) }));
     c.line().line();
+    const tenancy = sec.tenancy;
+    const platform = sec.platformRoles.map((d) => d.name).slice(0, 1);
     c.line("def test_a_valid_token_becomes_the_principal() -> None:");
     c.indent(() => {
-      c.docstring(`\`sub\` is the id, \`${auth.rolesClaim}\` the roles (undeclared roles are dropped), the declared claims their values.`);
-      const payload = [`${pyString(auth.rolesClaim)}: [${[...roles, "not_a_declared_role"].map(pyString).join(", ")}]`, ...claims.map(({ cl, v }) => `${pyString(cl.claim ?? cl.name)}: ${jsonLiteral(v)}`)];
-      c.line(`token = _token({${payload.join(", ")}})`);
-      const expected = principalPy(L, { anonymous: false, id: sub, roles, claims: Object.fromEntries(claims.map(({ cl, v }) => [cl.name, v])) }, imp);
-      c.line(`assert AUTHENTICATOR.authenticate(f"Bearer {token}") == ${expected}`);
+      c.docstring(`\`sub\` is the id, ${tenancy ? `\`${tenancy.claim}\` the active tenant, ` : ""}\`${auth.rolesClaim}\` the roles (undeclared roles are dropped), the declared claims their values.`);
+      const payload = [
+        ...(tenancy ? [`${pyString(tenancy.claim)}: ${pyString(DEFAULT_TENANT_IDS[tenancy.type])}`] : []),
+        `${pyString(auth.rolesClaim)}: [${[...roles, "not_a_declared_role"].map(pyString).join(", ")}]`,
+        ...(platform.length ? [`${pyString(tenancy!.platformRolesClaim)}: [${platform.map(pyString).join(", ")}]`] : []),
+        ...claims.map(({ cl, v }) => `${pyString(cl.claim ?? cl.name)}: ${jsonLiteral(v)}`),
+      ];
+      const one = `token = _token({${payload.join(", ")}})`;
+      if (one.length + 4 <= 100) c.line(one);
+      else {
+        c.line("token = _token(");
+        c.indent(() => {
+          c.line("{");
+          c.indent(() => payload.forEach((p) => c.line(`${p},`)));
+          c.line("}");
+        });
+        c.line(")");
+      }
+      const expected = principalPy(L, { anonymous: false, id: sub, roles, claims: Object.fromEntries(claims.map(({ cl, v }) => [cl.name, v])), ...(tenancy ? { tenant: DEFAULT_TENANT_IDS[tenancy.type], platformRoles: platform } : {}) }, imp);
+      if (tenancy) {
+        c.line(`expected = ${expected}`);
+        c.line('assert AUTHENTICATOR.authenticate(f"Bearer {token}") == expected');
+      } else c.line(`assert AUTHENTICATOR.authenticate(f"Bearer {token}") == ${expected}`);
     });
+    if (tenancy) {
+      c.line().line();
+      c.line("def test_roles_need_an_active_tenant_and_platform_roles_their_own_claim() -> None:");
+      c.indent(() => {
+        c.docstring(
+          `Tenant roles hold in the active tenant only: a token without \`${tenancy.claim}\` holds none.${platform.length ? ` Platform roles come from \`${tenancy.platformRolesClaim}\` only.` : ""}`,
+        );
+        const noTenant = [`${pyString(auth.rolesClaim)}: [${[...roles, ...platform].map(pyString).join(", ")}]`, ...(platform.length ? [`${pyString(tenancy.platformRolesClaim)}: [${roles.map(pyString).join(", ")}]`] : [])];
+        c.line(`token = _token({${noTenant.join(", ")}})`);
+        c.line('principal = AUTHENTICATOR.authenticate(f"Bearer {token}")');
+        c.line("assert principal is not None");
+        c.line("assert principal.tenant_id is None");
+        c.line("assert principal.roles == ()");
+        if (platform.length) c.line("assert principal.platform_roles == ()");
+      });
+    }
     c.line().line();
     c.line("def test_no_authorization_header_is_no_principal() -> None:");
     c.indent(() => c.line("assert AUTHENTICATOR.authenticate(None) is None"));
@@ -170,6 +207,11 @@ export function securityTestFile(model: ModelIR, Ls: Layout[]): PyFile | undefin
       });
     });
   }
+  if (usesPermissions(sec) || sec.tenancy) {
+    rbacTests(model, L, c, imp);
+    rateLimitTests(model, c, imp);
+    return { path: `${model.generation.testsDir}/generated/test_security.py`, content: assemble(model, "Security: bearer JWT authentication (PyJWT), roles and permissions, the authorization checks, token-bucket rate limiting.", imp, c.toString(), { exports: false }) };
+  }
   // Authorization checks
   imp.from(secMod, "NotAuthorized", "Unauthenticated", "allow_if", "authorize");
   const role = sec.roles[0]!;
@@ -191,6 +233,109 @@ export function securityTestFile(model: ModelIR, Ls: Layout[]): PyFile | undefin
     c.line("with pytest.raises(NotAuthorized):");
     c.indent(() => c.line('allow_if(False, "action")'));
   });
+  rateLimitTests(model, c, imp);
+  return { path: `${model.generation.testsDir}/generated/test_security.py`, content: assemble(model, "Security: bearer JWT authentication (PyJWT), the authorization checks, token-bucket rate limiting.", imp, c.toString(), { exports: false }) };
+}
+
+/** The role hierarchy and permissions resolved at generation time, and the authorization checks by scope. */
+function rbacTests(model: ModelIR, L: Layout, c: Code, imp: Imports): void {
+  const sec = model.security!;
+  const secMod = securityModule(model);
+  const tenancy = sec.tenancy;
+  const includes = roleIncludes(sec, "tenant");
+  const perms = rolePermissions(sec, "tenant");
+  const id = sec.principal.idType === "UUID" ? "00000000-0000-4000-8000-000000000001" : "user-1";
+  const as = (roles: string[], extra: Partial<ResolvedPrincipal> = {}) =>
+    principalPy(L, { anonymous: false, id, roles, claims: {}, ...(tenancy ? { tenant: DEFAULT_TENANT_IDS[tenancy.type], platformRoles: [] } : {}), ...extra }, imp);
+  imp.from(secMod, "NotAuthorized", "Unauthenticated", "allow_if", "ROLE_INCLUDES", "ROLE_PERMISSIONS", "has_role", "has_permission");
+  imp.from("types", "MappingProxyType");
+  c.line().line();
+  c.line("def test_the_role_hierarchy_and_permissions_are_resolved() -> None:");
+  c.indent(() => {
+    c.docstring("Each role includes itself and every role it inherits (NIST RBAC1); its permissions include the inherited roles' ones. The maps are read-only.");
+    c.line("assert dict(ROLE_INCLUDES) == {");
+    c.indent(() => [...includes].forEach(([r, inc]) => c.line(`${pyString(r)}: (${inc.map(pyString).join(", ")}${inc.length === 1 ? "," : ""}),`)));
+    c.line("}");
+    c.line("assert dict(ROLE_PERMISSIONS) == {");
+    c.indent(() => [...perms].forEach(([r, ps]) => c.line(`${pyString(r)}: (${ps.map(pyString).join(", ")}${ps.length === 1 ? "," : ""}),`)));
+    c.line("}");
+    c.line("assert isinstance(ROLE_PERMISSIONS, MappingProxyType)");
+    c.line("with pytest.raises(NotAuthorized):");
+    c.indent(() => c.line('allow_if(False, "action")'));
+  });
+  const senior = [...includes].find(([, inc]) => inc.length > 1);
+  if (senior) {
+    const [role, inc] = senior;
+    const junior = inc[1]!;
+    const extra = (perms.get(role) ?? []).find((p) => !(perms.get(junior) ?? []).includes(p));
+    const inherited = (perms.get(junior) ?? [])[0];
+    c.line().line();
+    c.line(`def test_${role}_inherits_${junior}() -> None:`);
+    c.indent(() => {
+      c.docstring(`${role} inherits ${junior}: holding ${role} satisfies has_role(${junior})${inherited ? ` and grants ${inherited}` : ""}; ${junior} does not hold ${role}.`);
+      c.line(`senior = ${as([role])}`);
+      c.line(`junior = ${as([junior])}`);
+      c.line(`assert has_role(senior, ${pyString(junior)})`);
+      c.line(`assert not has_role(junior, ${pyString(role)})`);
+      if (inherited) c.line(`assert has_permission(senior, ${pyString(inherited)})`);
+      if (extra) c.line(`assert not has_permission(junior, ${pyString(extra)})`);
+      if (!tenancy) {
+        imp.from(secMod, "authorize");
+        c.line(`assert authorize(senior, "action", roles=(${pyString(junior)},)) is senior`);
+        c.line("with pytest.raises(NotAuthorized):");
+        c.indent(() => c.line(`authorize(junior, "action", roles=(${pyString(role)},))`));
+      }
+    });
+  }
+  if (!tenancy) return;
+  const anyPerm = [...perms].find(([, ps]) => ps.length);
+  if (anyPerm) {
+    imp.from(secMod, "authorize_in_tenant");
+    const [role, ps] = anyPerm;
+    const p = ps[0]!;
+    c.line().line();
+    c.line("def test_authorize_in_tenant_needs_a_principal_an_active_tenant_and_the_roles_in_it() -> None:");
+    c.indent(() => {
+      c.docstring(`No principal is Unauthenticated, no active tenant is Unauthenticated (missing_tenant), a role without ${p} is NotAuthorized naming it.`);
+      c.line("with pytest.raises(Unauthenticated) as anonymous:");
+      c.indent(() => c.line(`authorize_in_tenant(None, "action", permissions=(${pyString(p)},))`));
+      c.line('assert anonymous.value.details == {"action": "action"}');
+      c.line(`tenantless = ${as([role], { tenant: null })}`);
+      c.line("with pytest.raises(Unauthenticated) as no_tenant:");
+      c.indent(() => c.line(`authorize_in_tenant(tenantless, "action", permissions=(${pyString(p)},))`));
+      c.line('assert no_tenant.value.details == {"action": "action", "error": "missing_tenant"}');
+      c.line(`holder = ${as([role])}`);
+      c.line(`assert authorize_in_tenant(holder, "action", permissions=(${pyString(p)},)) == (holder, holder.tenant_id)`);
+      c.line(`none = ${as([])}`);
+      c.line("with pytest.raises(NotAuthorized) as refused:");
+      c.indent(() => c.line(`authorize_in_tenant(none, "action", permissions=(${pyString(p)},))`));
+      c.line(`assert refused.value.details == {"action": "action", "required_permissions": [${pyString(p)}]}`);
+    });
+  }
+  const pr = [...rolePermissions(sec, "platform")].find(([, ps]) => ps.length);
+  if (pr) {
+    imp.from(secMod, "authorize_across_tenants", "authorize_in_tenant");
+    const [prole, pps] = pr;
+    const p = pps[0]!;
+    c.line().line();
+    c.line("def test_platform_roles_act_across_tenants_only() -> None:");
+    c.indent(() => {
+      c.docstring(`Across tenants only platform roles count: ${prole} may act with ${p}; every tenant role together may not; in a tenant, the platform role alone does not count.`);
+      c.line(`operator = ${as([], { platformRoles: [prole], tenant: null })}`);
+      c.line(`acting = authorize_across_tenants(operator, "action", permissions=(${pyString(p)},))`);
+      c.line("assert acting is operator");
+      c.line(`tenant_only = ${as(sec.roles)}`);
+      c.line("with pytest.raises(NotAuthorized):");
+      c.indent(() => c.line(`authorize_across_tenants(tenant_only, "action", permissions=(${pyString(p)},))`));
+      c.line(`platform_only = ${as([], { platformRoles: [prole] })}`);
+      c.line("with pytest.raises(NotAuthorized):");
+      c.indent(() => c.line(`authorize_in_tenant(platform_only, "action", permissions=(${pyString(p)},))`));
+    });
+  }
+}
+
+/** The token bucket, per-subject buckets and the RateLimit header fields. */
+function rateLimitTests(model: ModelIR, c: Code, imp: Imports): void {
   // Rate limiting
   const rl = rateLimitModule(model);
   imp.from(rl, "BucketState", "InMemoryRateLimitStore", "RateLimit", "RateLimiter", "rate_limit_headers", "take_token");
@@ -237,5 +382,16 @@ export function securityTestFile(model: ModelIR, Ls: Layout[]): PyFile | undefin
     c.line("_, allowed = take_token(None, POLICY, 0)");
     c.line('assert "Retry-After" not in rate_limit_headers(POLICY, allowed)');
   });
-  return { path: `${model.generation.testsDir}/generated/test_security.py`, content: assemble(model, "Security: bearer JWT authentication (PyJWT), the authorization checks, token-bucket rate limiting.", imp, c.toString(), { exports: false }) };
+  if (model.security?.tenancy) {
+    c.line().line();
+    c.line("def test_a_limit_by_tenant_keeps_one_bucket_per_tenant() -> None:");
+    c.indent(() => {
+      c.docstring("`by: tenant`: one tenant using up its bucket does not starve another (noisy-neighbour isolation).");
+      c.line('per_tenant = RateLimit(name="example", requests=1, window_seconds=60, by="tenant")');
+      c.line("limiter = RateLimiter(InMemoryRateLimitStore(), clock=lambda: 0.0)");
+      c.line('assert limiter.consume(per_tenant, "tenant-a").allowed');
+      c.line('assert not limiter.consume(per_tenant, "tenant-a").allowed');
+      c.line('assert limiter.consume(per_tenant, "tenant-b").allowed');
+    });
+  }
 }

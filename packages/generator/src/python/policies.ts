@@ -1,4 +1,4 @@
-import { formatPath, type Analysis, type PolicyInfo, type PolicyIR, type RelationshipIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
+import { DEFAULT_TENANT_IDS, eventIsTenantScoped, formatPath, type Analysis, type PolicyInfo, type PolicyIR, type RelationshipIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
 import type { PyFile } from "./domain.ts";
 import { assemble, ModuleImports, type Layout } from "./layout.ts";
 import { assertEquals, Code, emitExpr, Imports, pascal, pyString, pyValue, toSnake, type ValueContext } from "./support.ts";
@@ -84,6 +84,15 @@ export function policiesFile(L: Layout): PyFile | undefined {
     imp.from(L.mod("commands"), uc.command);
     c.line().line();
     c.line(`class ${runnerClass(uc)}(Protocol):`);
+    if (L.scopeOf(uc) === "tenant") {
+      imp.from(L.securityModule, "TenantContext");
+      c.indent(() => {
+        c.docstring(`What a policy needs from use case \`${uc.name}\` (${pascal(uc.name)}UseCase satisfies it): it runs in the tenant it is given.`);
+        c.line();
+        c.line(`def execute(self, command: ${uc.command}, context: TenantContext) -> object: ...`);
+      });
+      continue;
+    }
     c.indent(() => {
       c.docstring(`What a policy needs from use case \`${uc.name}\` (${pascal(uc.name)}UseCase satisfies it).`);
       c.line();
@@ -135,6 +144,7 @@ export function policiesFile(L: Layout): PyFile | undefined {
           `Run: ${r.useCase.name}`,
           ...(args.length ? [`Args: ${args.join(", ")}`] : []),
           ...(isAcl(r) ? [`Translated by: ${translatorProtocol(r.info.event.context)}.${p.name}`] : []),
+          ...(L.scopeOf(r.useCase) === "tenant" ? ["Tenant: the event's (the use case runs in the tenant the event belongs to)"] : []),
         ].join("\n"),
       );
       c.line();
@@ -151,7 +161,11 @@ export function policiesFile(L: Layout): PyFile | undefined {
         c.docstring(`Runs ${r.useCase.name} for one ${r.info.event.name}.`);
         c.line(`command = ${commandCall(L, r, imp)}`);
         if (isAcl(r)) c.line(`command = self._translator.${p.name}(event, command)`);
-        c.line("self._use_case.execute(command)");
+        if (L.scopeOf(r.useCase) === "tenant") {
+          imp.from(L.securityModule, "TenantContext");
+          c.line("# The reaction runs in the tenant of the event (never another one, never without one).");
+          c.line("self._use_case.execute(command, TenantContext(tenant_id=event.tenant_id))");
+        } else c.line("self._use_case.execute(command)");
       });
       c.line();
       c.line("def __call__(self, event: DomainEvent) -> None:");
@@ -301,6 +315,25 @@ export function policyTestFile(L: Layout, analysis: Analysis): PyFile | undefine
     imp.from(L.mod("commands"), uc.command);
     c.line().line();
     c.line(`class Recording${pascal(uc.name)}:`);
+    if (L.scopeOf(uc) === "tenant") {
+      imp.from(L.securityModule, "TenantContext");
+      c.indent(() => {
+        c.docstring(`Stands in for use case ${uc.name} and records the commands it receives and the tenants it runs in.`);
+        c.line();
+        c.line("def __init__(self) -> None:");
+        c.indent(() => {
+          c.line(`self.commands: list[${uc.command}] = []`);
+          c.line("self.contexts: list[TenantContext] = []");
+        });
+        c.line();
+        c.line(`def execute(self, command: ${uc.command}, context: TenantContext) -> None:`);
+        c.indent(() => {
+          c.line("self.commands.append(command)");
+          c.line("self.contexts.append(context)");
+        });
+      });
+      continue;
+    }
     c.indent(() => {
       c.docstring(`Stands in for use case ${uc.name} and records the commands it receives.`);
       c.line();
@@ -348,6 +381,13 @@ export function policyTestFile(L: Layout, analysis: Analysis): PyFile | undefine
     imp.from(L.policies, policyClass(r.policy));
     lines.push(`policy${suffix} = ${policyClass(r.policy)}(${kw.join(", ")})`);
     const payload = info.fields.map((f) => `${f.name}=${samplePy(sample[f.name], f.type, { ...vctx }, (k, n) => (r.info.crossContext ? upL.typeModule(k, n) : L.typeModule(k, n)))}`);
+    const tenancy = L.model.security?.tenancy;
+    if (tenancy && eventIsTenantScoped(L.model.security, up.ir, info.sources)) {
+      imp.from(L.securityModule, "TenantId");
+      if (tenancy.type === "UUID") imp.from("uuid", "UUID");
+      const t = DEFAULT_TENANT_IDS[tenancy.type];
+      payload.unshift(`tenant_id=TenantId(${tenancy.type === "UUID" ? `UUID(${pyString(t)})` : pyString(t)})`);
+    }
     lines.push(`event${suffix} = ${ev}(${payload.join(", ")})`);
 
     // Expected command fields: event paths navigate the sample; ports and literals are re-emitted.
@@ -391,6 +431,11 @@ export function policyTestFile(L: Layout, analysis: Analysis): PyFile | undefine
       c.lines_(a.lines);
       c.line(`policy.handle(${a.event})`);
       c.line("assert len(use_case.commands) == 1");
+      if (L.scopeOf(r.useCase) === "tenant") {
+        c.line("# The use case runs in the tenant of the event.");
+        c.line(`assert [context.tenant_id for context in use_case.contexts] == [${a.event}.tenant_id]`);
+      }
+
       if (a.asserts.length) c.line("command = use_case.commands[0]");
       c.lines_(a.asserts);
     });

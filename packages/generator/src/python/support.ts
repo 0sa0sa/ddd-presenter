@@ -69,7 +69,7 @@ function nameKind(n: string): number {
   return n.length > 1 && n === n.toUpperCase() && /[A-Z]/.test(n) ? 0 : /^[A-Z]/.test(n) ? 1 : 2;
 }
 
-const STDLIB = new Set(["abc", "base64", "collections", "copy", "dataclasses", "datetime", "decimal", "enum", "hashlib", "hmac", "json", "math", "re", "threading", "time", "typing", "uuid"]);
+const STDLIB = new Set(["abc", "base64", "collections", "copy", "dataclasses", "datetime", "decimal", "enum", "hashlib", "hmac", "json", "math", "re", "threading", "time", "types", "typing", "uuid"]);
 
 /** Maximum length of a generated line (code is wrapped in layout.ts, docstrings and comments here). */
 export const MAX_LINE = 100;

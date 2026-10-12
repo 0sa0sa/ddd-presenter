@@ -1,4 +1,4 @@
-import type { ContextAnalysis, ModelIR, Type } from "@ddd/core";
+import { eventIsTenantScoped, isTenantScoped, useCaseScope, type AccessScope, type AggregateIR, type ContextAnalysis, type ModelIR, type Type, type UseCaseIR } from "@ddd/core";
 import { byDunderAll, docstringLines, Imports, MAX_LINE, toSnake, wrapWords, type ExprContext } from "./support.ts";
 
 /** Module / path layout for one bounded context. */
@@ -81,6 +81,31 @@ export class Layout {
 
   fieldTypes(owner: string): Map<string, Type> {
     return this.ca.fieldTypes.get(owner) ?? new Map();
+  }
+
+  /** Roles, the principal, the tenant id and the authorization checks (`security`). */
+  get securityModule(): string {
+    return `${this.pkg}.generated.security`;
+  }
+
+  /** Whether rows of the aggregate belong to one tenant (`security.tenancy`, docs/09 §22). */
+  tenantScoped(ag: Pick<AggregateIR, "tenancy">): boolean {
+    return isTenantScoped(this.model.security, ag);
+  }
+
+  /** Whether an event of this context carries the tenant id. */
+  tenantScopedEvent(event: string): boolean {
+    const ev = this.ca.events.get(event);
+    return !!ev && eventIsTenantScoped(this.model.security, this.ca.ir, ev.sources);
+  }
+
+  /** Where a use case runs (none without tenancy). */
+  scopeOf(uc: UseCaseIR): AccessScope {
+    return useCaseScope(this.model.security, this.ca.ir, uc);
+  }
+
+  aggregate(name: string): AggregateIR | undefined {
+    return this.ca.ir.aggregates.find((a) => a.name === name);
   }
 
   exprCtx(imports: Imports, self: string, extra: Partial<ExprContext> = {}): ExprContext {

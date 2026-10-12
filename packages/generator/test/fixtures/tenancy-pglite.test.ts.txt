@@ -1,0 +1,182 @@
+// PGlite verification of the multi-tenant persistence (copied into the generated project by the generator test).
+// RLS=on: the DDL's row level security is checked as a non-superuser application role; RLS=off: no policy exists and
+// the tenant filter of the generated statements alone isolates the tenants.
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+
+import { Invitation } from "../src/tenant_hiring/generated/hiring/domain/aggregates.js";
+import { SearchInvitationsQuery } from "../src/tenant_hiring/generated/hiring/application/queries.js";
+import { SupportRevokeInvitationUseCase } from "../src/tenant_hiring/generated/hiring/application/use-cases.js";
+import { SupportRevokeInvitation } from "../src/tenant_hiring/generated/hiring/domain/commands.js";
+import {
+  PostgresInvitationRepository,
+  PostgresSearchInvitationsReader,
+} from "../src/tenant_hiring/generated/hiring/persistence/postgres.js";
+import {
+  CapturingEventPublisher,
+  InMemoryInvitationRepository,
+  InMemorySearchInvitationsReader,
+  plain,
+  RecordingCrossTenantAudit,
+} from "../src/tenant_hiring/generated/hiring/testing.js";
+import { HmacCursorCodec, InvalidCursor, type Page } from "../src/tenant_hiring/generated/persistence.js";
+import { Principal, TenantMismatch, tenantId } from "../src/tenant_hiring/generated/security.js";
+
+const RLS = process.env["RLS"] !== "off";
+const A = tenantId("00000000-0000-4000-8000-0000000000a1");
+const B = tenantId("00000000-0000-4000-8000-0000000000b2");
+const cursors = new HmacCursorCodec({ secrets: ["pglite-test-secret-0123456789-0123456789"] });
+const staff = (tenant: string | null) => Principal.create({ id: "staff-1", tenantId: tenant, roles: ["staff"] });
+
+let db: PGlite;
+beforeAll(async () => {
+  db = new PGlite({ extensions: { pg_trgm } });
+  const ddl = readFileSync("sql/hiring.sql", "utf8");
+  expect(ddl.includes("ROW LEVEL SECURITY")).toBe(RLS);
+  await db.exec(ddl);
+  await db.exec(ddl); // idempotent
+  // The application connects as a role that owns nothing and has no BYPASSRLS.
+  await db.exec(`
+    CREATE ROLE app NOLOGIN;
+    GRANT USAGE ON SCHEMA hiring TO app;
+    GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA hiring TO app;
+  `);
+  // Seed both tenants (each in its own transaction, as a unit of work would).
+  for (const [tenant, prefix] of [[A, "a"], [B, "b"]] as const) {
+    await db.transaction(async (tx) => {
+      const repository = new PostgresInvitationRepository(tx);
+      for (let i = 0; i < 5; i++) {
+        await repository.save(tenant, invitation(tenant, prefix, i));
+      }
+    });
+  }
+  await db.exec("SET ROLE app");
+}, 120_000);
+afterAll(async () => {
+  await db.close();
+});
+
+function invitation(tenant: string, prefix: string, i: number): Invitation {
+  return Invitation.from({
+    tenantId: tenant,
+    id: `00000000-0000-4000-8000-0000000${prefix === "a" ? "a" : "b"}000${String(i)}`,
+    email: { value: `${prefix}${String(i)}.staff@example.com` },
+    status: i % 2 ? "accepted" : "pending",
+    createdAt: `2026-01-0${String((i % 3) + 1)}T10:00:00+00:00`,
+  });
+}
+
+async function all<T>(run: (cursor: string | null) => Promise<Page<T>>): Promise<T[]> {
+  const out: T[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 50; i++) {
+    const page: Page<T> = await run(cursor);
+    out.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor === null) return out;
+  }
+  throw new Error("too many pages");
+}
+
+describe(`tenant isolation on PostgreSQL (rls: ${RLS ? "on" : "off"})`, () => {
+  test("repositories: another tenant's aggregate is not found, saving for another tenant is refused", async () => {
+    await db.transaction(async (tx) => {
+      const repository = new PostgresInvitationRepository(tx);
+      expect(await repository.get(A, invitation(A, "a", 0).id)).not.toBeNull();
+      expect(await repository.get(A, invitation(B, "b", 0).id)).toBeNull();
+      let refused: unknown;
+      try {
+        await repository.save(A, invitation(B, "b", 1));
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toBeInstanceOf(TenantMismatch);
+    });
+  });
+
+  test("queries: only the caller's tenant, equal to the in-memory reader; cursors are bound to the tenant", async () => {
+    const memory = new InMemoryInvitationRepository();
+    for (let i = 0; i < 5; i++) memory.seed(invitation(A, "a", i), invitation(B, "b", i));
+    const pg = new SearchInvitationsQuery({ reader: new PostgresSearchInvitationsReader(db), cursors });
+    const mem = new SearchInvitationsQuery({ reader: new InMemorySearchInvitationsReader(memory), cursors });
+    for (const input of [{}, { status: "pending" as const }, { q: "staff@example.com" }]) {
+      const fromPg = await all((cursor) => pg.execute({ ...input, cursor, limit: 2 }, staff(A)));
+      const fromMemory = await all((cursor) => mem.execute({ ...input, cursor, limit: 2 }, staff(A)));
+      expect(plain(fromPg)).toEqual(plain(fromMemory));
+      expect(fromPg.length).toBeGreaterThan(0);
+      expect(fromPg.every((item) => item.email.value.startsWith("a"))).toBe(true);
+    }
+    const first = await pg.execute({ limit: 1 }, staff(A));
+    let rejected: unknown;
+    try {
+      await pg.execute({ limit: 1, cursor: first.nextCursor }, staff(B));
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(InvalidCursor);
+  });
+
+  test("a cross-tenant use case acts in the named tenant only (platform role, audited)", async () => {
+    await db.transaction(async (tx) => {
+      const audit = new RecordingCrossTenantAudit();
+      const useCase = new SupportRevokeInvitationUseCase({
+        invitationRepository: new PostgresInvitationRepository(tx),
+        eventPublisher: new CapturingEventPublisher(),
+        unitOfWork: { commit: () => undefined, rollback: () => undefined },
+        audit,
+      });
+      const support = Principal.create({ id: "support-1", tenantId: null, roles: [], platformRoles: ["support"] });
+      await useCase.execute(SupportRevokeInvitation.create({ tenantId: B, invitationId: invitation(B, "b", 2).id }), support);
+      expect(audit.accesses).toHaveLength(1);
+      const stored = await new PostgresInvitationRepository(tx).get(B, invitation(B, "b", 2).id);
+      expect(stored?.status).toBe("revoked");
+    });
+  });
+
+  test.skipIf(!RLS)("row level security: a raw SELECT without WHERE sees the current tenant only; other tenants' writes fail", async () => {
+    // Without a tenant set the policy matches nothing (fail closed).
+    expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM hiring.invitation")).rows[0]?.n).toBe(0);
+    await db.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.tenant_id', $1, true)", [A]);
+      const rows = (await tx.query<{ tenant_id: string }>("SELECT * FROM hiring.invitation")).rows;
+      expect(rows.length).toBe(5);
+      expect(rows.every((row) => row.tenant_id === A)).toBe(true);
+      // Updating another tenant's row changes nothing; moving a row to another tenant is refused.
+      const updated = await tx.query("UPDATE hiring.invitation SET status = 'revoked' WHERE tenant_id = $1::uuid RETURNING id", [B]);
+      expect(updated.rows).toEqual([]);
+    });
+    let insertError: unknown;
+    try {
+      await db.transaction(async (tx) => {
+        await tx.query("SELECT set_config('app.tenant_id', $1, true)", [A]);
+        await tx.query(
+          "INSERT INTO hiring.invitation (id, tenant_id, email_value, status, created_at, version) VALUES ('00000000-0000-4000-8000-00000000c001', $1::uuid, 'x@example.com', 'pending', now(), 1)",
+          [B],
+        );
+      });
+    } catch (error) {
+      insertError = error;
+    }
+    expect(String(insertError)).toContain("row-level security");
+    // The setting ends with the transaction (SET LOCAL semantics).
+    expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM hiring.invitation")).rows[0]?.n).toBe(0);
+  });
+
+  test.skipIf(!RLS)("row level security: a repository outside a transaction refuses to run", async () => {
+    let error: unknown;
+    try {
+      await new PostgresInvitationRepository(db).get(A, invitation(A, "a", 0).id);
+    } catch (e) {
+      error = e;
+    }
+    expect(String(error)).toContain("transaction");
+  });
+
+  test.skipIf(RLS)("without row level security the generated statements still filter by tenant (autocommit works)", async () => {
+    const repository = new PostgresInvitationRepository(db);
+    expect(await repository.get(B, invitation(A, "a", 0).id)).toBeNull();
+    expect(await repository.get(A, invitation(A, "a", 0).id)).not.toBeNull();
+  });
+});

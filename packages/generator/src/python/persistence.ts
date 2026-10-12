@@ -2,9 +2,13 @@
  * `generated/_persistence.py`: the model-independent read side and PostgreSQL runtime of the Python target
  * (generated when a context declares queries). Mirrors templates/persistence.ts.txt of the TypeScript target.
  */
-export function persistenceRuntime(runtimeModule: string, secured = false): string {
+export function persistenceRuntime(runtimeModule: string, secured = false, tenancy?: { rls: boolean; securityModule: string }): string {
   /** The secured variant (`security`: rows scoped to the caller, cursors bound to it) or the plain one. */
   const sec = (withSecurity: string, without = "") => (secured ? withSecurity : without);
+  /** Multi-tenancy (docs/09 §22): the tenant filter, tenant-bound cursors and repositories. */
+  const ten = (withTenancy: string, without = "") => (tenancy ? withTenancy : without);
+  /** Row level security (`tenancy.rls: on`): the tenant of the transaction. */
+  const rls = (withRls: string, without = "") => (tenancy?.rls ? withRls : without);
   return `from __future__ import annotations
 
 import base64
@@ -16,7 +20,7 @@ import json
 import re
 import struct
 import time
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence${rls("\nfrom contextlib import AbstractContextManager")}
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -24,7 +28,7 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar
 from uuid import UUID
 
-from ${runtimeModule} import DomainError
+from ${runtimeModule} import DomainError${ten(`\nfrom ${tenancy?.securityModule} import TenantMismatch`)}
 
 __all__ = [
     "ConcurrencyConflict",
@@ -35,7 +39,7 @@ __all__ = [
     "InvalidCursor",
     "KeySpec",
     "Page",
-    "PostgresStore",
+    "PostgresStore",${ten("\n    \"PostgresTenantStore\",")}
     "QueryRequest",
     "QueryResult",${sec("\n    \"QueryScope\",")}
     "QuerySpec",
@@ -43,14 +47,14 @@ __all__ = [
     "SearchSpec",
     "SqlConnection",
     "SqlCursor",
-    "SqlStatement",
+    "SqlStatement",${rls("\n    \"SqlTransactions\",")}
     "TableMapping",
     "active_keys",
     "query_fingerprint",
     "read_rows",
-    "read_sql",
+    "read_sql",${rls("\n    \"read_sql_in_tenant\",")}
     "rows_of",
-    "run_query",
+    "run_query",${rls("\n    \"set_tenant\",")}
     "similarity",
     "sql_json",
     "sql_param",
@@ -175,7 +179,9 @@ class QuerySpec:
     search: SearchSpec | None
     keys: tuple[KeySpec, ...]
     size: int
-    max_size: int
+    max_size: int${ten(`
+    tenant: str | None = None
+    """Tenant column of a tenant-scoped table: rows of the request's tenant only (always)."""`)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +193,7 @@ class QueryRequest:
     params: Mapping[str, object]
     search: str | None
     after: tuple[CursorKey, ...] | None
-    limit: int${sec("\n    scope: Mapping[str, object] | None = None")}
+    limit: int${sec("\n    scope: Mapping[str, object] | None = None")}${ten("\n    tenant: object = None")}
 
 
 T = TypeVar("T")
@@ -223,7 +229,9 @@ class QueryScope:
     """
 
     principal: str
-    values: Mapping[str, object]
+    values: Mapping[str, object]${ten(`
+    tenant: object = None
+    """The caller's active tenant (tenant-scoped queries): its rows only; cursors bound to it."""`)}
 
 
 def _canonical(values: Mapping[str, object]) -> list[list[str]]:
@@ -242,7 +250,9 @@ def query_fingerprint(
     order = [f"{k.column or 'relevance'} {k.direction}" for k in active_keys(spec, search)]
     parts: list[object] = [spec.name, order, search, _canonical(params)]
     if scope is not None:
-        parts += [scope.principal, _canonical(scope.values)]
+        parts += [scope.principal, _canonical(scope.values)]${ten(`
+    if scope is not None and scope.tenant is not None:
+        parts.append(str(scope.tenant))`)}
     canonical = json.dumps(parts, separators=(",", ":"))
     return _b64(hashlib.sha256(canonical.encode()).digest())[:22]
 `,
@@ -286,7 +296,14 @@ def run_query(
         if len(after) != len(active_keys(spec, searching)):
             raise InvalidCursor(reason="mismatch")
 ${sec(
-    `    values = None if scope is None else scope.values
+    tenancy
+      ? `    values = None if scope is None else scope.values
+    tenant = None if scope is None else scope.tenant
+    request = QueryRequest(
+        params=params, search=searching, after=after, limit=size, scope=values, tenant=tenant
+    )
+    result = read(request)`
+      : `    values = None if scope is None else scope.values
     result = read(
         QueryRequest(params=params, search=searching, after=after, limit=size, scope=values)
     )`,
@@ -503,7 +520,12 @@ def read_rows(
     """
     keys = active_keys(spec, request.search)
     candidates: list[_Candidate] = []${sec("\n    scope = request.scope or {}")}
-    for row in rows:
+    for row in rows:${ten(`
+        # A tenant-scoped query sees its tenant's rows only (without a tenant, none).
+        if spec.tenant is not None and (
+            request.tenant is None or row.get(spec.tenant) != request.tenant
+        ):
+            continue`)}
         if not all(_matches(f, row, request.params${sec(", scope")}) for f in spec.filters):
             continue
         relevance = 0.0
@@ -582,7 +604,9 @@ def read_sql(
             case "value":
                 return arg${sec(`
             case "principal":
-                return sql_param((request.scope or {}).get(str(arg)))`)}
+                return sql_param((request.scope or {}).get(str(arg)))`)}${ten(`
+            case "tenant":
+                return request.tenant`)}
             case "search":
                 return request.search
             case "key":
@@ -651,5 +675,105 @@ class PostgresStore(Generic[A, K]):
         if not rows:
             raise ConcurrencyConflict(aggregate=self._mapping.aggregate, id=identity)
         self._versions[identity] = int(rows[0]["version"])
-`;
+${ten(`
+
+class _TenantOwned(Protocol):
+    @property
+    def tenant_id(self) -> object: ...
+
+
+AT = TypeVar("AT", bound=_TenantOwned)
+
+
+class PostgresTenantStore(Generic[AT, K]):
+    """PostgresStore for a tenant-scoped table: every call names the tenant and every statement
+    filters by it (the primary control).
+
+    \`get\` returns None for another tenant's row (like a missing one); \`save\` refuses an aggregate
+    of another tenant (TenantMismatch) before it reaches the database.${rls(` Before its statements it
+    sets \`app.tenant_id\` for row level security (defense in depth) and, the first time, checks that
+    the setting holds: the connection must be inside a transaction.`)}
+    """
+
+    def __init__(self, connection: SqlConnection, mapping: TableMapping[AT, K]) -> None:
+        self._connection = connection
+        self._mapping = mapping
+        self._versions: dict[K, int] = {}${rls("\n        self._checked = False")}
+
+    def get(self, tenant: object, identity: K) -> AT | None:${rls("\n        self._bind(tenant)")}
+        params = {"p1": tenant, "p2": identity}
+        rows = rows_of(self._connection.execute(self._mapping.select, params))
+        if not rows:
+            return None
+        aggregate = self._mapping.from_row(rows[0])
+        self._versions[self._mapping.identity(aggregate)] = int(rows[0]["version"])
+        return aggregate
+
+    def save(self, tenant: object, aggregate: AT) -> None:
+        if aggregate.tenant_id != tenant:
+            raise TenantMismatch${rls("\n        self._bind(tenant)")}
+        identity = self._mapping.identity(aggregate)
+        values = self._mapping.to_values(aggregate)
+        params: dict[str, object] = {f"p{i + 1}": v for i, v in enumerate(values)}
+        expected = self._versions.get(identity)
+        if expected is None:
+            rows = rows_of(self._connection.execute(self._mapping.insert, params))
+        else:
+            params[f"p{len(values) + 1}"] = expected
+            rows = rows_of(self._connection.execute(self._mapping.update, params))
+        if not rows:
+            raise ConcurrencyConflict(aggregate=self._mapping.aggregate, id=identity)
+        self._versions[identity] = int(rows[0]["version"])
+${rls(`
+    def _bind(self, tenant: object) -> None:
+        """Sets the tenant for row level security; the first time, checks that it holds."""
+        set_tenant(self._connection, tenant)
+        if self._checked:
+            return
+        rows = rows_of(self._connection.execute(_CURRENT_TENANT, {}))
+        if not rows or str(rows[0]["tenant"]) != str(tenant):
+            raise RuntimeError(
+                "app.tenant_id does not hold between statements: run tenant-scoped repositories"
+                " on a connection inside a transaction"
+            )
+        self._checked = True
+
+
+# ---------------------------------------------------------------------------
+# Row level security: the tenant of the current transaction
+# ---------------------------------------------------------------------------
+
+SET_TENANT = "SELECT set_config('app.tenant_id', %(p1)s::text, true)"
+"""Sets \`app.tenant_id\` for the current transaction (SET LOCAL semantics: it ends with the
+transaction, so a pooled connection never carries it to the next request)."""
+_CURRENT_TENANT = "SELECT current_setting('app.tenant_id', true) AS tenant"
+
+
+def set_tenant(connection: SqlConnection, tenant: object) -> None:
+    connection.execute(SET_TENANT, {"p1": str(tenant)})
+
+
+class SqlTransactions(SqlConnection, Protocol):
+    """A connection that opens transactions (psycopg 3: \`with connection.transaction(): ...\`;
+    inside an open transaction it is a savepoint)."""
+
+    def transaction(self) -> AbstractContextManager[Any]: ...
+
+
+def read_sql_in_tenant(
+    connection: SqlTransactions,
+    spec: QuerySpec,
+    statements: QueryStatements,
+    request: QueryRequest,
+    to_item: Callable[[Mapping[str, object]], T],
+) -> QueryResult[T]:
+    """read_sql in a transaction with the request's tenant set for row level security (the
+    statement filters by the tenant as well)."""
+    if request.tenant is None:
+        raise ValueError(f"Query {spec.name} reads tenant-scoped rows and needs a tenant")
+    with connection.transaction():
+        set_tenant(connection, request.tenant)
+        return read_sql(connection, spec, statements, request, to_item)
+`)}`)}`;
 }
+
