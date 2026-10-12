@@ -497,7 +497,7 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 
 ### 制限
 
-- ロールは平らなリストで、継承（admin ⊃ staff）はない。必要なら `roles: [admin, staff]` と並べる。
+- ロールは平らなリストで、継承（admin ⊃ staff）はない。必要なら `roles: [admin, staff]` と並べる（2026-10-12: マップ形式の `roles` で継承と権限を宣言できるようになった。§22）。
 - `allow_if` で読めるのは入力と先頭の `load` だけ。途中の計算（`let`）や複数の Aggregate の関係を使う認可は、`if` + `fail` の手順で書く（その場合は認可より前に動く手順があることになるので、読み込むだけにする）。
 - 一覧（クエリ）の行の認可は `where` の `principal:`（呼び出し元の id かクレームとの比較）だけで、任意の式はない（§21）。
 - レート制限はエンドポイントごとで、複数のエンドポイントをまとめた「API 全体で1分に600回」は生成しない（ハンドラの前のミドルウェアで足す）。`InMemoryRateLimitStore` は1プロセス用で、複数のインスタンスでは共有のストアを実装する必要がある。
@@ -528,3 +528,93 @@ TypeScript target に、オプトインの HTTP API を足した（`generation.t
 - 行の絞り込みは「フィールド 演算子 principal のメンバー」の AND だけ。「管理者は全社、スタッフは自社」のようにロールで条件を変えるには、クエリを2つ宣言する（`all_jobs` は `roles: [admin]`、`company_jobs` は `roles: [staff]` と `principal: company_id`）。リストのクレーム（`List[String]`、`roles`）との `in` もない。
 - クエリのシナリオで認可のエラーを書けない（生成テストが拒否を確かめる）。
 - カーソルは principal の id に結び付くので、同じ利用者でも id が変わる（ID プロバイダーの移行など）と使えなくなる（最初のページからやり直せば済む）。
+
+
+## 22. マルチテナントと RBAC の拡張（2026-10-12）
+
+§20 の `security` に、マルチテナント（`security.tenancy`）と RBAC の拡張（権限・ロールの継承・テナントをまたぐプラットフォームのロール）を足した。DSL は docs/10 §11.1〜§11.3、生成物と契約は docs/05 §8「マルチテナントと権限」・§9。`tenancy` を書かず、ロールをこれまでのリストで書いたモデルの生成物は、Python・TypeScript・HTTP API・SQL のどれもバイト単位で以前と同じ（全フィクスチャで、変更前の生成器の出力と比べて確かめた）。
+
+```yaml
+security:
+  tenancy: { claim: org_id, type: UUID, isolation: row, rls: on }
+  roles:
+    admin: { inherits: [staff], permissions: [invitation.revoke] }
+    staff: { permissions: [invitation.issue, invitation.read, invitation.list] }
+    candidate: { permissions: [invitation.accept] }
+  platform_roles:
+    operator: { permissions: [invitation.read] }
+```
+
+### 参照した資料と、生成コードでの適用
+
+| 資料 | 要点 | 適用 |
+|---|---|---|
+| [OWASP Multi-Tenant Application Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html) | ヘッダーやパラメータのテナント ID は「選ぶための値」にすぎず、検証した ID と結び付ける。RLS を有効にして強制し、テナントの設定がなければ閉じる（fail closed）。通常の要求は superuser でも BYPASSRLS でもないロールで動かす。テナントの文脈はトランザクションごとに設定し（トランザクションローカルな設定）、プールした接続で別の要求に漏らさない。テナントをまたぐ拒否を、アプリと同じロール・同じ接続の使い方で試す | テナントは検証済みの JWT のクレームだけから決まる（`principalFromClaims` / `principal_from_claims`）。HTTP のパスのテナントは比べるだけ（違えば 403）。DDL は `ENABLE` と `FORCE ROW LEVEL SECURITY`、ポリシーは `NULLIF(current_setting('app.tenant_id', true), '')` で設定がなければ1行も見えず書けない。`set_config(..., true)` をトランザクションの中で設定する。PGlite の生成器のテストは `CREATE ROLE app NOLOGIN` / `SET ROLE app` で確かめる |
+| [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) | 既定で拒否、最小権限、すべての要求で確かめる | 権限は宣言したものだけ（ロールが与えない権限を `authorize` に書くとエラー）。プラットフォームのロールはテナントの中の操作では効かず、テナントをまたぐ明示的な Use case（`cross_tenant: true`）でだけ効く。共有データ（`tenancy: global`）を変えられるのもプラットフォームのロールだけ |
+| [PostgreSQL: Row Security Policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)・[CREATE POLICY](https://www.postgresql.org/docs/current/sql-createpolicy.html)・[ALTER TABLE](https://www.postgresql.org/docs/current/sql-altertable.html) | superuser と BYPASSRLS のロールはいつも RLS を迂回し、テーブルの所有者も通常は迂回する（`FORCE ROW LEVEL SECURITY` で所有者にも効く）。ポリシーがなければ既定で拒否。`USING` は見える行を絞り（合わない行は黙って除かれる）、`WITH CHECK` は新しい行を確かめ、合わなければエラー | `tenant_isolation` ポリシーを `USING` と `WITH CHECK` の両方に同じ式で付ける（別テナントの行の UPDATE は0行、別テナントへの INSERT・行の移動はエラー。PGlite で実測）。アプリは所有者ではない BYPASSRLS なしのロールで接続することを DDL のコメントと docs/05 に書いた |
+| [PostgreSQL: set_config](https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADMIN-SET) | `is_local = true` の値は現在のトランザクションの間だけ効く（`SET LOCAL` と同じ） | リポジトリとリーダーは `SELECT set_config('app.tenant_id', $1, true)` で設定する。コミット・ロールバックで消えるので、プールの次の要求に持ち越されない |
+| [AWS: SaaS Tenant Isolation Strategies](https://docs.aws.amazon.com/whitepapers/latest/saas-tenant-isolation-strategies/saas-tenant-isolation-strategies.html)・[AWS Well-Architected SaaS Lens](https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/saas-lens.html) | 分離の型（silo = テナントごとの資源、pool = 共有の資源をテナントの文脈で分ける、bridge = 混在）。共有するほど費用と運用は軽く、分離はアプリとポリシーの責任になる。ノイジーネイバー（1テナントの負荷が他を巻き込む）への対策 | 既定は pool（`isolation: row`: 共有スキーマ + `tenant_id` + RLS）。レート制限に `by: tenant` を足し、既定の制限もテナントごとにできる |
+| [Auth0 Organizations: Work with Tokens and Organizations](https://auth0.com/docs/manage-users/organizations/using-tokens)（Clerk Organizations も同じ考え方: アクティブな組織をトークンのクレームで渡す） | 組織は `org_id` クレームで渡る。API は `iss` を確かめ、`org_id` が既知の値であることを確かめ、データの読み書きを `org_id` で絞る | `tenancy.claim`（例の既定 `org_id`）。トークンのロールは「アクティブな組織の中のロール」と解釈し、`org_id` のないトークンはテナントのロールを持たない（`roles: []`）。テナント ID の型（UUID）に合わなければ不正なトークン（401） |
+| [NIST: Role Based Access Control](https://csrc.nist.gov/projects/role-based-access-control)（ANSI/INCITS 359）・[Sandhu, Ferraiolo, Kuhn: The NIST Model for Role-Based Access Control](https://csrc.nist.gov/CSRC/media/Publications/conference-paper/2000/07/26/the-nist-model-for-role-based-access-control-towards-a-unified-/documents/sandhu-ferraiolo-kuhn-00.pdf) | RBAC0（ユーザー・ロール・権限）、RBAC1（ロールの階層: 上位のロールは下位のロールの権限を継承する半順序）、RBAC2（制約: 職務分掌など）、RBAC3（両方） | RBAC0 + RBAC1 を生成する。`inherits` の閉包と権限の集合を**生成時に**計算して凍結したマップにする（`ROLE_INCLUDES` / `ROLE_PERMISSIONS`）。循環は検証のエラー（半順序でなくなる）。RBAC2 の制約は生成しない（制限） |
+| [Supabase: Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security) | クライアント（anon / authenticated のロール）が DB に直接つながる構成では、RLS が唯一の認可の層。ポリシーの列に索引を張り、`auth.uid()` のような関数は `(select …)` で包んで行ごとに呼ばない | 生成コードでは RLS は**多層防御**で、主の制御はアプリケーション層（認可・テナントに縛られたリポジトリ・どの文にも付く `tenant_id = $n`）。ポリシーは1つの等値比較だけ、`tenant_id` が先頭の索引がある |
+
+### 決定したこと
+
+- **分離の型は `row`（pool）を既定かつ唯一に**: 共有スキーマの各テーブルに `tenant_id` を持たせる。テナントの数が多い SaaS で、スキーマやデータベースをテナントごとに作る（silo / bridge）より運用・マイグレーション・接続数が軽く、生成器が出す DDL・SQL・リーダーがテナント数によらず同じになる。`isolation` のキーは将来の `schema` のために残した（今は `row` 以外はエラー）。
+- **テナントはトークンからだけ**: `Principal.tenantId` / `tenant_id` は検証済みトークンのクレームだけから作る。入力・パス・ヘッダーのテナントは使わない（HTTP の `tenantOf` はパスのテナントを**比べる**だけで、違えば 403 `not_authorized`・`details.error: "tenant_mismatch"`）。`tenant_id` は入力・フィールド・イベントのフィールド・ファクトリの引数で予約語（`reserved-name`）。
+- **テナントのロールはアクティブなテナントの中だけ**: トークンの `roles` は「`org_id` の組織の中のロール」。`org_id` のないトークンはテナントのロールを持たない。テナントの操作に principal があってもテナントがなければ `Unauthenticated`（`details.error: "missing_tenant"`、HTTP 401・`WWW-Authenticate: Bearer error="invalid_token", error_description="no active tenant"`）。403 ではなく 401 にしたのは、呼び出し元が「組織を選んでトークンを取り直す」べき状況で、権限の不足ではないから（RFC 6750 の invalid_token は「ほかの理由で無効」を含む）。
+- **プラットフォームのロールは別のクレーム・別の名前**: `platform_roles` は `tenancy.platform_roles_claim`（既定 `platform_roles`）からだけ読み、テナントのロールと同じ名前は禁止（`duplicate-name`）、互いに継承できない（`invalid-inheritance`: テナントの admin が運用者を継承すると、テナントの利用者がテナントをまたげてしまう）。
+- **スコープの規則**（core の `useCaseScope` / `aggregateScope`。検証と生成の両方が同じ関数を使う）:
+  - テナントのデータに触れる操作（テナントの Aggregate を load / create / save、テナントの Aggregate の GET・クエリ）は「テナントの中」: テナントのロールだけが数え、テナントが要る。そこにプラットフォームのロールを書くと `platform-role-in-tenant`、プラットフォームのロールしか与えない権限は `permission-not-granted`。
+  - `cross_tenant: true` は「入力の `tenant_id` で名指ししたテナントの中」: プラットフォームのロールだけが数える（テナントのロールは `tenant-role-across-tenants`）。Use case だけ（Aggregate・クエリには書けない）。
+  - 共有データ（`tenancy: global`）だけの操作はテナントが要らず、読みは両方のロールが数える。**書き込みはプラットフォームのロールだけ**（`global-write-needs-platform-role`）: どのテナントの管理者も全テナントの参照データを変えられてしまうため。テナントの中の Use case が共有データを保存するのも禁止（`tenant-writes-global`）。
+  - `authorize: public` でテナントのデータに触れるとエラー（`tenant-required`: principal がなければテナントもない）。ポリシーが動かす内部の Use case はテナントの文脈を受け取る。共有データのイベントからテナントのデータに触れる Use case を動かすポリシーは `policy-without-tenant`。
+  - 共有の Aggregate がテナントの Aggregate を `Ref` で参照するとエラー（`global-references-tenant`）。テナントの Aggregate 同士の `Ref` は同じテナントを指すことを実行時に保証する: 参照先はテナントに縛られたリポジトリで読むので、別テナントの ID は「見つからない」になる。
+- **権限の判定**: `authorize: { permissions: [...] }`（`roles` と any-of、`allow_if` も書ける）。ロールの閉包と権限は生成時に解決して凍結したマップにし、実行時はマップを引くだけ（設定ファイルやデータベースから読まない: 権限はモデルとコードレビューで決まる）。`has_role` は継承を見る（admin は `has_role(staff)` を満たす: RBAC1 の「上位のロールは下位のロールでもある」）。`has_permission(principal, invitation.read)` は操作のスコープのロールで判定する（テナントの中ならテナントのロール、cross_tenant ならプラットフォームのロール、共有データならどちらか）。リスト形式の `roles` は継承も権限もない平らなロールとして今までどおり（権限を書くと `unknown-permission`）。
+- **リポジトリはテナントを毎回の引数に**（`get(tenant, id)` / `save(tenant, aggregate)`）。「作業単位ごとにテナントを持たせて作る」方式と比べた: 生成する Use case は依存をコンストラクタで受け取って使い回すので、テナントを構築時に縛ると、DI の配線の誤り（シングルトンのリポジトリ）が黙って別テナントのデータを読む事故になる。毎回の引数なら型が渡し忘れを防ぎ、古いテナントが残る状態がない。Use case は `authorizeInTenant` が保証した `principal.tenantId`（cross_tenant ではコマンドの `tenantId`、内部の Use case では `context.tenantId`）だけを渡す。`get` は別テナントの行に null（存在を漏らさない: `not_found` / 404）、`save` は集約の `tenantId` が違えば `TenantMismatch`（プログラムの誤りなので HTTP にはマップしない = 500）。インメモリのリポジトリも同じ意味論（別テナントが使っている ID の保存も拒否）。
+- **Aggregate とイベントのテナント**: テナントの Aggregate は暗黙の不変フィールド `tenantId` / `tenant_id` を持つ。ファクトリが Use case のテナントで作り、操作の `#with` / `_replace` の型から外して変えられないようにした。テナントの Aggregate が出すイベントは `tenantId` を運び、ポリシーはイベントのテナントで内部の Use case を動かす（`execute(command, { tenantId: event.tenantId })`）。1つのイベントをテナントと共有の両方の Aggregate が出すとエラー（`mixed-event-tenancy`）。
+- **冪等性キー**: テナントの中なら `"<tenant>:<principal>:<key>"`、cross_tenant ならコマンドのテナント、内部の Use case なら `"<tenant>:<key>"`。同じキーでも別テナントなら別の要求。
+- **クエリ**: テナントの Aggregate のクエリはいつも `tenant_id = $n` を WHERE の先頭に置く（省略可能なパラメータの `IS NULL OR` は付けない）。カーソルの指紋に `QueryScope.tenant` を入れ、別テナントでは `InvalidCursor`。インメモリのリーダーも同じ条件（テナントのない要求は1行も返さない）。並び順のインデックスは `tenant_id` が先頭。
+- **主の制御は文の `tenant_id`、RLS は多層防御**: 生成するすべての文（SELECT・INSERT・UPDATE の WHERE・クエリ）が `tenant_id` で絞る。RLS（`rls: on`、既定）は、手書きの SQL・誤った配線・将来の不具合に対する二重の鍵。所有者・superuser の接続では RLS が効かなくても、文の条件で分離は保たれる（PGlite の `rls: off` のテストで確かめる）。
+- **`rls: on | off`**: `off` では DDL に `ENABLE` / `FORCE` / ポリシーを出さず、リポジトリとリーダーは `set_config` を呼ばない（トランザクションの要件もない）。文の `tenant_id` の条件は同じ。`off` を選ぶのは、アプリのロールを所有者でも BYPASSRLS でもないロールにできない環境（一部のマネージド DB・ORM のマイグレーション用ロールで接続する構成など: そこでは RLS は効かず、`set_config` の要件だけが残る）や、RLS の運用・性能を自分で設計する場合。
+- **cross_tenant と RLS**: プラットフォームの操作も「名指しした1つのテナントの中」で動く。リポジトリは `app.tenant_id` を対象のテナントにするので、RLS を迂回するロール（BYPASSRLS）や別のポリシーは要らない。全テナントをまたいで一覧する機能は生成しない（制限。必要なら BYPASSRLS の専用ロールと専用の接続で、監査付きの手書きのジョブにする）。アクセスは `CrossTenantAudit.record({ action, principal, tenantId })` に、認可の直後・何かを読む前に記録する（記録が失敗すれば Use case も失敗する）。
+- **HTTP**: 契約の `auth` にテナントの操作は `tenant: true`、権限は `permissions` を記録する。ハンドラは認証の後、テナントの操作でテナントがなければ 401、`tenantOf` がパスのテナントを返して違えば 403、`by: tenant` の制限はテナントごとのバケット（既定の `by: tenant` は、テナントのない操作では principal、principal のない公開の操作では IP で数える）。テナントの Aggregate の GET は必ず読み取りのアクセス関数を通る（`tenantReadRoute`）。クライアントは型が増えるだけ（Aggregate の JSON 形に `tenantId` は出さない: 呼び出し元自身のテナントなので）。
+- **PostgreSQL のスキーマ**: 識別子は主キーのまま（UUID はテナントをまたいで一意。別テナントが使っている ID の INSERT は `ON CONFLICT` で衝突し、2行目はできない）、`UNIQUE (tenant_id, id)` を足した（テナントごとの検索と、手で足す同じテナントへの複合外部キー `REFERENCES … (tenant_id, id)` のため。Ref は今も外部キーにしない）。`tenant_id` は INSERT で入れ、UPDATE では変えない。
+
+### RLS の落とし穴と、生成器の避け方
+
+| 落とし穴 | 生成器の避け方 |
+|---|---|
+| superuser・BYPASSRLS のロール、テーブルの所有者は RLS を迂回する | `FORCE ROW LEVEL SECURITY` で所有者にも効かせる。DDL のコメントと docs/05 で「所有者ではない、BYPASSRLS なしのアプリ用ロールで接続する」と案内（マイグレーションは別のロール）。それでも迂回された場合に備えて、文の `tenant_id` が主の制御 |
+| セッション変数がプールした接続に残り、次の要求に漏れる | `set_config('app.tenant_id', $1, true)`（`SET LOCAL` と同じ）をトランザクションの中で設定。リーダーは各ページを自分のトランザクションで読み（`SqlTransactions`、PGlite はそのまま、node-postgres は `poolTransactions(pool)`、psycopg は `connection.transaction()`）、リポジトリは作業単位のトランザクションの接続で文の前に毎回設定する |
+| テナントの設定がないと、黙って空の結果になる（または `''::uuid` のエラー） | ポリシーは `NULLIF(current_setting('app.tenant_id', true), '')` で、設定がなければ1行も見えず、書き込みは `WITH CHECK` のエラー（閉じる側に倒れる）。さらにリポジトリは最初の呼び出しで `current_setting` を読み返し、トランザクションの外（autocommit）で設定が消えていれば**明示的なエラー**にする（「何も見つからない」と区別できるように）。生成テストがこれを確かめる |
+| 行ごとのコスト（ポリシーの関数・副問い合わせ） | ポリシーは1つの等値比較だけ（`current_setting` は文ごとに1回の定数として扱われる）。`tenant_id` が先頭のインデックス（並び順のインデックス、`UNIQUE (tenant_id, id)`）がある |
+| RLS だけを認可の層にする（Supabase のようにクライアントが DB に直接つながる構成） | 生成コードでは RLS は二重の鍵で、認可（ロール・権限・`allow_if`）とテナントの分離はアプリケーション層で先に行う。RLS の誤設定がそのまま情報漏えいにならない |
+
+### 確かめた事実（PGlite 0.5.8 = PostgreSQL 18.3）
+
+- `CREATE ROLE app NOLOGIN`、`GRANT USAGE ON SCHEMA …`、`GRANT SELECT, INSERT, UPDATE ON ALL TABLES …`、`SET ROLE app` が使える。superuser（PGlite の既定の `postgres`）は `FORCE` でも RLS を迂回する。
+- `app` のロールで、テナントを設定しない `SELECT count(*)` は0行。`db.transaction()` の中で `set_config(..., true)` の後の `SELECT * FROM hiring.invitation`（WHERE なし）は自テナントの行だけ。トランザクションの後は `current_setting` が `''` に戻り、また0行。autocommit の `set_config(..., true)` は次の文に残らない。
+- 別テナントの `tenant_id` での INSERT は `new row violates row-level security policy`、別テナントの行の UPDATE は0行、自テナントの行を別テナントに移す UPDATE もエラー。`ON CONFLICT (id) DO NOTHING` は別テナントの同じ ID と衝突して行を返さない（→ `ConcurrencyConflict`）。
+- `EXPLAIN`（2万行・50テナント）: 検索なしの一覧は `(tenant_id, created_at DESC, id DESC)` のインデックスを Sort なしで読む。trigram の検索は、テナントの条件が十分に絞るので `UNIQUE (tenant_id, id)` のインデックスで1テナントの行に絞ってから類似度で選ぶ（GIN は使わない）。1テナントが非常に大きいなら、`btree_gin` 拡張（PGlite にもある）で `USING gin (tenant_id, lower(列) gin_trgm_ops)` を手で足すとよい（生成はしない: 拡張を作る権限が要るため）。
+
+### 意図して採用しなかったもの
+
+| 案 | 理由 |
+|---|---|
+| スキーマ・データベースをテナントごとに（silo / bridge） | テナントの数だけマイグレーションと接続が増え、生成する SQL と読み手がテナントの解決に依存する。将来の `isolation: schema` のためにキーだけ残した |
+| リポジトリをテナントに縛って構築する | 上の「リポジトリはテナントを毎回の引数に」の理由（配線の誤りで黙って漏れる） |
+| RLS だけで分離する（文に `tenant_id` を書かない） | 所有者・superuser の接続、`set_config` を忘れた経路、RLS を無効にした環境で、分離がなくなる。二重にした |
+| プラットフォームのロールをテナントの中の操作でも効かせる | 運用者が任意のテナントで普通の操作をでき、監査の記録も残らない。テナントをまたぐ操作は `cross_tenant` で明示させ、記録を必須にした |
+| 権限を実行時の設定（データベース・ファイル）から読む | 権限の変更がレビューもテストも通らずに本番の認可を変える。モデルに書き、生成時に解決した凍結したマップにした（ロールと権限の対応を運用で変えたいなら、ロールを ID プロバイダーで割り当てる） |
+| 一覧で全テナントを読むプラットフォームのクエリ | RLS を迂回するロールが要り、ページングと指紋もテナントをまたぐ。手書きの監査付きのジョブに任せた |
+
+### 制限
+
+- `isolation: row` だけ（スキーマ・データベースのテナントごとの分離は生成しない）。
+- テナントの退会（データの削除）・エクスポート、テナントごとの暗号鍵（envelope encryption）、テナントごとのクォータ・設定、テナントの移行（行の付け替え）は生成しない。
+- RBAC2（職務分掌などの制約）はない。権限はロールの和集合で、否定の権限もない。
+- `cross_tenant` は Use case だけで、1つの名指ししたテナントの中だけ。全テナントの一覧はない。
+- `Ref` は外部キーにならない（同じテナントであることはテナントに縛られた読み込みで保証する）。
+- テナントの中の Use case で `transaction: none` のものは、`rls: on` ならリポジトリの接続がトランザクションの中にある必要がある（そうでなければ明示的なエラー）。
+- Python の PostgreSQL のコードは psycopg の実物では動かしていない（同じ SQL を TypeScript で PGlite に通した。`connection.transaction()` は psycopg 3 の API）。

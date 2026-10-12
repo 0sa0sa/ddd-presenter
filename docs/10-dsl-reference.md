@@ -640,7 +640,7 @@ contexts:
 - Use case では入力と、**先頭に並んだ `load` の変数**（`job.company_id`、ガードの `job.is_open`）。生成コードはロールの確認を最初に（何も読み込む前に）行い、`allow_if` はそれが使う最後の `load` の直後、最初の変更の前に評価する。後の手順（`create`・`let`・`if` の枝・変更の後の `load`）の変数を使うとエラー `authorize-too-late`。
 - Aggregate の `allow_if` は、その Aggregate のフィールドを名前だけで読む（Invariant と同じ）。
 
-**`rate_limit`**: `{ requests, per, by }`。`per` は `second` / `minute` / `hour` / `day`、`by` は `principal`（既定）/ `ip` / `global`。トークンバケット（容量 `requests`、`per` の間に均等に補充）で、エンドポイントごと・数える単位ごとに1つ。`none` で既定を使わない。`public` のエンドポイントは principal がないので、既定の `by: principal` は IP ごとに数える（明示的な `by: principal` はエラー）。`internal` の `rate_limit` は効かない（警告）。
+**`rate_limit`**: `{ requests, per, by }`。`per` は `second` / `minute` / `hour` / `day`、`by` は `principal`（既定）/ `ip` / `global` / `tenant`（呼び出し元のテナントごと。`tenancy` が必要。§11.2）。トークンバケット（容量 `requests`、`per` の間に均等に補充）で、エンドポイントごと・数える単位ごとに1つ。`none` で既定を使わない。`public` のエンドポイントは principal がないので、既定の `by: principal` は IP ごとに数える（明示的な `by: principal` はエラー）。`internal` の `rate_limit` は効かない（警告）。
 
 **予約語**: `security` を書いたモデルでは、入力と変数の `principal`、Extension point の `has_role`、型名 `Principal` `PrincipalInput` `Role` `NotAuthorized` `Unauthenticated` `RateLimit` `RateLimiter` は使えない。
 
@@ -663,3 +663,108 @@ scenarios:
 生成テストは、principal が要る Use case ごとに2つのテストを足す（シナリオが1つ以上あるとき。入力は最初のシナリオのもの）: principal なしで `Unauthenticated`、必要なロールのどれも持たない principal で `NotAuthorized`（`details` に必要なロール）。どちらもリポジトリに触れると失敗するテストダブルを渡し、認可が何よりも先に行われることを確かめる。
 
 検査: 宣言していないロール、`allow_if` の型と使える変数、クレームの型（`String` / `UUID` / `Integer` / `Boolean` / `List[String]`）と名前（`id` / `roles` は組み込み）、`none` の署名アルゴリズム（`insecure-algorithm`）、HS* と公開鍵方式の混在（`mixed-algorithms`）、`clock_tolerance` の範囲、レート制限の単位と数える単位、シナリオの principal の値。
+
+
+### 11.1 ロールの継承と権限（RBAC、2026-10-12）
+
+`roles` はリスト（平らなロール。今までどおり）か、マップで書く。マップでは各ロールに継承（`inherits`、NIST RBAC1 の階層）と権限（`permissions`）を書ける。決定と出典は docs/09 §22。
+
+```yaml
+security:
+  roles:
+    admin: { inherits: [staff], permissions: [invitation.revoke] }   # admin は staff の権限も持ち、roles: [staff] も満たす
+    staff: { permissions: [invitation.issue, invitation.read, invitation.list] }
+    candidate: { permissions: [invitation.accept] }
+
+use_cases:
+  - name: issue_invitation
+    authorize: { permissions: [invitation.issue] }            # 権限（どれか1つ）。roles と書けば any-of
+  - name: read_detail
+    authorize:
+      permissions: [invitation.read]
+      allow_if: has_permission(principal, invitation.read) or principal.email == invitation.email.value
+```
+
+| キー | 値 | 検査（エラーのコード） |
+|---|---|---|
+| `roles.<名前>` | snake_case。値は `{ inherits, permissions, description }` か空 | 重複 `duplicate-name` |
+| `inherits` | 同じ種類（テナントのロール同士・プラットフォームのロール同士）のロール | 無いロール `unknown-role`、種類をまたぐ `invalid-inheritance`、循環 `inheritance-cycle` |
+| `permissions` | ドット区切りの小文字（`resource.action`、例 `invitation.issue`） | 形 `invalid-name`、ロール内の重複 `duplicate-name` |
+| `authorize.permissions` | どれかのロールが与える権限 | 無い権限 `unknown-permission`（リスト形式の `roles` には権限がないので必ずこれ） |
+
+- 継承の閉包と権限は**生成時に**解決し、凍結したマップ（`ROLE_INCLUDES` / `ROLE_PERMISSIONS`）になる。`has_role(principal, staff)` は admin でも真。
+- `has_permission(principal, invitation.read)`（`"invitation.read"` と引用してもよい）は `allow_if` で使える。操作のスコープのロールで判定する（§11.2）。
+- 既定の principal（シナリオ）は、`authorize.roles` のすべてと、各権限を**自分で**与える最初のロール（なければ継承で与える最初のロール）を持つ。生成テストの「権限がない」principal は、要求を満たさないほかのロールを持つ。
+
+### 11.2 マルチテナント（`security.tenancy`）
+
+```yaml
+security:
+  tenancy:
+    claim: org_id            # アクティブなテナントを運ぶ JWT のクレーム（これ以外からテナントは決まらない）
+    type: UUID               # String | UUID（省略で同じクレームを読む principal.claims の型、なければ String）
+    isolation: row           # row（既定・唯一）: 共有スキーマ + tenant_id 列 + PostgreSQL の行レベルセキュリティ
+    rls: on                  # on（既定）| off: 行レベルセキュリティ（多層防御）を生成するか
+    platform_roles_claim: platform_roles   # プラットフォームのロールを読むクレーム（既定）
+  platform_roles:            # テナントをまたぐロール（運用・サポート）。tenancy が必要
+    operator: { permissions: [invitation.read] }
+  rate_limits:
+    default: { requests: 60, per: minute, by: tenant }   # テナントごとのバケット
+
+aggregates:
+  - name: Invitation         # tenancy を書かなければ tenant（行はテナントのもの）
+  - name: Country
+    tenancy: global          # 全テナントで共有する参照データ（tenant_id なし）
+
+use_cases:
+  - name: support_revoke
+    authorize: { permissions: [invitation.revoke], cross_tenant: true }   # 入力の tenant_id のテナントで動く
+```
+
+**意味**
+
+- テナントは検証したトークンのクレームだけから決まる（`principal.tenant_id`）。トークンの `roles` はそのテナントの中のロールで、クレームのないトークンはテナントのロールを持たない。プラットフォームのロールは `platform_roles_claim` からだけ読む。
+- テナントの Aggregate は暗黙の不変フィールド `tenant_id` を持つ（ファクトリが呼び出し元のテナントで作る。入力からは来ない）。イベントも `tenant_id` を運ぶ。リポジトリは `get(tenant, id)` / `save(tenant, aggregate)`: 別テナントの Aggregate は「見つからない」、別テナントへの保存は `TenantMismatch`。
+- **スコープ**: テナントの Aggregate に触れる操作は「テナントの中」（テナントのロールだけが数える。テナントのないトークンは `Unauthenticated`、`details.error: "missing_tenant"`、HTTP 401）。`cross_tenant: true` は「入力の `tenant_id` のテナントの中」（プラットフォームのロールだけ。`CrossTenantAudit` に記録してから読む）。共有の Aggregate だけの操作はテナントが要らず、読みは両方のロール、**書き込みはプラットフォームのロールだけ**。
+- ポリシーが動かす内部の Use case は、イベントのテナントで動く（`execute(command, context)`）。
+- クエリはいつも `tenant_id = 呼び出し元のテナント` で絞り、カーソルはテナントに結び付く。
+
+| 検査 | コード |
+|---|---|
+| `tenancy` なしの `platform_roles` / `cross_tenant` / `by: tenant` / Aggregate の `tenancy` / シナリオの `tenant`・`platform_roles` | `tenancy-not-declared` |
+| `isolation` が `row` 以外、`type` が String / UUID 以外、`rls` が on / off 以外 | `invalid-value` |
+| `claim` が `sub`・`roles_claim`・`platform_roles_claim` と同じ | `invalid-value` |
+| ロールとプラットフォームのロールの名前の重複 | `duplicate-name` |
+| テナントの中の操作にプラットフォームのロール / プラットフォームのロールしか与えない権限 | `platform-role-in-tenant` / `permission-not-granted` |
+| `cross_tenant` にテナントのロール / プラットフォームのロールが与えない権限 / ロールも権限もない | `tenant-role-across-tenants` / `permission-not-granted` / `cross-tenant-needs-platform-role` |
+| `cross_tenant` を Aggregate・クエリに書く、テナントのデータに触れない Use case に書く | `invalid-authorize` |
+| 共有データを保存する操作にテナントのロール・`authenticated` | `global-write-needs-platform-role` |
+| テナントの中の Use case が共有データを保存する | `tenant-writes-global` |
+| `authorize: public` でテナントのデータに触れる | `tenant-required` |
+| 共有の Aggregate がテナントの Aggregate を `Ref` で参照する | `global-references-tenant` |
+| 共有データのイベントで、テナントのデータに触れる Use case を動かすポリシー | `policy-without-tenant` |
+| 1つのイベントをテナントと共有の両方の Aggregate が出す | `mixed-event-tenancy` |
+| `by: tenant` をテナントの中でない操作に書く | `rate-limit-without-tenant` |
+| フィールド・入力・ファクトリの引数・イベントのフィールドの `tenant_id`、クレーム名 `tenant_id` / `platform_roles` / `has_permission` | `reserved-name` |
+
+**予約語**（`tenancy` かマップ形式の `roles` があるとき）: 型名 `Permission` `PlatformRole` `Requirement` `TenantId` `TenantPrincipal` `InTenant` `TenantContext` `TenantMismatch` `CrossTenantAudit` `CrossTenantAccess`、Extension point の `has_permission`。
+
+### 11.3 シナリオ（テナントとプラットフォームのロール）
+
+`given.principal` に `tenant`（省略で既定のテスト用テナント `00000000-0000-4000-8000-0000000000a1`、文字列の型なら `tenant-a`。`null` でテナントなし）と `platform_roles` を書ける。`given.aggregates` は既定のテナント（`cross_tenant` の Use case では入力の `tenant_id` のテナント）に置かれる。`cross_tenant` の Use case の `when.input` には `tenant_id` を書く。
+
+```yaml
+scenarios:
+  - name: another_tenant_sees_no_invitation        # 別テナントの呼び出し元には「見つからない」
+    given:
+      principal: { roles: [candidate], claims: { email: staff@example.com }, tenant: "00000000-0000-4000-8000-0000000000b2" }
+      aggregates: [{ type: Invitation, fields: { ... } }]
+    when: { input: { invitation_id: "..." } }
+    then: { raises: InvitationNotFound }
+  - name: support_revokes_in_the_named_tenant
+    given: { principal: { platform_roles: [support], tenant: null }, aggregates: [...] }
+    when: { input: { tenant_id: "00000000-0000-4000-8000-0000000000a1", invitation_id: "..." } }
+    then: { state: [...] }
+```
+
+生成テストは、テナントの中の Use case に「テナントのないトークンは何も読む前に `Unauthenticated`」「最初の成功したシナリオを別テナントで実行すると not found」を、`cross_tenant` の Use case に「テナントのロールだけではテナントをまたげない」を足す。ほかに `rbac.test.ts` / `test_security.py`（権限の解決と継承・スコープごとの判定）、テナントに縛られたリポジトリ・クエリ・カーソル・ポリシー・HTTP（401・403・テナントごとのレート制限）のテストを生成する。

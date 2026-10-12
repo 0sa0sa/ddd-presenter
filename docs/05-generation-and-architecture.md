@@ -449,6 +449,84 @@ def accept(command: AcceptInvitation, who: Principal | None = Depends(principal)
 - TypeScript の HTTP API で `scheme: bearer_jwt` なら、顧客所有の `package.json` に `"jose": "^6.1.0"` を手で足す（新しいプロジェクトの scaffold には入る）。Python で `bearer_jwt` なら `pyjwt[crypto]>=2.8` を足す（例の `pyproject.toml` を参照）。
 - `internal` にした Use case はエンドポイントがなくなる（`mutations.<context>.<useCase>` も消える）。
 
+### マルチテナントと権限（`security.tenancy`・マップ形式の `roles`, 2026-10-12）
+
+DSL は docs/10 §11.1〜§11.3、決定と出典は docs/09 §22。`tenancy` を書かず、ロールをリストで書いたモデルは何も変わらない。
+
+```text
+src/<package>/generated/security.(py|ts)      # 追加: PERMISSIONS、ROLE_INCLUDES / ROLE_PERMISSIONS（継承を生成時に解決した凍結したマップ）、
+                                              # PLATFORM_ROLES…、hasPermission / has_permission、Requirement、authorizeInTenant /
+                                              # authorize_in_tenant、authorizeAcrossTenants、TenantId、TenantContext、TenantMismatch、
+                                              # CrossTenantAudit（ポート）と CrossTenantAccess
+tests/generated/rbac.test.ts                  # TypeScript: 権限の解決・継承・スコープごとの判定（Python は test_security.py に入る）
+tests/generated/<context>-<use case>.test.ts  # 追加: テナントのないトークン、別テナントで not found、テナントのロールではテナントをまたげない
+```
+
+#### アプリケーション層の契約
+
+- **Principal**: `tenantId` / `tenant_id`（`TenantId | null`、トークンの `tenancy.claim` だけから）と `platformRoles` / `platform_roles` が増える。テナントのロールはそのテナントの中だけで、テナントのないトークンは `roles: []`。テストでは `Principal.create({ id, tenantId, roles, platformRoles })` / `Principal(id=..., tenant_id=TenantId(UUID(...)), roles=(...))`。
+- **認可**（`execute` の最初の文）: テナントの中の操作は `authorizeInTenant(principal, action, { roles, permissions })`（Python は `principal, tenant = authorize_in_tenant(principal, action, roles=..., permissions=...)`）。principal がなければ `Unauthenticated({ action })`、テナントがなければ `Unauthenticated({ action, error: "missing_tenant" })`、要求を満たさなければ `NotAuthorized({ action, requiredRoles?, requiredPermissions? })`。`cross_tenant` は `authorizeAcrossTenants`（プラットフォームのロールだけ）の後に `CrossTenantAudit.record({ action, principal, tenantId: command.tenantId })`。共有データの操作は `authorize(principal, action, { roles, permissions })`。
+- **リポジトリ**: テナントの Aggregate は `get(tenant, id)` / `save(tenant, aggregate)`。Use case は認可が保証したテナントだけを渡す。別テナントの `get` は null（→ `not_found`）、`save` で集約のテナントが違えば `TenantMismatch`（HTTP にはマップしない = 500）。インメモリのダブル（`InMemory<Agg>Repository`）も同じ意味論で、`seed` はどのテナントの集約も入れられる（各自の `tenantId` を持つ）。
+- **ファクトリとイベント**: `X.issue({ tenantId, ... })` / `X.issue(tenant_id=..., ...)`。テナントの Aggregate のイベントは `tenantId` / `tenant_id` を持つ。
+- **内部の Use case とポリシー**: テナントのデータに触れる内部の Use case は `execute(command, context: TenantContext)`。ポリシーは `execute(command, { tenantId: event.tenantId })` で、イベントのテナントで動かす。ジョブから動かすときは対象のテナントを渡す。
+- **冪等性キー**: `"<tenant>:<principal>:<key>"`（cross_tenant はコマンドのテナント、内部の Use case は `"<tenant>:<key>"`）。
+- **クエリ**: `QueryScope.tenant` に呼び出し元のテナントが入り、リーダーには `request.tenant` で届き、指紋に入る（別テナントのカーソルは `InvalidCursor`）。
+
+#### HTTP API（TypeScript）
+
+- **契約**: `auth: { kind: "principal", roles, permissions?, tenant? }`（`tenant: true` はテナントの中の操作）。`rateLimit.by` に `"tenant"` が増える（既定の `by: tenant` は、テナントのない操作では principal、公開の操作では IP で数えるように契約に解決済み）。
+- **サーバー**: 認証の後、`auth.tenant` の操作でテナントがなければ 401（`WWW-Authenticate: Bearer error="invalid_token", error_description="no active tenant"`、`details.error: "missing_tenant"`）。`createApiHandler(deps, { tenantOf })` を渡すと、パスなどが名指しするテナントがトークンのテナントと違うとき 403（`code: "not_authorized"`、`details.error: "tenant_mismatch"`）。テナントは常にトークンから決まり、パスは比べるだけ。`by: tenant` はテナントごとのバケット。テナントの Aggregate の GET は読み取りのアクセス関数（呼び出し元のテナントから読む）を必ず通る。
+- **クライアント**: 型が増えるだけ（呼び出し方は同じ。テナントはトークンの中）。Aggregate の JSON 形に `tenantId` は含めない。
+
+```ts
+// Hono: /orgs/:org/api/* の下に置き、パスの組織をトークンの組織と比べる
+const handler = createApiHandler(dependencies, {
+  authenticate: createBearerJwtAuthenticator({ jwksUrl }),
+  tenantOf: (request) => new URL(request.url).pathname.split("/")[2],
+});
+```
+
+| 状況 | ステータス | 本文 |
+|---|---|---|
+| テナントの操作に、組織のないトークン | 401（`error="invalid_token", error_description="no active tenant"`） | `{ code: "unauthenticated", details: { error: "missing_tenant" } }` |
+| パスの組織がトークンの組織と違う（`tenantOf`） | 403 | `{ code: "not_authorized", details: { error: "tenant_mismatch" } }` |
+| テナントのロールに必要な権限がない | 403 | `{ code: "not_authorized", details: { action, requiredPermissions } }` |
+| 別テナントの集約の GET | 404 | `{ code: "aggregate_not_found" }`（存在を漏らさない） |
+| テナントのバケットを使い切った（`by: tenant`） | 429 | 既存と同じ |
+
+#### PostgreSQL（`rls: on` のとき）
+
+アプリは**テーブルの所有者ではなく、BYPASSRLS を持たない**ロールで接続する（所有者・superuser・BYPASSRLS は RLS を迂回する。DDL は `FORCE ROW LEVEL SECURITY` で所有者にも効かせるが、マイグレーション用のロールとは分ける）。
+
+```sql
+CREATE ROLE app LOGIN PASSWORD '...' NOSUPERUSER NOBYPASSRLS;
+GRANT USAGE ON SCHEMA cleaning_staff TO app;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA cleaning_staff TO app;
+```
+
+- **リポジトリ**は作業単位のトランザクションの接続で使う（今までどおり作業単位ごとに作る）。各呼び出しの前に `SELECT set_config('app.tenant_id', $1, true)` を送り、最初の呼び出しでは設定が残ることを確かめる（トランザクションの外 = autocommit なら明示的なエラー）。
+- **リーダー**（テナントのクエリ）は `SqlTransactions`（TypeScript）/ `SqlTransactions` のプロトコル（Python、psycopg 3 の `Connection`）を受け取り、各ページを自分のトランザクションで読む: PGlite はそのまま、node-postgres は `poolTransactions(pool)`、psycopg は `connection.transaction()`（開いたトランザクションの中ならセーブポイント）。
+
+```ts
+import { Pool } from "pg";
+import { poolTransactions } from "./generated/persistence.js";
+const pool = new Pool();
+const reader = new PostgresSearchInvitationsReader(poolTransactions(pool));
+// 作業単位: 1つの接続で BEGIN … COMMIT し、その接続でリポジトリを作る
+const client = await pool.connect();
+await client.query("BEGIN");
+const repository = new PostgresCleaningStaffInvitationRepository(client);
+```
+
+`rls: off` では DDL にポリシーがなく、リポジトリ・リーダーは `set_config` を送らず、リーダーは今までどおり `SqlClient` / `SqlConnection` を受け取る（どの文も `tenant_id` で絞るのは同じ）。
+
+#### 移行メモ（2026-10-12、マルチテナント）
+
+- 既存のモデルは何も変わらない（`tenancy` も、マップ形式の `roles` もないとき）。
+- マップ形式の `roles` にすると `authorize(principal, action, required)` の第3引数がロールの配列から `{ roles, permissions }` になる（Python はキーワード引数）。
+- `tenancy` を足すと、テナントの Aggregate・イベント・リポジトリ・ファクトリ・内部の Use case・ポリシーの型が変わる（`ddd diff` が破壊的変更として示す）。既存のテーブルには `tenant_id` 列・`UNIQUE (tenant_id, id)`・ポリシーを足すマイグレーションが要る（既存の行のテナントの埋め方はモデルから決まらないので生成しない）。
+- 手書きのコード（テスト・ジョブ・拡張）は、リポジトリにテナントを、Principal に `tenantId` を、内部の Use case にテナントの文脈を渡す。
+
 ### 移行メモ（2026-10-03、ベストプラクティスの見直し）
 
 docs/09 §16 の見直しで生成 API が変わった。`ddd diff` は次の変更を「破壊的変更」として表示する（引数の追加のように互換性がある変更も、シグネチャの変化として表示される）。
@@ -555,6 +633,10 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 ### インメモリのリーダー（テスト用）
 
 生成した SQL と同じ意味論: フィルタ（NULL は一致しない、渡さないパラメータは無視、呼び出し元での絞り込みはいつも効き、値がなければ何も一致しない）、検索（小文字にして、英数字の並びを単語とし、前に空白2つ・後ろに1つを足したトリグラムの集合で、共通 / 全体を float4 で — pg_trgm と同じ）、並び（文字列はコードポイント順）、キーセット、`limit + 1`。行は Aggregate をリポジトリと同じ行の形にしたもので、項目は同じ `<query>ItemFromRow` で作る。PGlite（WebAssembly の PostgreSQL 18 と pg_trgm）での生成器のテストが、同じデータに対するページごとの結果の一致を確かめる。`lower()` はデータベースのロケールに従うので、英数字以外の大文字小文字の扱いが違うことがある。
+
+### テナントのデータ（`security.tenancy`, 2026-10-12）
+
+テナントの Aggregate のテーブルは `tenant_id`（`tenancy.type` が UUID なら uuid、String なら text）・`UNIQUE (tenant_id, id)`・（`rls: on` なら）`ENABLE` / `FORCE ROW LEVEL SECURITY` と `tenant_isolation` ポリシー（`USING` / `WITH CHECK` とも `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`。冪等にするため `DROP POLICY IF EXISTS` してから作る）を持つ。リポジトリの SELECT / UPDATE は `WHERE tenant_id = $1 AND id = $2`、INSERT は `tenant_id` を最初の値にし、UPDATE で `tenant_id` は変えない。クエリの文は WHERE の先頭が `tenant_id = $n`（引数 `{ tenant: true }` / `("tenant", None)`）、並び順のインデックスは `tenant_id` が先頭。共有（`tenancy: global`）のテーブルには何も足さない。インメモリのリーダーも `request.tenant` の行だけを読む（テナントのない要求は0行）。接続のロールとトランザクションの要件は §8「マルチテナントと権限」。
 
 ### 移行メモ（2026-10-06）
 

@@ -184,6 +184,20 @@ export const queryClient = new QueryClient({ defaultOptions: { queries: { retry:
 
 Python（HTTP 層は生成しない）は `generated/security.py`（Principal・NotAuthorized・`RATE_LIMITS`）、`generated/rate_limit.py`（`RateLimiter`）、`generated/authentication.py`（PyJWT の `BearerJwtAuthenticator`）を FastAPI などの依存関数から使う（例は docs/05 §8）。依存に `pyjwt[crypto]` を足す。
 
+#### マルチテナントとロールの継承・権限（`security.tenancy` / マップ形式の `roles`）
+
+`roles` をマップで書くと、ロールの継承（`inherits`）と権限（`permissions`、`resource.action`）を書け、`authorize: { permissions: [...] }` と `allow_if` の `has_permission(principal, x.y)` で認可する（継承は生成時に解決した凍結したマップ）。`security.tenancy` を書くと、テナント（JWT の `claim` だけから決まる）ごとに行を分ける: テナントの Aggregate は暗黙の `tenant_id` を持ち、リポジトリは `get(tenant, id)` / `save(tenant, aggregate)`、クエリの SQL はいつも `tenant_id = $1` で絞り、PostgreSQL の DDL には（`rls: on`、既定なら）行レベルセキュリティのポリシーが入る（リポジトリとリーダーはトランザクションの中で `set_config('app.tenant_id', ..., true)` を送る）。テナントをまたぐ運用は `platform_roles` と `cross_tenant: true`（監査ポート `CrossTenantAudit` に記録してから）、全テナント共有の参照データは Aggregate の `tenancy: global`。HTTP API はテナントのないトークンに 401、`tenantOf` でパスのテナントが違えば 403、`by: tenant` でテナントごとのレート制限（[docs/10 §11.1〜§11.3](docs/10-dsl-reference.md)・[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §22](docs/09-implementation-decisions.md)）。
+
+```yaml
+security:
+  tenancy: { claim: org_id, type: UUID }      # isolation: row、rls: on（既定）
+  roles:
+    admin: { inherits: [staff], permissions: [invitation.revoke] }
+    staff: { permissions: [invitation.issue, invitation.read] }
+  platform_roles:
+    support: { permissions: [invitation.revoke] }
+```
+
 ### 一覧・trigram 検索・ページング（`queries:`）
 
 コンテキストに `queries:` を書くと、読み取り側（CQRS の Query）を両方の target で生成する: 入力の検証、pg_trgm の trigram 検索（`prefix` / `exact` も可）、OFFSET を使わないキーセット方式のページング、HMAC-SHA256 で署名したトークン（カーソル）。クエリを宣言したコンテキストには PostgreSQL のスキーマ（`sql/<context>.sql`）、楽観ロック付きのリポジトリとリーダー、インメモリのリーダー（テスト用）も生成する。DSL は [docs/10 §10](docs/10-dsl-reference.md)、契約は [docs/05 §9](docs/05-generation-and-architecture.md)、決定と出典は [docs/09 §19](docs/09-implementation-decisions.md)。
@@ -401,6 +415,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 - 課金（FR-042）、Git 連携（FR-041）、AI 補助（FR-035）、シミュレーション（FR-022）は Phase 3 以降として未実装。
 - 生成対象は Python（Pydantic v2）と TypeScript（Zod v4）。TypeScript 版の違い（日時はミリ秒精度の ISO 文字列 `Instant`、文字列の長さの数え方など）は docs/09 §14・§17。Outbox などの確実なイベント配信は EventPublisher アダプタ側の責務。
 - TypeScript の HTTP API（`typescript.api`）は Use case の POST、ID による Aggregate の GET、`queries:` に書いたクエリの GET（キーセットのページング）。それ以外の一覧は生成しない（`queries.<context>.<aggregate>.lists()` のキーを接頭辞に手で書くと、生成したミューテーションの無効化に乗る）。認証・認可・レート制限はモデルに `security` を書いたときだけ生成する（書かなければハンドラの前に置く）。ポリシーが後で別のコンテキストを変える影響（結果整合）は無効化しない（docs/05 §8）。
-- 生成する認可はロール（any-of、継承なし）と `allow_if`（入力と先頭の `load` だけを読む）。クエリの行は `where` の `principal:`（呼び出し元の id かクレームとの比較）で絞る（行ごとの `allow_if` はない）。トークンの失効・リフレッシュ、複数のエンドポイントをまとめたレート制限はない。インメモリのレート制限のストアは1プロセス用（docs/09 §20）。
+- 生成する認可はロール（any-of。マップ形式なら継承と権限）と `allow_if`（入力と先頭の `load` だけを読む）。クエリの行は `where` の `principal:`（呼び出し元の id かクレームとの比較）で絞る（行ごとの `allow_if` はない）。トークンの失効・リフレッシュ、複数のエンドポイントをまとめたレート制限はない。インメモリのレート制限のストアは1プロセス用（docs/09 §20）。
+- マルチテナントは共有スキーマ + `tenant_id` 列（+ RLS）だけ。テナントごとのスキーマ・データベース、テナントの退会（データの削除・エクスポート）、テナントごとの暗号鍵、既存のテーブルにテナントを足すマイグレーションは生成しない。1つのトークンは1つのアクティブなテナントだけを持つ（docs/09 §22）。
 - Web のフォーム編集は主要な操作（追加・名前変更・式・エラー・削除）に限る。細かい編集は同じ画面の YAML で行う（どちらも同じモデルを編集する）。
 - 診断メッセージは英語（CLI と共通）。UI は日本語。
