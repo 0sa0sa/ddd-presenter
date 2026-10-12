@@ -1240,7 +1240,8 @@ function tenantRepositoryTests(L: TsLayout, c: Code, t: TableIR, aggregateLitera
     c.block(`test(${tsString(`${ag}: row level security needs a transaction`)}, async () =>`, () => {
       c.line("const client = scripted([], [{ tenant: \"\" }]);");
       c.line(`const repository = new Postgres${ag}Repository(client);`);
-      c.line(`await expect(repository.get(${tenant}, ${aggregateLiteral}.${id})).rejects.toThrow("transaction");`);
+      c.line(`const error = await expectRejects(() => repository.get(${tenant}, ${aggregateLiteral}.${id}), Error);`);
+      c.line('expect(error.message).toContain("transaction");');
     }, ");");
   }
 }

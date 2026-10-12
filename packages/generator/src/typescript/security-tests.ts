@@ -4,7 +4,7 @@
  * signed with the public key), the token bucket with a fake clock, the RateLimit headers, the client's typed errors
  * and the recommended retry policy.
  */
-import { claimType, servedOverHttp, type UseCaseIR } from "@ddd/core";
+import { claimType, DEFAULT_TENANT_IDS, roleIncludes, rolePermissions, servedOverHttp, usesPermissions, type UseCaseIR } from "@ddd/core";
 import { contextKey } from "./api.ts";
 import { Code, TsImports, tsString } from "./code.ts";
 import type { TsFile } from "./domain.ts";
@@ -47,7 +47,121 @@ export function securityTestFile(Ls: TsLayout[]): TsFile | undefined {
   return testFile(L, module, "Security of the HTTP API: bearer JWT authentication, token-bucket rate limiting, the client's typed errors and retry policy.", imp, c.toString());
 }
 
+/**
+ * `tests/generated/rbac.test.ts` (map-form roles or tenancy): the role hierarchy and permissions resolved at
+ * generation time, `hasRole` / `hasPermission` through inheritance, frozen maps, and the authorization checks by scope.
+ */
+export function rbacTestFile(Ls: TsLayout[]): TsFile | undefined {
+  const L = Ls[0];
+  const sec = L?.model.security;
+  if (!L || !sec || !(usesPermissions(sec) || sec.tenancy)) return undefined;
+  const module = [L.model.generation.testsDir, "generated", "rbac.test"].filter((p) => p && p !== ".").join("/");
+  const imp = new TsImports(module);
+  const c = new Code();
+  const includes = roleIncludes(sec, "tenant");
+  const perms = rolePermissions(sec, "tenant");
+  imp.value(L.security, "ROLE_INCLUDES", "ROLE_PERMISSIONS", "hasRole", "hasPermission");
+  if (!sec.tenancy) imp.value(L.security, "authorize", "NotAuthorized");
+  else imp.value(L.security, "NotAuthorized", "Unauthenticated");
+  imp.value(L.contextTesting, "expectThrows");
+  const tenancy = sec.tenancy;
+  const tenant = tenancy ? DEFAULT_TENANT_IDS[tenancy.type] : undefined;
+  const as = (roles: string[], extra: Record<string, unknown> = {}) =>
+    principalLiteral(L, { anonymous: false, id: sec.principal.idType === "UUID" ? "00000000-0000-4000-8000-000000000001" : "user-1", roles, claims: {}, ...(tenancy ? { tenant: tenant!, platformRoles: [] } : {}), ...extra }, imp);
+  c.line();
+  c.block('describe("roles and permissions (resolved at generation time)", () =>', () => {
+    c.doc("Each role includes itself and every role it inherits (NIST RBAC1); its permissions include the inherited roles' ones.");
+    c.block('test("the role hierarchy and the permissions are resolved", () =>', () => {
+      c.block("expect(ROLE_INCLUDES).toEqual(", () => {
+        for (const [r, inc] of includes) c.line(`${r}: [${inc.map(tsString).join(", ")}],`);
+      }, ");");
+      c.block("expect(ROLE_PERMISSIONS).toEqual(", () => {
+        for (const [r, ps] of perms) c.line(`${r}: [${ps.map(tsString).join(", ")}],`);
+      }, ");");
+      c.line("expect(Object.isFrozen(ROLE_INCLUDES)).toBe(true);");
+      c.line("expect(Object.values(ROLE_PERMISSIONS).every((list) => Object.isFrozen(list))).toBe(true);");
+    }, ");");
+    // A role inheriting another: it holds the inherited role and its permissions; the inherited role does not hold its own extras.
+    const senior = [...includes].find(([, inc]) => inc.length > 1);
+    if (senior) {
+      const [role, inc] = senior;
+      const junior = inc[1]!;
+      const extra = (perms.get(role) ?? []).find((p) => !(perms.get(junior) ?? []).includes(p));
+      const inherited = (perms.get(junior) ?? [])[0];
+      c.line();
+      c.doc(`${role} inherits ${junior}: holding ${role} satisfies has_role(${junior})${inherited ? ` and grants ${inherited}` : ""}; ${junior} does not hold ${role}.`);
+      c.block(`test(${tsString(`${role} inherits ${junior}`)}, () =>`, () => {
+        c.line(`const senior = ${as([role])};`);
+        c.line(`const junior = ${as([junior])};`);
+        c.line(`expect(hasRole(senior, ${tsString(junior)})).toBe(true);`);
+        c.line(`expect(hasRole(junior, ${tsString(role)})).toBe(false);`);
+        if (inherited) c.line(`expect(hasPermission(senior, ${tsString(inherited)})).toBe(true);`);
+        if (extra) c.line(`expect(hasPermission(junior, ${tsString(extra)})).toBe(false);`);
+        if (!tenancy) {
+          c.line(`authorize(senior, "example", { roles: [${tsString(junior)}] });`);
+          throwsLines(c, undefined, `authorize(junior, "example", { roles: [${tsString(role)}] });`, "NotAuthorized");
+        }
+      }, ");");
+    }
+    if (tenancy) {
+      imp.value(L.security, "authorizeInTenant");
+      const anyPerm = [...perms].find(([, ps]) => ps.length);
+      if (anyPerm) {
+        const [role, ps] = anyPerm;
+        const p = ps[0]!;
+        c.line();
+        c.doc(`In a tenant: no principal is Unauthenticated, no active tenant is Unauthenticated (missing_tenant), a role without ${p} is NotAuthorized naming it.`);
+        c.block('test("authorizeInTenant: principal, active tenant, then the roles in it", () =>', () => {
+          c.line(`const required = { permissions: [${tsString(p)}] } as const;`);
+          throwsLines(c, "anonymous", 'authorizeInTenant(null, "example", required);', "Unauthenticated");
+          c.line('expect(anonymous.details).toEqual({ action: "example" });');
+          c.line(`const tenantless = ${as([role], { tenant: null })};`);
+          throwsLines(c, "noTenant", 'authorizeInTenant(tenantless, "example", required);', "Unauthenticated");
+          c.line('expect(noTenant.details).toEqual({ action: "example", error: "missing_tenant" });');
+          c.line(`authorizeInTenant(${as([role])}, "example", required);`);
+          c.line(`const none = ${as([])};`);
+          throwsLines(c, "refused", 'authorizeInTenant(none, "example", required);', "NotAuthorized");
+          c.line(`expect(refused.details).toEqual({ action: "example", requiredPermissions: [${tsString(p)}] });`);
+        }, ");");
+      }
+      const platformPerms = rolePermissions(sec, "platform");
+      const pr = [...platformPerms].find(([, ps]) => ps.length);
+      if (pr) {
+        imp.value(L.security, "authorizeAcrossTenants");
+        const [prole, pps] = pr;
+        const p = pps[0]!;
+        const tenantRoles = sec.roles;
+        c.line();
+        c.doc(`Across tenants only platform roles count: ${prole} may act with ${p}; every tenant role together may not; in a tenant, the platform role does not count.`);
+        c.block('test("platform roles act across tenants only", () =>', () => {
+          c.line(`const required = { permissions: [${tsString(p)}] } as const;`);
+          c.line(`authorizeAcrossTenants(${as([], { platformRoles: [prole], tenant: null })}, "example", required);`);
+          c.line(`const tenantOnly = ${as(tenantRoles)};`);
+          throwsLines(c, undefined, 'authorizeAcrossTenants(tenantOnly, "example", required);', "NotAuthorized");
+          if (!(perms.size && [...perms.values()].some((ps) => ps.includes(p)))) {
+            c.line(`const platformOnly = ${as([], { platformRoles: [prole] })};`);
+            throwsLines(c, undefined, 'authorizeInTenant(platformOnly, "example", required);', "NotAuthorized");
+          } else {
+            c.line(`const platformOnly = ${as([], { platformRoles: [prole] })};`);
+            c.comment(`${p} is also a tenant permission: in a tenant only tenant roles count, so the platform role alone is refused.`);
+            throwsLines(c, undefined, 'authorizeInTenant(platformOnly, "example", required);', "NotAuthorized");
+          }
+        }, ");");
+      }
+    }
+  }, ");");
+  return testFile(L, module, "Roles, permissions and the authorization checks generated from the model (no I/O).", imp, c.toString());
+}
+
+/** `[const name = ]expectThrows(() => {\n  statement\n}, Error);` as Prettier prints a statement callback. */
+function throwsLines(c: Code, name: string | undefined, statement: string, error: string): void {
+  c.line(`${name ? `const ${name} = ` : ""}expectThrows(() => {`);
+  c.indent(() => c.line(statement));
+  c.line(`}, ${error});`);
+}
+
 function jwtTests(L: TsLayout, c: Code, imp: TsImports): void {
+
   const sec = L.model.security!;
   const auth = sec.authentication!;
   const alg = auth.algorithms[0]!;
@@ -116,12 +230,34 @@ function jwtTests(L: TsLayout, c: Code, imp: TsImports): void {
   c.line();
   c.block('describe("bearer JWT authentication (RFC 6750, RFC 7519, RFC 8725)", () =>', () => {
     c.doc(`\`sub\` is the id, \`${auth.rolesClaim}\` the roles (undeclared roles are dropped), the declared claims their values.`);
+    const tenancy = sec.tenancy;
+    const platform = sec.platformRoles.map((d) => d.name).slice(0, 1);
     c.block('test("a valid token becomes the principal", async () =>', () => {
-      const payload = [`${key(auth.rolesClaim)}: [${[...roles, "not_a_declared_role"].map(tsString).join(", ")}]`, ...claims.map(({ cl, v }) => `${key(cl.claim ?? cl.name)}: ${literal(v)}`)];
-      c.line(`const valid = await token({ ${payload.join(", ")} });`);
-      const expected = principalLiteral(L, { anonymous: false, id: sub, roles, claims: Object.fromEntries(claims.map(({ cl, v }) => [cl.name, v])) }, imp);
+      const payload = [
+        ...(tenancy ? [`${key(tenancy.claim)}: ${tsString(DEFAULT_TENANT_IDS[tenancy.type])}`] : []),
+        `${key(auth.rolesClaim)}: [${[...roles, "not_a_declared_role"].map(tsString).join(", ")}]`,
+        ...(platform.length ? [`${key(tenancy!.platformRolesClaim)}: [${platform.map(tsString).join(", ")}]`] : []),
+        ...claims.map(({ cl, v }) => `${key(cl.claim ?? cl.name)}: ${literal(v)}`),
+      ];
+      const one = `const valid = await token({ ${payload.join(", ")} });`;
+      if (one.length + 4 <= 100) c.line(one);
+      else c.open("const valid = await token({", () => payload.forEach((p) => c.line(`${p},`)), "});");
+      const expected = principalLiteral(L, { anonymous: false, id: sub, roles, claims: Object.fromEntries(claims.map(({ cl, v }) => [cl.name, v])), ...(tenancy ? { tenant: DEFAULT_TENANT_IDS[tenancy.type], platformRoles: platform } : {}) }, imp);
       c.line(`expect(await authenticate(request(valid))).toEqual(${expected});`);
     }, ");");
+    if (tenancy) {
+      c.line();
+      c.doc(
+        `Tenant roles hold in the active tenant only: a token without \`${tenancy.claim}\` holds none.${platform.length ? ` Platform roles come from \`${tenancy.platformRolesClaim}\` only: a platform role in \`${auth.rolesClaim}\` (or a tenant role in \`${tenancy.platformRolesClaim}\`) is dropped.` : ""}`,
+      );
+      c.block('test("roles need an active tenant; platform roles come from their own claim", async () =>', () => {
+        const noTenant = [`${key(auth.rolesClaim)}: [${[...roles, ...platform].map(tsString).join(", ")}]`, ...(platform.length ? [`${key(tenancy.platformRolesClaim)}: [${roles.map(tsString).join(", ")}]`] : [])];
+        c.line(`const tenantless = await authenticate(request(await token({ ${noTenant.join(", ")} })));`);
+        c.line("expect(tenantless?.tenantId).toBeNull();");
+        c.line("expect(tenantless?.roles).toEqual([]);");
+        if (platform.length) c.line("expect(tenantless?.platformRoles).toEqual([]);");
+      }, ");");
+    }
     c.line();
     c.doc("Without credentials there is no principal: the handler answers 401 with `WWW-Authenticate: Bearer`.");
     c.block('test("no Authorization header: no principal", async () =>', () => {

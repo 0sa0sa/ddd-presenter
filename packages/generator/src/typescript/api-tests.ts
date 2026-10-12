@@ -4,7 +4,7 @@
  * match them, the validated data, the error mapping (status and domain error class) and that each mutation
  * invalidates exactly what it changes. They use the factories like an app does: `queries.<context>.<aggregate>`.
  */
-import { effectiveRateLimit, evaluateOnValues, formatPath, makePrincipal, otherRoles, requiresPrincipal, scenarioPrincipal, windowSeconds, type AggregateIR, type RateLimitIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import { aggregateScope, effectiveRateLimit, evaluateOnValues, formatPath, makePrincipal, otherRoles, rateLimitKey, requiresPrincipal, scenarioPrincipal, windowSeconds, type AccessScope, type AggregateIR, type AuthorizeIR, type RateLimitIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
 import { aggregateKey, contextKey, idKind, idLiteral, invalidationLabel, invalidations, readPath, servedUseCases, useCaseErrors, useCasePath, type IdKind } from "./api.ts";
 import { repoName } from "./application.ts";
 import { Code, TsImports, tsString } from "./code.ts";
@@ -12,7 +12,8 @@ import type { TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { kebab, prop, toSnake } from "./names.ts";
-import { build, importError, principalLiteral, testFile, useCaseSetup } from "./tests.ts";
+import { build, commandRecord, defaultTenant, importError, otherTenant, principalLiteral, scenarioTenant, tenantLiteral, testFile, useCaseSetup } from "./tests.ts";
+
 import { expectEqual, record, typedValue } from "./values.ts";
 import { contextPlans, inputObject, protectedQuery, queryClass, readerName, TEST_SECRET } from "./queries.ts";
 import type { QueryPlan } from "@ddd/core";
@@ -106,8 +107,12 @@ export function apiTestFile(L: TsLayout): TsFile | undefined {
   const sec = L.model.security;
   if (sec) {
     imp.value(L.security, "Principal");
-    c.doc("A principal holding every role: the requests of these tests authenticate as it unless a test says otherwise.");
-    c.line(`const everyone = ${principalLiteral(L, makePrincipal(sec, { roles: sec.roles, claims: {} }), imp)};`);
+    c.doc(
+      sec.tenancy
+        ? `A principal holding every role in the test tenant (${defaultTenant(L)})${sec.platformRoles.length ? " and every platform role" : ""}: the requests of these tests authenticate as it unless a test says otherwise.`
+        : "A principal holding every role: the requests of these tests authenticate as it unless a test says otherwise.",
+    );
+    c.line(`const everyone = ${principalLiteral(L, makePrincipal(sec, { roles: sec.roles, claims: {}, platformRoles: sec.platformRoles.map((d) => d.name) }), imp)};`);
     c.line();
     c.doc("What the client sends (`getToken`) and the test authenticator accepts.");
     c.line('const AUTHORIZATION = { authorization: "Bearer test-token" };');
@@ -197,7 +202,7 @@ function queryApiTest(L: TsLayout, c: Code, plan: QueryPlan, imp: TsImports): vo
   c.block(`test(${tsString(`${plan.query.name}: infinite query over HTTP`)}, async () =>`, () => {
     c.line(`const repository = new InMemory${ag.name}Repository();`);
     if (rows.length) {
-      c.open("repository.seed(", () => rows.forEach((r) => c.line(`${ag.name}.from(${record(ag.name, r.fields, imp, L)}),`)), ");");
+      c.open("repository.seed(", () => rows.forEach((r) => c.line(`${build(L, ag.name, "aggregate", r.fields, imp)},`)), ");");
     }
     c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
     c.line(`const ${name} = new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
@@ -297,7 +302,7 @@ function handlerTest(L: TsLayout, c: Code, imp: TsImports, sep: () => void): voi
     c.line(`const invalid = await handler(new Request(${url}, { method: "POST", body: "{" }));`);
     c.line("expect(invalid.status).toBe(400);");
     c.line('expect(await responseJson(invalid)).toMatchObject({ code: "constraint_violation" });');
-    c.line(`const body = JSON.stringify(${record(uc.command, sc.when.input, imp, L)});`);
+    c.line(`const body = JSON.stringify(${commandRecord(L, uc, sc.when.input, imp)});`);
     c.line(`const failed = await handler(new Request(${url}, { method: "POST", body }));`);
     c.line("expect(failed.status).toBe(500);");
     c.line('expect(await responseJson(failed)).toEqual({ code: "internal_error", message: "Internal server error" });');
@@ -339,7 +344,8 @@ function readTest(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void {
       } else {
         c.line("const data = await queryClient.query(options);");
         c.line("expect(statuses).toEqual([200]);");
-        c.line("expect(jsonOf(data)).toEqual(jsonOf(stored));");
+        // The client's JSON form has no tenantId (the tenant is the caller's own); the server's may carry it.
+        c.line(L.tenantScoped(ag) ? "expect(jsonOf(data)).toEqual({ ...(jsonOf(stored) as object), tenantId: undefined });" : "expect(jsonOf(data)).toEqual(jsonOf(stored));");
         c.line('expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");');
       }
     }
@@ -410,7 +416,11 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
     const input = sc.when.input;
     const fetched = new Set<string>();
     const cache: string[] = [];
-    for (const a of sc.given.aggregates) {
+    // With tenancy the scenario's caller reads stored aggregates only in their tenant (a cross-tenant caller, or one
+    // of another tenant, cannot fetch them through the API).
+    const sp = L.model.security && requiresPrincipal(uc) ? scenarioPrincipal(L.model.security, uc, sc) : undefined;
+    const canRead = !L.model.security?.tenancy || (L.scopeOf(uc) === "tenant" && sp !== undefined && !sp.anonymous && sp.tenant === scenarioTenant(L, uc, sc));
+    for (const a of canRead ? sc.given.aggregates : []) {
       const ag = L.aggregate(a.type)!;
       const id = a.fields[ag.identity];
       if (typeof id !== "string" && typeof id !== "number") continue;
@@ -444,7 +454,7 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
         probes.push({ expr: `${F}.detail(${idLiteral(kind, id)}).queryKey`, invalidated: ok && (has("details") || hit) });
       }
     }
-    const refetches = !then.raises && Array.isArray(then.state) && then.state.length > 0;
+    const refetches = canRead && !then.raises && Array.isArray(then.state) && then.state.length > 0;
     const used = L.ca.ir.aggregates.filter((ag) => touched.has(ag.name) || (refetches && Array.isArray(then.state) && then.state.some((x) => x.aggregate === ag.name)));
     let principal: string | undefined;
     const sec = L.model.security;
@@ -464,7 +474,7 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
     }
     const status = (code: string) => useCaseErrors(L, uc).get(code) ?? 422;
     c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(uc.name)});`);
-    c.line(`const input = ${record(uc.command, input, imp, L)};`);
+    c.line(`const input = ${commandRecord(L, uc, input, imp)};`);
     if (then.raises) {
       importError(L, imp, then.raises);
       imp.value(L.contextTesting, "expectRejects");
@@ -487,8 +497,13 @@ function mutationTest(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR
         if (typeof s.id !== "string" && typeof s.id !== "number") return;
         if (!i) c.comment("A refetch shows the stored state.");
         const stored = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
+        const tenant = scenarioTenant(L, uc, sc);
+        const bound = tenant !== undefined && L.tenantScoped(ag) ? `${tenantLiteral(L, imp, tenant)}, ` : "";
         c.line(`const after${i} = await queryClient.query(${factory(ag)}.detail(${idLiteral(idKind(L, ag), s.id)}));`);
-        c.line(`expect(jsonOf(after${i})).toEqual(jsonOf(expectPresent(${repoName(ag.name)}.get(${stored}))));`);
+        if (L.tenantScoped(ag)) {
+          c.line(`const stored${i} = expectPresent(${repoName(ag.name)}.get(${bound}${stored}));`);
+          c.line(`expect(jsonOf(after${i})).toEqual({ ...(jsonOf(stored${i}) as object), tenantId: undefined });`);
+        } else c.line(`expect(jsonOf(after${i})).toEqual(jsonOf(expectPresent(${repoName(ag.name)}.get(${bound}${stored}))));`);
       });
     }
   }, ");");
@@ -511,15 +526,22 @@ function readAllowed(L: TsLayout, ag: AggregateIR, sample: Record<string, unknow
 function limitedEndpoint(L: TsLayout): { name: string; method: "GET" | "POST"; path: string; limit: RateLimitIR; secured: boolean } | undefined {
   const api = L.model.generation.typescript.api!;
   for (const uc of servedUseCases(L)) {
-    const limit = effectiveRateLimit(L.model, uc);
+    const limit = effectiveLimit(L, uc, L.scopeOf(uc));
     if (limit) return { name: uc.name, method: "POST", path: useCasePath(api, L, uc), limit, secured: requiresPrincipal(uc) };
   }
   for (const ag of L.ca.ir.aggregates) {
-    const limit = effectiveRateLimit(L.model, ag);
+    const limit = effectiveLimit(L, ag, aggregateScope(L.model.security, ag));
     const id = idKind(L, ag) === "integer" ? "1" : idKind(L, ag) === "string" ? "some-id" : "00000000-0000-4000-8000-000000000001";
     if (limit) return { name: `read_${toSnake(ag.name)}`, method: "GET", path: readPath(api, L, ag).replace(":id", id), limit, secured: requiresPrincipal(ag) };
   }
   return undefined;
+}
+
+/** The rate limit an endpoint enforces: `by: tenant` falls back to principal / ip where there is no tenant. */
+function effectiveLimit(L: TsLayout, owner: { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" }, scope: AccessScope): RateLimitIR | undefined {
+  const limit = effectiveRateLimit(L.model, owner);
+  if (!limit || !L.model.security?.tenancy) return limit;
+  return { ...limit, by: rateLimitKey(limit, scope, owner.authorize?.kind === "principal") };
 }
 
 function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): void {
@@ -565,11 +587,11 @@ function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): v
       c.line(`expect(invalid.headers.get("www-authenticate")).toBe('Bearer error="invalid_token"');`);
       c.line("const { mutations, queryClient, statuses } = connect({}, null);");
       c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(uc.name)});`);
-      c.line(`await expectRejects(() => observer.mutate(${record(uc.command, sc.when.input, imp, L)}), Unauthenticated);`);
+      c.line(`await expectRejects(() => observer.mutate(${commandRecord(L, uc, sc.when.input, imp)}), Unauthenticated);`);
       c.line("expect(statuses).toEqual([401]);");
     }, ");");
   }
-  const withRoles = isProtected.find((u) => u.authorize!.roles.length);
+  const withRoles = isProtected.find((u) => (u.authorize!.roles.length || u.authorize!.permissions?.length) && L.scopeOf(u) !== "cross_tenant");
   if (withRoles) {
     const sc = withRoles.scenarios[0]!;
     imp.value(L.security, "NotAuthorized");
@@ -577,18 +599,93 @@ function securityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): v
     imp.value("@tanstack/react-query", "MutationObserver");
     const roles = otherRoles(sec, withRoles.authorize!);
     sep();
-    c.doc(`A principal without ${withRoles.authorize!.roles.join(" / ")} is refused by ${withRoles.name}: 403, and the client rejects with NotAuthorized.`);
-    c.block(`test(${tsString(`authorization: ${withRoles.name} without a required role is 403`)}, async () =>`, () => {
+    const a = withRoles.authorize!;
+    const required = [...a.roles, ...(a.permissions ?? [])];
+    const rolesOnly = !a.permissions?.length;
+    c.doc(`A principal without ${required.join(" / ")} is refused by ${withRoles.name}: 403, and the client rejects with NotAuthorized.`);
+    c.block(`test(${tsString(`authorization: ${withRoles.name} without a required ${rolesOnly ? "role" : "role or permission"} is 403`)}, async () =>`, () => {
       useCaseSetup(L, c, withRoles, sc, imp);
       c.line(`const principal = ${principalLiteral(L, makePrincipal(sec, { roles, claims: {} }), imp)};`);
       connectLine(c, "mutations, queryClient, statuses", key, [`useCases: { ${prop(withRoles.name)}: useCase }`], "principal");
       c.line(`const observer = new MutationObserver(queryClient, mutations.${key}.${prop(withRoles.name)});`);
-      c.line(`const error = await expectRejects(() => observer.mutate(${record(withRoles.command, sc.when.input, imp, L)}), NotAuthorized);`);
-      c.line(`expect(error.details).toMatchObject({ requiredRoles: [${withRoles.authorize!.roles.map(tsString).join(", ")}] });`);
+      c.line(`const error = await expectRejects(() => observer.mutate(${commandRecord(L, withRoles, sc.when.input, imp)}), NotAuthorized);`);
+      const details = [...(a.roles.length ? [`requiredRoles: [${a.roles.map(tsString).join(", ")}]`] : []), ...(a.permissions?.length ? [`requiredPermissions: [${a.permissions.map(tsString).join(", ")}]`] : [])];
+      c.line(`expect(error.details).toMatchObject({ ${details.join(", ")} });`);
       c.line("expect(statuses).toEqual([403]);");
     }, ");");
   }
   rateLimitTest(L, c, imp, sep, limitedEndpoint(L));
+  if (sec.tenancy) tenancyTests(L, c, imp, sep);
+}
+
+/**
+ * Tenancy over HTTP (docs/09 §22): a tenant-scoped endpoint refuses a token without an active tenant (401), a path
+ * naming another tenant than the token (403, `options.tenantOf`), and limits `by: tenant` keep one bucket per tenant.
+ */
+function tenancyTests(L: TsLayout, c: Code, imp: TsImports, sep: () => void): void {
+  const sec = L.model.security!;
+  const api = L.model.generation.typescript.api!;
+  const uc = servedUseCases(L).find((u) => L.scopeOf(u) === "tenant" && requiresPrincipal(u));
+  if (!uc) return;
+  const url = tsString(`${ORIGIN}${useCasePath(api, L, uc)}`);
+  const tenantless = principalLiteral(L, { ...makePrincipal(sec, { roles: sec.roles, claims: {} }), tenant: null }, imp);
+  sep();
+  c.doc(
+    `\`POST ${useCasePath(api, L, uc)}\` runs in the caller's tenant: a valid token that names no active tenant (claim ${sec.tenancy!.claim}) answers 401 with \`error="invalid_token"\` before anything runs.`,
+  );
+  c.block(`test("tenancy: a token without an active tenant is 401", async () =>`, () => {
+    c.line(`const tenantless = ${tenantless};`);
+    c.line("const handler = createApiHandler({}, { authenticate: () => Promise.resolve(tenantless) });");
+    c.line(`const response = await handler(new Request(${url}, { method: "POST", body: "{}" }));`);
+    c.line("expect(response.status).toBe(401);");
+    c.line(`expect(response.headers.get("www-authenticate")).toBe('Bearer error="invalid_token", error_description="no active tenant"');`);
+    c.line('expect(await responseJson(response)).toMatchObject({ code: "unauthenticated", details: { error: "missing_tenant" } });');
+  }, ");");
+  sep();
+  c.doc("The tenant comes from the token only: a request whose path names another tenant (`options.tenantOf`) is 403; the same tenant passes on (to the unwired endpoint: 404).");
+  c.block(`test("tenancy: a path naming another tenant than the token is 403", async () =>`, () => {
+    c.line("let named = " + tsString(otherTenant(L)) + ";");
+    c.line("const handler = createApiHandler(");
+    c.indent(() => {
+      c.line("{},");
+      c.line("{ authenticate: () => Promise.resolve(everyone), tenantOf: () => named },");
+    });
+    c.line(");");
+    c.line(`const send = () => handler(new Request(${url}, { method: "POST", body: "{}" }));`);
+    c.line("const mismatch = await send();");
+    c.line("expect(mismatch.status).toBe(403);");
+    c.line('expect(await responseJson(mismatch)).toMatchObject({ code: "not_authorized", details: { error: "tenant_mismatch" } });');
+    c.line(`named = ${tsString(defaultTenant(L))};`);
+    c.line("expect((await send()).status).toBe(404);");
+  }, ");");
+  // Per-tenant buckets: the first tenant-scoped endpoint whose limit counts by tenant.
+  const limited = servedUseCases(L).find((u) => L.scopeOf(u) === "tenant" && effectiveLimit(L, u, "tenant")?.by === "tenant");
+  if (!limited) return;
+  const limit = effectiveLimit(L, limited, "tenant")!;
+  imp.value(L.apiModule("rate-limit"), "RateLimiter");
+  const lurl = tsString(`${ORIGIN}${useCasePath(api, L, limited)}`);
+  sep();
+  c.doc(
+    `\`POST ${useCasePath(api, L, limited)}\` counts ${limit.requests} request(s) per tenant: when one tenant has used up its bucket (429), another tenant's requests still pass (noisy-neighbour isolation).`,
+  );
+  c.block(`test(${tsString(`tenancy: the rate limit of ${limited.name} is per tenant`)}, async () =>`, () => {
+    c.line(`const other = ${principalLiteral(L, { ...makePrincipal(sec, { roles: sec.roles, claims: {}, platformRoles: sec.platformRoles.map((d) => d.name) }), tenant: otherTenant(L) }, imp)};`);
+    c.line("const handler = createApiHandler(");
+    c.indent(() => {
+      c.line("{},");
+      c.open("{", () => {
+        c.line("authenticate: (request) =>");
+        c.indent(() => c.line('Promise.resolve(request.headers.get("authorization") === "Bearer b" ? other : everyone),'));
+        c.line('rateLimiter: new RateLimiter({ now: () => Date.parse("2026-01-01T00:00:00Z") }),');
+      }, "},");
+    });
+    c.line(");");
+    c.line("const send = (token: string) =>");
+    c.indent(() => c.line(`handler(new Request(${lurl}, { method: "POST", body: "{}", headers: { authorization: token } }));`));
+    c.block(`for (let i = 0; i < ${limit.requests}; i++)`, () => c.line('expect((await send("Bearer a")).status).toBe(404);'));
+    c.line('expect((await send("Bearer a")).status).toBe(429);');
+    c.line('expect((await send("Bearer b")).status).toBe(404);');
+  }, ");");
 }
 
 /** `limited` allows its requests, then answers 429 with Retry-After and the RateLimit headers until a token refills. */
@@ -697,13 +794,14 @@ function querySecurityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => voi
       }
     }, ");");
     const auth = pq.query.authorize!;
-    if (auth.roles.length && (sample || !required)) {
+    if ((auth.roles.length || auth.permissions?.length) && (sample || !required)) {
       const base = scenarioPrincipal(sec, pq.query, sample ?? { given: {} });
-      const lacking = makePrincipal(sec, { id: base.id, roles: otherRoles(sec, auth), claims: base.claims });
+      const lacking = makePrincipal(sec, { id: base.id, roles: otherRoles(sec, auth), claims: base.claims, ...(base.tenant !== undefined ? { tenant: base.tenant } : {}) });
+      const rolesOnly = !auth.permissions?.length;
       imp.value(L.security, "NotAuthorized");
       sep();
-      c.doc(`A principal without ${auth.roles.join(" / ")} is refused by ${pq.query.name} before anything is read: 403, and the infinite query rejects with NotAuthorized.`);
-      c.block(`test(${tsString(`${pq.query.name}: without a required role is 403`)}, async () =>`, () => {
+      c.doc(`A principal without ${[...auth.roles, ...(auth.permissions ?? [])].join(" / ")} is refused by ${pq.query.name} before anything is read: 403, and the infinite query rejects with NotAuthorized.`);
+      c.block(`test(${tsString(`${pq.query.name}: without a required ${rolesOnly ? "role" : "role or permission"} is 403`)}, async () =>`, () => {
         c.block("const reader =", () => c.block("read: (): never =>", () => c.line('throw new Error("read before authorization");'), ","), ";");
         imp.value(L.persistenceRuntime, "HmacCursorCodec");
         imp.value(L.queries, queryClass(pq));
@@ -714,13 +812,14 @@ function querySecurityTests(L: TsLayout, c: Code, imp: TsImports, sep: () => voi
         c.line(factoryLine(L, ag));
         c.line(`const options = ${factory(ag)}.${queryKey(pq)}(${inputObject(L, pq, params, imp)});`);
         c.line("const error = await expectRejects(() => queryClient.infiniteQuery(options), NotAuthorized);");
-        c.line(`expect(error.details).toMatchObject({ requiredRoles: [${auth.roles.map(tsString).join(", ")}] });`);
+        const details = [...(auth.roles.length ? [`requiredRoles: [${auth.roles.map(tsString).join(", ")}]`] : []), ...(auth.permissions?.length ? [`requiredPermissions: [${auth.permissions.map(tsString).join(", ")}]`] : [])];
+        c.line(`expect(error.details).toMatchObject({ ${details.join(", ")} });`);
         c.line("expect(statuses).toEqual([403]);");
       }, ");");
     }
   }
   for (const plan of plans) {
-    const limit = effectiveRateLimit(L.model, plan.query);
+    const limit = effectiveLimit(L, plan.query, aggregateScope(L.model.security, plan.aggregate));
     if (!limit) continue;
     rateLimitTest(L, c, imp, sep, { name: plan.query.name, method: "GET", path: queryPath(api, L, plan), limit, secured: protectedQuery(L, plan) });
     break;

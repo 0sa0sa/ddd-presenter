@@ -25,7 +25,7 @@ import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
 import { tsType } from "./types.ts";
 import { readAccessFile, securityFile, usesJwt } from "./security.ts";
-import { securityTestFile } from "./security-tests.ts";
+import { rbacTestFile, securityTestFile } from "./security-tests.ts";
 
 export { usesJwt };
 
@@ -150,6 +150,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       if (sql) gen(sql.path, sql.content);
     }
   }
+  const rbac = rbacTestFile(layouts);
+  if (rbac) gen(rbac.path, rbac.content);
   if (layouts.some(hasQueries)) {
     gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", templateSections(PERSISTENCE_TS, { security: !!model.security, tenancy: !!model.security?.tenancy, rls: !!model.security?.tenancy?.rls })));
   }
@@ -160,7 +162,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     const secured = !!model.security;
     const queries = layouts.some(hasQueries);
     // With queries, query-runtime.ts reuses the client's `send` (exported only then: the file stays byte-identical otherwise).
-    const runtimeSource = templateSections(API_RUNTIME_TS, { security: secured });
+    const runtimeSource = templateSections(API_RUNTIME_TS, { security: secured, tenancy: !!model.security?.tenancy });
     const runtime = queries ? runtimeSource.replace("\nasync function send<", "\nexport async function send<") : runtimeSource;
     gen(
       P.file(P.apiModule("runtime")),
@@ -170,7 +172,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
       ),
     );
     if (secured) {
-      gen(P.file(P.apiModule("rate-limit")), template("Rate limiting of the HTTP API: a token bucket per endpoint and caller, a pluggable store, the IETF RateLimit header fields (no dependencies).", API_RATE_LIMIT_TS));
+      gen(P.file(P.apiModule("rate-limit")), template("Rate limiting of the HTTP API: a token bucket per endpoint and caller, a pluggable store, the IETF RateLimit header fields (no dependencies).", templateSections(API_RATE_LIMIT_TS, { tenancy: !!model.security?.tenancy })));
     }
     if (usesJwt(model)) {
       gen(P.file(P.apiModule("authentication")), template("Bearer JWT authentication of the HTTP API (RFC 6750, RFC 7519, RFC 8725) with jose.", API_AUTHENTICATION_TS));

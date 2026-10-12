@@ -57,7 +57,7 @@ contexts:
       - name: Invitation
         identity: id
         authorize:
-          permissions: [invitation.read]
+          permissions: [invitation.read, invitation.accept]
           allow_if: has_permission(principal, "invitation.read") or (principal.email != null and principal.email == email.value)
         fields:
           - { name: id, type: UUID }

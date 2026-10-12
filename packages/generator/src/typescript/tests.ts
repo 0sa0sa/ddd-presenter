@@ -505,7 +505,7 @@ export function principalLiteral(L: TsLayout, p: ResolvedPrincipal, imp: TsImpor
 }
 
 /** The command literal of a scenario: a cross-tenant use case's command also names its target tenant. */
-function commandRecord(L: TsLayout, uc: UseCaseIR, input: Record<string, unknown>, imp: TsImports): string {
+export function commandRecord(L: TsLayout, uc: UseCaseIR, input: Record<string, unknown>, imp: TsImports): string {
   const fields = record(uc.command, input, imp, L);
   const target = input[TENANT_FIELD];
   if (!uc.authorize?.crossTenant || !L.model.security?.tenancy || target === undefined || target === null) return fields;

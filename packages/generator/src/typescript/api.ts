@@ -3,7 +3,7 @@
  * server handler, a typed client and TanStack Query (v5) query factories (keys + queryOptions) and mutationOptions. Design notes and the
  * TkDodo rules the client follows: docs/09 §18; contract: docs/05 §8.
  */
-import { effectiveRateLimit, formatPath, requiresPrincipal, servedOverHttp, windowSeconds, type AggregateIR, type ApiSettings, type AuthorizeIR, type RateLimitIR, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
+import { aggregateScope, effectiveRateLimit, rateLimitKey, type AccessScope, formatPath, requiresPrincipal, servedOverHttp, windowSeconds, type AggregateIR, type ApiSettings, type AuthorizeIR, type RateLimitIR, type StepIR, type Type, type UseCaseIR } from "@ddd/core";
 import { useCaseClass } from "./application.ts";
 import { assemble, Code, header, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
@@ -33,8 +33,11 @@ export function servedUseCases(L: TsLayout): UseCaseIR[] {
 }
 
 /** `{ kind: "principal", roles: [...] }` / `{ kind: "public" }`: who may call an endpoint (contract). */
-function authObject(a: AuthorizeIR | undefined): string {
-  return a?.kind === "principal" ? `{ kind: "principal", roles: [${a.roles.map(tsString).join(", ")}] }` : '{ kind: "public" }';
+function authObject(a: AuthorizeIR | undefined, scope: AccessScope = "none"): string {
+  if (a?.kind !== "principal") return '{ kind: "public" }';
+  // With tenancy the contract records the permissions and whether the endpoint runs in the caller's tenant.
+  const extra = [...(a.permissions?.length ? [`permissions: [${a.permissions.map(tsString).join(", ")}]`] : []), ...(scope === "tenant" ? ["tenant: true"] : [])];
+  return `{ kind: "principal", roles: [${a.roles.map(tsString).join(", ")}]${extra.map((x) => `, ${x}`).join("")} }`;
 }
 
 /** The contract's rate limit of an endpoint (`name` is the policy name in the RateLimit headers). */
@@ -44,13 +47,16 @@ function rateLimitObject(name: string, limit: RateLimitIR | undefined): string {
 }
 
 /** Contract lines of an endpoint's authorization and rate limit (only with `security`). */
-function securityLines(c: Code, L: TsLayout, owner: { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" }, name: string): void {
+function securityLines(c: Code, L: TsLayout, owner: { authorize?: AuthorizeIR; rateLimit?: RateLimitIR | "none" }, name: string, scope: AccessScope = "none"): void {
   if (!L.model.security) return;
-  c.line(`auth: ${authObject(owner.authorize)},`);
-  const limit = rateLimitObject(name, effectiveRateLimit(L.model, owner));
+  c.line(`auth: ${authObject(owner.authorize, scope)},`);
+  const declared = effectiveRateLimit(L.model, owner);
+  // `by: tenant` counts per tenant only where there is one (else per principal, or per IP without one).
+  const effective = declared && L.model.security.tenancy ? { ...declared, by: rateLimitKey(declared, scope, owner.authorize?.kind === "principal") } : declared;
+  const limit = rateLimitObject(name, effective);
   if (strWidth(`      rateLimit: ${limit},`) <= PRINT_WIDTH) c.line(`rateLimit: ${limit},`);
   else {
-    const l = effectiveRateLimit(L.model, owner)!;
+    const l = effective!;
     c.open("rateLimit: {", () => {
       c.line(`name: ${tsString(name)},`);
       c.line(`requests: ${l.requests},`);
@@ -383,7 +389,7 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
           c.line(`input: ${uc.command}.schema,`);
           c.line(`output: ${info.returnType ? jsonSchema(L, info.returnType, imp) : "z.void()"},`);
           c.line(`errors: ${errorsObject(useCaseErrors(L, uc))},`);
-          securityLines(c, L, uc, uc.name);
+          securityLines(c, L, uc, uc.name, L.scopeOf(uc));
         }, "),");
       }
     }, ",");
@@ -400,7 +406,7 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
           c.line(`output: ${jsonName(ag.name)},`);
           const secured = !!L.model.security && requiresPrincipal(ag);
           c.line(`errors: { constraint_violation: 400, ${secured ? "unauthenticated: 401, not_authorized: 403, " : ""}aggregate_not_found: 404 },`);
-          securityLines(c, L, ag, `read_${toSnake(ag.name)}`);
+          securityLines(c, L, ag, `read_${toSnake(ag.name)}`, aggregateScope(L.model.security, ag));
         }, "),");
       }
     }, ",");
@@ -429,7 +435,7 @@ export function contextContractFile(L: TsLayout, api: ApiSettings): TsFile {
             c.line(`output: ${pageName(plan)}Json,`);
             const secured = protectedQuery(L, plan);
             c.line(`errors: { constraint_violation: 400, invalid_cursor: 400${secured ? ", unauthenticated: 401, not_authorized: 403" : ""} },`);
-            securityLines(c, L, plan.query, plan.query.name);
+            securityLines(c, L, plan.query, plan.query.name, aggregateScope(L.model.security, plan.aggregate));
           }, "),");
         }
       }, ",");
@@ -495,13 +501,17 @@ export function serverFile(P: TsPaths, Ls: TsLayout[]): TsFile {
           }, ";");
         }
         if (L.ca.ir.aggregates.length) {
-          imp.value(P.apiModule("runtime"), "readRoute");
+          if (L.ca.ir.aggregates.some((ag) => !L.tenantScoped(ag))) imp.value(P.apiModule("runtime"), "readRoute");
           c.block("readonly repositories?:", () => {
             for (const ag of L.ca.ir.aggregates) {
               const repo = `${camel(toSnake(ag.name))}Repository`;
               pickLine(c, 3, repo, `${ns}.${ag.name}Repository`, "get");
               const read = protectedAggregates(L).includes(ag) ? `, ${ns}.${readAccessName(ag)}` : "";
-              routes.push(`readRoute(contract.${key}.aggregates.${prop(toSnake(ag.name))}, (d) => d.${key}?.repositories?.${repo}${read}),`);
+              if (L.tenantScoped(ag)) {
+                // A tenant-scoped aggregate is always read through its read access (the caller's tenant only).
+                imp.value(P.apiModule("runtime"), "tenantReadRoute");
+                routes.push(`tenantReadRoute(contract.${key}.aggregates.${prop(toSnake(ag.name))}, (d) => d.${key}?.repositories?.${repo}${read}),`);
+              } else routes.push(`readRoute(contract.${key}.aggregates.${prop(toSnake(ag.name))}, (d) => d.${key}?.repositories?.${repo}${read}),`);
             }
           }, ";");
         }

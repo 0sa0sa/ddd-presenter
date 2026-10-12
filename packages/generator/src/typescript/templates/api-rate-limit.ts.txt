@@ -9,7 +9,12 @@ export interface RateLimitPolicy {
   readonly name: string;
   readonly requests: number;
   readonly windowSeconds: number;
+  //#if tenancy
+  /** `tenant`: one bucket per tenant (the caller's active tenant), so no tenant starves the others. */
+  readonly by: "principal" | "ip" | "global" | "tenant";
+  //#else
   readonly by: "principal" | "ip" | "global";
+  //#endif
 }
 
 /** A bucket as a store keeps it: the tokens left at `updatedAt` (milliseconds since the epoch). */
