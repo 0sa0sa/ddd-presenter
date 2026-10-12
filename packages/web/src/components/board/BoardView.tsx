@@ -1,4 +1,5 @@
 import { analyzeBoard, boardGhosts, boardToDrawio, boardToSvg, contextMap, parseDrawio, phaseOf, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type DrawioPage, type ModelIR, type StickyKind } from "@ddd/core";
+import { downloadBlob, downloadSvgAsPng, safeFileName } from "../../lib/download.ts";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -520,29 +521,10 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
     if (!b) return;
     const title = `${boardName ?? "ボード"}（${new Date().toLocaleDateString()}）`;
     const svg = boardToSvg(b, title);
-    const name = `${(boardName ?? "board").replace(/[\\/:*?"<>|]/g, "_")}-${new Date().toISOString().slice(0, 10)}`;
-    const download = (blob: Blob, ext: string) => {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${name}.${ext}`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    };
-    const svgBlob = new Blob([svg], { type: "image/svg+xml" });
-    if (format === "drawio") return download(new Blob([boardToDrawio(b, boardName ?? "Board")], { type: "application/xml" }), "drawio");
-    if (format === "svg") return download(svgBlob, "svg");
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.min(2, 8000 / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext("2d")!;
-      ctx.scale(scale, scale);
-      ctx.drawImage(img, 0, 0);
-      canvas.toBlob((png) => png && download(png, "png"), "image/png");
-    };
-    img.src = URL.createObjectURL(svgBlob);
+    const name = `${safeFileName(boardName ?? "board")}-${new Date().toISOString().slice(0, 10)}`;
+    if (format === "drawio") return downloadBlob(new Blob([boardToDrawio(b, boardName ?? "Board")], { type: "application/xml" }), `${name}.drawio`);
+    if (format === "svg") return downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `${name}.svg`);
+    downloadSvgAsPng(svg, `${name}.png`);
   };
 
   if (!board) return <div className="view muted">{status ?? "ボードを読み込んでいます…"}</div>;
