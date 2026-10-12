@@ -173,7 +173,7 @@ describe("tenancy and RBAC: completion and JSON Schema", () => {
   const at = (text: string, marker: string) => complete(text.replace(marker, ""), text.indexOf(marker)).items.map((i) => i.label);
 
   test("keys and values are offered", () => {
-    expect(at(replaced("    isolation: row\n", "    isolation: row\n    |\n"), "|")).toEqual(["platform_roles_claim"]);
+    expect(at(replaced("    isolation: row\n", "    isolation: row\n    |\n"), "|")).toEqual(["rls", "platform_roles_claim"]);
     expect(at(replaced("candidate: { permissions: [invitation.accept] }", "candidate: { permissions: [invitation.accept], | }"), "|")).toEqual(expect.arrayContaining(["inherits", "description"]));
     expect(at(replaced("authorize: { permissions: [invitation.issue] }", "authorize: { permissions: [|] }"), "|")).toEqual(expect.arrayContaining(["invitation.issue", "template.manage"]));
     expect(at(replaced("        tenancy: global\n", "        tenancy: |\n"), "|")).toEqual(["tenant", "global"]);

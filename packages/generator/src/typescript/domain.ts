@@ -229,12 +229,12 @@ function isAggregate(x: EntityIR | AggregateIR): x is AggregateIR {
 }
 
 /** Argument object type of a factory / operation: `{ readonly at: Instant; readonly note?: string | null }`. */
-function argsType(L: TsLayout, owner: AggregateIR, params: ParameterIR[], imp: TsImports): string {
+function argsType(L: TsLayout, owner: AggregateIR, params: ParameterIR[], imp: TsImports, leading: string[] = []): string {
   const types = L.paramTypes(owner, params);
-  const fields = params.map((p) => {
+  const fields = [...leading, ...params.map((p) => {
     const t = types.get(p.name)!;
     return `readonly ${prop(p.name)}${t.k === "optional" ? "?" : ""}: ${tsType(t, imp, L)}`;
-  });
+  })];
   return `{ ${fields.join("; ")} }`;
 }
 
@@ -269,15 +269,22 @@ function entityClass(L: TsLayout, c: Code, en: EntityIR | AggregateIR, imp: TsIm
   const hasOps = !!ag && ag.operations.length > 0;
   const ctx: ExprContext = { L, imports: imp, self: "this", selfOwner: name };
   const details = `, ${prop(en.identity)}: this.${prop(en.identity)}`;
+  // Tenant-scoped aggregates carry the tenant they belong to (docs/09 §22): set on creation, never changed.
+  const tenant = !!ag && L.tenantScoped(ag);
+  if (tenant) {
+    imp.value(L.security, "TenantIdSchema");
+    imp.type(L.security, "TenantId");
+  }
 
   c.line();
-  c.block(`const ${props} = z.strictObject(`, () => c.lines_(fieldSchemas(L, name, en.fields, imp)), ");");
+  c.block(`const ${props} = z.strictObject(`, () => c.lines_([...(tenant ? ["tenantId: TenantIdSchema,"] : []), ...fieldSchemas(L, name, en.fields, imp)]), ");");
   c.line(`export type ${props} = z.output<typeof ${props}>;`);
   c.line(`export type ${name}Input = z.input<typeof ${props}>;`);
   c.line();
   const doc = [en.description ?? (ag ? `Aggregate root ${name}.` : `Entity ${name}.`), ""];
   if (ag) {
     doc.push(`Identity: ${en.identity}. Instances are immutable; operations return a Transition with the new state.`);
+    if (tenant) doc.push("Tenant-scoped: `tenantId` is the tenant it belongs to, set by its factory from the caller's tenant and never changed.");
     if (ag.entities.length) doc.push(`Internal entities: ${ag.entities.map((e) => e.name).join(", ")}.`);
   } else {
     doc.push(`Part of aggregate ${parent?.name}; changed only through ${parent?.name} operations. Identity: ${en.identity}.`);
@@ -289,6 +296,10 @@ function entityClass(L: TsLayout, c: Code, en: EntityIR | AggregateIR, imp: TsIm
       c.line(`static readonly schema = z.custom<${name}>((value) => value instanceof ${name}, "Expected a ${name}");`);
       c.line();
     }
+    if (tenant) {
+      c.doc("The tenant this aggregate belongs to (immutable).");
+      c.line("readonly tenantId: TenantId;");
+    }
     for (const f of en.fields) {
       if (f.description) c.doc(f.description);
       c.line(`readonly ${prop(f.name)}: ${tsType(fieldTypes.get(f.name)!, imp, L)};`);
@@ -296,6 +307,7 @@ function entityClass(L: TsLayout, c: Code, en: EntityIR | AggregateIR, imp: TsIm
     c.line();
     c.block(`private constructor(props: ${props})`, () => {
       c.line("super();");
+      if (tenant) c.line("this.tenantId = props.tenantId;");
       for (const f of en.fields) c.line(`this.${prop(f.name)} = props.${prop(f.name)};`);
       c.line("Object.freeze(this);");
     });
@@ -313,6 +325,7 @@ function entityClass(L: TsLayout, c: Code, en: EntityIR | AggregateIR, imp: TsIm
       c.line();
       c.block(`#props(): ${props}`, () => {
         c.block("return", () => {
+          if (tenant) c.line("tenantId: this.tenantId,");
           for (const f of en.fields) c.line(`${prop(f.name)}: this.${prop(f.name)},`);
         }, ";");
       });
@@ -322,7 +335,7 @@ function entityClass(L: TsLayout, c: Code, en: EntityIR | AggregateIR, imp: TsIm
         c.block(`with(changes: Partial<${name}Input>): ${name}`, () => c.line(`return ${name}.from({ ...this.#props(), ...changes });`));
       } else {
         c.doc("Candidate state: the changes applied to a copy (construct-time invariants run on it).");
-        c.block(`#with(changes: Partial<${name}Input>): ${name}`, () => c.line(`return ${name}.from({ ...this.#props(), ...changes });`));
+        c.block(`#with(changes: Partial<${tenant ? `Omit<${name}Input, "tenantId">` : `${name}Input`}>): ${name}`, () => c.line(`return ${name}.from({ ...this.#props(), ...changes });`));
       }
     }
     if (construct.length) {
@@ -416,10 +429,13 @@ function factories(L: TsLayout, c: Code, ag: AggregateIR, imp: TsImports): void 
     c.line();
     const d = [f.description ?? `Create a new ${ag.name}.`, "", "Factory: construct-time invariants are checked on the new instance."];
     if (f.emits.length) d.push(`Emits: ${f.emits.map((e) => e.name).join(", ")}.`);
+    if (L.tenantScoped(ag)) d.push("`tenantId` is the caller's tenant (the use case passes it; it never comes from the input).");
     c.doc(d.join("\n"));
-    c.block(`static ${prop(f.name)}(${paramSignature(L, ag, f.parameters, imp)}): Transition<${ag.name}>`, () => {
-      destructure(c, f.parameters, used);
-      const fields = values.map(({ fd, e }) => entry(prop(fd.name), emitExpr(e, ctx)));
+    const tenant = L.tenantScoped(ag);
+    const signature = tenant ? `args: ${argsType(L, ag, f.parameters, imp, ["readonly tenantId: TenantId"])}` : paramSignature(L, ag, f.parameters, imp);
+    c.block(`static ${prop(f.name)}(${signature}): Transition<${ag.name}>`, () => {
+      destructure(c, tenant ? [{ name: "tenant_id", type: "String", required: true, path: [] }, ...f.parameters] : f.parameters, tenant ? new Set([...used, "tenant_id"]) : used);
+      const fields = [...(tenant ? ["tenantId"] : []), ...values.map(({ fd, e }) => entry(prop(fd.name), emitExpr(e, ctx)))];
       c.line(`const aggregate = ${ag.name}.from({ ${fields.join(", ")} });`);
       emitEvents(L, c, ag, f.emits, new Set(f.parameters.map((p) => p.name)), imp);
     });
@@ -469,6 +485,8 @@ function emitEvents(L: TsLayout, c: Code, ag: AggregateIR, emits: EventEmissionI
       if (fd.value !== undefined) return `${prop(fd.name)}: ${emitExpr(expr(L, [...fd.path, "value"]), ctx)}`;
       return entry(prop(fd.name), params.has(fd.name) ? ident(fd.name) : `aggregate.${prop(fd.name)}`);
     });
+    // Events of tenant-scoped aggregates carry the tenant, so their consumers (policies) act in it.
+    if (L.eventHasTenant(em.name)) fields.unshift("tenantId: aggregate.tenantId");
     const push = `events.push(${em.name}.create({ ${fields.join(", ")} }));`;
     if (em.when !== undefined) c.block(`if (${unparen(emitExpr(expr(L, [...em.path, "when"]), ctx))})`, () => c.line(push));
     else c.line(push);
@@ -495,10 +513,12 @@ export function eventsFile(L: TsLayout): TsFile {
     imp.type(L.runtime, "DomainEvent", "EventType");
     const schema = `${ev.name}Schema`;
     const type = tsString(eventType(L.ca.ir.name, ev.name));
+    const tenant = L.eventHasTenant(ev.name);
+    if (tenant) imp.value(L.security, "TenantIdSchema");
     c.line();
-    readonlyStrictObject(c, schema, [`type: z.literal(${type}),`, ...ev.fields.map((f) => `${prop(f.name)}: ${zodSchema(f.type, imp, L)},`)]);
+    readonlyStrictObject(c, schema, [`type: z.literal(${type}),`, ...(tenant ? ["tenantId: TenantIdSchema,"] : []), ...ev.fields.map((f) => `${prop(f.name)}: ${zodSchema(f.type, imp, L)},`)]);
     c.line();
-    c.doc(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.`);
+    c.doc(`Emitted by ${ev.sources.map((s) => `${s.aggregate}.${s.member}`).join(", ")}.${tenant ? " Carries the tenant (`tenantId`) of the aggregate it comes from." : ""}`);
     c.line(`export type ${ev.name} = z.output<typeof ${schema}>;`);
     c.doc(`Payload of \`${ev.name}.create\`: the event without its \`type\`.`);
     c.line(`export type ${ev.name}Input = Omit<z.input<typeof ${schema}>, "type">;`);
@@ -542,10 +562,14 @@ export function commandsFile(L: TsLayout): TsFile {
     imp.value("zod", "z");
     imp.value(L.runtime, "parseWith");
     const fields = `${uc.command}Fields`;
+    // A cross-tenant use case names the tenant it acts in (docs/09 §22).
+    const target = !!uc.authorize?.crossTenant && !!L.model.security?.tenancy;
+    if (target) imp.value(L.security, "TenantIdSchema");
     c.line();
-    readonlyStrictObject(c, fields, fieldSchemas(L, uc.command, uc.input, imp));
+    readonlyStrictObject(c, fields, [...(target ? ["tenantId: TenantIdSchema,"] : []), ...fieldSchemas(L, uc.command, uc.input, imp)]);
     c.line();
-    c.doc(`Input of use case \`${uc.name}\`${uc.actor ? ` (actor: ${uc.actor})` : ""}.`);
+    c.doc(`Input of use case \`${uc.name}\`${uc.actor ? ` (actor: ${uc.actor})` : ""}.${target ? " `tenantId` is the tenant it acts in (cross-tenant: platform roles only)." : ""}`);
+
     c.line(`export type ${uc.command} = z.output<typeof ${fields}>;`);
     c.line(`export type ${uc.command}Input = z.input<typeof ${fields}>;`);
     c.line();

@@ -1,4 +1,4 @@
-import { resolveType, type AggregateIR, type ContextAnalysis, type ModelIR, type Type } from "@ddd/core";
+import { eventIsTenantScoped, isTenantScoped, resolveType, useCaseScope, type AccessScope, type AggregateIR, type ContextAnalysis, type ModelIR, type Type, type UseCaseIR } from "@ddd/core";
 import { kebab } from "./names.ts";
 
 export type DomainModule = "errors" | "enums" | "value-objects" | "entities" | "aggregates" | "events" | "commands" | "rules";
@@ -164,6 +164,22 @@ export class TsLayout extends TsPaths {
       m.set(p.name, p.required ? r.type : { k: "optional", inner: r.type });
     }
     return m;
+  }
+
+  /** Whether rows of the aggregate belong to one tenant (`security.tenancy`, docs/09 §22). */
+  tenantScoped(ag: Pick<AggregateIR, "tenancy">): boolean {
+    return isTenantScoped(this.model.security, ag);
+  }
+
+  /** Whether an event of this context carries the tenant id (emitted by tenant-scoped aggregates). */
+  eventHasTenant(event: string): boolean {
+    const ev = this.ca.events.get(event);
+    return !!ev && eventIsTenantScoped(this.model.security, this.ca.ir, ev.sources);
+  }
+
+  /** Where a use case runs (none without tenancy). */
+  scopeOf(uc: UseCaseIR): AccessScope {
+    return useCaseScope(this.model.security, this.ca.ir, uc);
   }
 
   resolve(src: string): Type {

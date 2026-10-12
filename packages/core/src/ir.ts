@@ -95,6 +95,12 @@ export interface TenancyIR extends Located {
   /** Type of the tenant id: `type`, else the type of a principal claim read from the same JWT claim, else String. */
   type: "String" | "UUID";
   isolation: "row";
+  /**
+   * PostgreSQL row level security as defense in depth (`rls: on`, the default): the DDL enables and forces a tenant
+   * policy and repositories / readers set `app.tenant_id` per transaction. `off` generates neither; the tenant
+   * filter in every generated statement (the primary control) is the same either way.
+   */
+  rls: boolean;
   /** JWT claim holding the platform roles (default `platform_roles`). */
   platformRolesClaim: string;
 }

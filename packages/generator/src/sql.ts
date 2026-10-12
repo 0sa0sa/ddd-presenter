@@ -72,6 +72,8 @@ export type SqlArg =
   | { kind: "param"; name: string }
   | { kind: "value"; value: unknown; column: ColumnIR }
   | { kind: "principal"; name: string }
+  /** The tenant the request runs in (tenant-scoped tables; always applies). */
+  | { kind: "tenant" }
   | { kind: "search" }
   | { kind: "key"; index: number }
   | { kind: "limit" };
@@ -102,6 +104,7 @@ export interface RepositorySql {
 }
 
 export function repositorySql(t: TableIR): RepositorySql {
+  if (t.tenant) return tenantRepositorySql(t, t.tenant);
   const ref = tableRef(t);
   const id = t.identity;
   const selectList = [...t.columns.map(selectExpr), VERSION_COLUMN];
@@ -136,6 +139,54 @@ export function repositorySql(t: TableIR): RepositorySql {
   };
   return { select, insert, update };
 }
+
+/**
+ * Statements of a tenant-scoped table (docs/09 §22): the tenant is the first value of every statement and every
+ * WHERE starts with it, so isolation never depends on row level security alone. `tenant_id` is inserted once and never
+ * updated (an aggregate does not move between tenants). The identity stays the primary key (ids are UUIDs, unique
+ * across tenants): an insert whose id another tenant already uses conflicts instead of creating a second row.
+ */
+function tenantRepositorySql(t: TableIR, tenant: ColumnIR): RepositorySql {
+  const ref = tableRef(t);
+  const id = t.identity;
+  const all = [tenant, ...t.columns];
+  const selectList = [...t.columns.map(selectExpr), VERSION_COLUMN];
+  const select = {
+    text: `${list(selectList, "", "SELECT ")}\nFROM ${ref}\nWHERE ${ident(tenant.name)} = $1::${cast(tenant.sql)} AND ${ident(id.name)} = $2::${cast(id.sql)}`,
+    args: [{ kind: "column", column: tenant.name } as SqlArg, { kind: "column", column: id.name } as SqlArg],
+  };
+  const cols = all.map((c) => ident(c.name));
+  const values = all.map((c, i) => `$${i + 1}::${cast(c.sql)}`);
+  const insert = {
+    text: [
+      `INSERT INTO ${ref} (`,
+      ...[...cols, VERSION_COLUMN].map((c, i, a) => `  ${c}${i < a.length - 1 ? "," : ""}`),
+      `) VALUES (`,
+      ...[...values, "1"].map((v, i, a) => `  ${v}${i < a.length - 1 ? "," : ""}`),
+      `)`,
+      `ON CONFLICT (${ident(id.name)}) DO NOTHING`,
+      `RETURNING ${VERSION_COLUMN}`,
+    ].join("\n"),
+    args: all.map((c) => ({ kind: "column", column: c.name }) as SqlArg),
+  };
+  const idIndex = all.indexOf(id) + 1;
+  const sets = all.flatMap((c, i) => (c === id || c === tenant ? [] : [`${ident(c.name)} = $${i + 1}::${cast(c.sql)}`]));
+  const update = {
+    text: [
+      `UPDATE ${ref} SET`,
+      ...[...sets, `${VERSION_COLUMN} = ${VERSION_COLUMN} + 1`].map((s, i, a) => `  ${s}${i < a.length - 1 ? "," : ""}`),
+      `WHERE ${ident(tenant.name)} = $1::${cast(tenant.sql)}`,
+      `  AND ${ident(id.name)} = $${idIndex}::${cast(id.sql)}`,
+      `  AND ${VERSION_COLUMN} = $${all.length + 1}::bigint`,
+      `RETURNING ${VERSION_COLUMN}`,
+    ].join("\n"),
+    args: [...all.map((c) => ({ kind: "column", column: c.name }) as SqlArg), { kind: "version" } as SqlArg],
+  };
+  return { select, insert, update };
+}
+
+/** `SELECT set_config('app.tenant_id', $1, true)`: the tenant of the current transaction for row level security. */
+export const SET_TENANT_SQL = "SELECT set_config('app.tenant_id', $1::text, true)";
 
 // ---------------------------------------------------------------------------
 // Query reader
@@ -196,6 +247,8 @@ export function querySql(plan: QueryPlan, v: QueryVariant): SqlStatement {
     return `$${args.length}::${sql}`;
   };
   const where: string[] = [];
+  // A tenant-scoped table: the caller's tenant first, always (never an optional filter).
+  if (plan.table.tenant) where.push(`${ident(plan.table.tenant.name)} = ${arg({ kind: "tenant" }, cast(plan.table.tenant.sql))}`);
   for (const { filter, column } of plan.filters) {
     const lhs = filter.op === "eq" || filter.op === "ne" ? ident(column.name) : orderExpr(column);
     if (filter.param !== undefined) {
@@ -286,6 +339,19 @@ function indexName(...parts: string[]): string {
   return `${name.slice(0, MAX_IDENTIFIER_LENGTH - 9)}_${hash}`;
 }
 
+/** The row level security policy of a tenant-scoped table (fails closed: no tenant set → no row, no write). */
+function rlsDdl(t: TableIR, tenant: ColumnIR): string[] {
+  const setting = `NULLIF(current_setting('app.tenant_id', true), '')${tenant.sql === "uuid" ? "::uuid" : ""}`;
+  return [
+    `ALTER TABLE ${tableRef(t)} ENABLE ROW LEVEL SECURITY;`,
+    `ALTER TABLE ${tableRef(t)} FORCE ROW LEVEL SECURITY;`,
+    `DROP POLICY IF EXISTS tenant_isolation ON ${tableRef(t)};`,
+    `CREATE POLICY tenant_isolation ON ${tableRef(t)}`,
+    `  USING (${ident(tenant.name)} = ${setting})`,
+    `  WITH CHECK (${ident(tenant.name)} = ${setting});`,
+  ];
+}
+
 function columnDdl(c: ColumnIR, identity: boolean): string {
   const parts = [ident(c.name), c.sql];
   if (identity) parts.push("PRIMARY KEY");
@@ -299,7 +365,7 @@ function columnDdl(c: ColumnIR, identity: boolean): string {
  * context, a table per aggregate, the trigram / prefix / equality indexes of the searched columns and a btree index
  * matching each query's order. Idempotent (`IF NOT EXISTS`); it does not migrate existing tables.
  */
-export function contextDdl(header: string[], context: string, tables: TableIR[], plans: QueryPlan[]): string {
+export function contextDdl(header: string[], context: string, tables: TableIR[], plans: QueryPlan[], rls = false): string {
   const out: string[] = [...header.map((h) => (h ? `-- ${h}` : "--")), ""];
   if (plans.some((p) => p.search?.mode === "trigram")) out.push("CREATE EXTENSION IF NOT EXISTS pg_trgm;", "");
   const schema = tables[0]?.schema ?? context;
@@ -310,11 +376,30 @@ export function contextDdl(header: string[], context: string, tables: TableIR[],
   };
   for (const t of tables) {
     out.push("");
-    out.push(`-- Aggregate ${t.aggregate}. version: optimistic locking (incremented by every save).`);
+    if (t.tenant) {
+      out.push(`-- Aggregate ${t.aggregate} (tenant-scoped). tenant_id: the tenant a row belongs to (set on insert, never updated);`);
+      out.push("-- every generated statement filters by it. version: optimistic locking (incremented by every save).");
+    } else {
+      out.push(`-- Aggregate ${t.aggregate}${tables.some((x) => x.tenant) ? " (shared by every tenant)" : ""}. version: optimistic locking (incremented by every save).`);
+    }
     out.push(`CREATE TABLE IF NOT EXISTS ${tableRef(t)} (`);
     const cols = [...t.columns.map((c) => columnDdl(c, c === t.identity)), `${VERSION_COLUMN} bigint NOT NULL`];
+    if (t.tenant) {
+      cols.splice(1, 0, columnDdl(t.tenant, false));
+      // Composite key per tenant: lookups by (tenant_id, id) and same-tenant foreign keys (REFERENCES … (tenant_id, id)).
+      cols.push(`UNIQUE (${ident(t.tenant.name)}, ${ident(t.identity.name)})`);
+    }
     cols.forEach((c, i) => out.push(`  ${c}${i < cols.length - 1 ? "," : ""}`));
     out.push(");");
+    if (t.tenant && rls) {
+      out.push("");
+      out.push("-- Row level security: defense in depth behind the tenant_id filter of every statement. Connect as a role that");
+      out.push("-- does not own the table and has no BYPASSRLS (owners and superusers bypass it; FORCE covers the owner too).");
+      out.push("-- The policy reads app.tenant_id, which the repositories / readers set per transaction (set_config(..., true),");
+      out.push("-- SET LOCAL semantics: it ends with the transaction, so pooled connections never carry it over). Without");
+      out.push("-- it the policy matches no row and refuses every write (fail closed).");
+      out.push(...rlsDdl(t, t.tenant));
+    }
   }
   for (const p of plans) {
     const t = p.table;
@@ -333,12 +418,13 @@ export function contextDdl(header: string[], context: string, tables: TableIR[],
     // The order without the relevance key (what the query uses when it does not search). The primary key already
     // serves an order by the identity alone (scanned either way).
     const keys = p.keys.filter((k) => !k.relevance);
-    // Rows scoped to the caller by equality (`principal:` filters) lead the index: one range per caller.
-    const scoped = [...new Set(p.filters.filter(({ filter }) => filter.principal !== undefined && filter.op === "eq").map(({ column }) => column))];
+    // Rows scoped to the caller by equality (`principal:` filters) lead the index: one range per caller. The tenant
+    // leads before them (every statement of a tenant-scoped table filters by it).
+    const scoped = [...(t.tenant ? [t.tenant] : []), ...new Set(p.filters.filter(({ filter }) => filter.principal !== undefined && filter.op === "eq").map(({ column }) => column))];
     if (scoped.length || !(keys.length === 1 && keys[0]!.column === t.identity)) {
       const body = `(${[...scoped.map((c) => ident(c.name)), ...keys.map((k) => `${orderExpr(k.column!)} ${k.direction.toUpperCase()}`)].join(", ")})`;
       const when = p.keys[0]?.relevance ? " when it does not search (a search orders by relevance first)" : "";
-      const per = scoped.length ? `, per ${scoped.map((c) => c.path.join(".")).join(", ")} of the caller` : "";
+      const per = scoped.length ? `, per ${scoped.map((c) => (c === t.tenant ? "tenant" : `${c.path.join(".")} of the caller`)).join(", ")}` : "";
       addIndex(t, indexName(t.name, p.query.name, "order_idx"), body, `Keyset order of ${p.query.name}${per}${when}.`);
     }
   }
@@ -359,8 +445,8 @@ export function psycopgText(text: string): string {
 export function contextSqlFile(model: ModelIR, ca: ContextAnalysis): { path: string; content: string } | undefined {
   const queries = ca.ir.queries ?? [];
   if (!queries.length) return undefined;
-  const tables = ca.ir.aggregates.map((a) => tableOf(ca.ir, ca.fieldTypes, a));
-  const plans = queries.map((q) => planQuery(ca.ir, ca.fieldTypes, q)!);
+  const tables = ca.ir.aggregates.map((a) => tableOf(ca.ir, ca.fieldTypes, a, model.security));
+  const plans = queries.map((q) => planQuery(ca.ir, ca.fieldTypes, q, model.security)!);
   const header = [
     `Generated by DDD Presenter from model "${model.project}". DO NOT EDIT.`,
     "Regenerate with `ddd generate`.",
@@ -369,6 +455,14 @@ export function contextSqlFile(model: ModelIR, ca: ContextAnalysis): { path: str
     "its queries need. Idempotent (IF NOT EXISTS): apply it to create a database. It does not alter existing",
     "tables; derive migrations by comparing a database with this file (e.g. with a schema diff tool).",
   ];
+  if (tables.some((t) => t.tenant)) {
+    header.push(
+      "",
+      "Multi-tenant (row isolation, docs/09 §22): tenant-scoped tables carry tenant_id and every generated statement",
+      `filters by it${model.security?.tenancy?.rls ? "; row level security enforces the same as defense in depth." : " (security.tenancy.rls: off — no row level security is generated)."}`,
+    );
+  }
   const schema = tables[0]?.schema ?? ca.ir.name.toLowerCase();
-  return { path: `sql/${schema}.sql`, content: contextDdl(header, schema, tables, plans) };
+  return { path: `sql/${schema}.sql`, content: contextDdl(header, schema, tables, plans, !!model.security?.tenancy?.rls) };
+
 }

@@ -89,7 +89,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
 
   gen(P.file(P.runtime), template("Base classes, value schemas and helpers shared by the generated domain code (zod + decimal.js only).", RUNTIME_TS));
   gen(P.file(P.adapters), template("Reference adapters for the clock and id ports (usable in every context).", ADAPTERS_TS));
-  gen(P.file(P.testing), template("In-memory test doubles and assertion helpers shared by every context.", TESTING_TS));
+  const tenancy = { tenancy: !!model.security?.tenancy, platform: !!model.security?.platformRoles.length };
+  gen(P.file(P.testing), template("In-memory test doubles and assertion helpers shared by every context.", templateSections(TESTING_TS, tenancy)));
 
   const contexts = [...analysis.contexts.values()];
   gen(P.file(`${P.generated}/index`), rootIndex(model, P, contexts.map((c) => c.ir.name)));
@@ -150,7 +151,7 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     }
   }
   if (layouts.some(hasQueries)) {
-    gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", templateSections(PERSISTENCE_TS, { security: !!model.security })));
+    gen(P.file(P.persistenceRuntime), template("Read side and PostgreSQL runtime: SQL client port, cursor codec (HMAC-SHA256), keyset paging, pg_trgm similarity, optimistic locking (no model-specific code).", templateSections(PERSISTENCE_TS, { security: !!model.security, tenancy: !!model.security?.tenancy, rls: !!model.security?.tenancy?.rls })));
   }
   const api = model.generation.typescript.api;
   if (api) {

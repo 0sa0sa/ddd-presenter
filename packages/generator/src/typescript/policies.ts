@@ -1,4 +1,5 @@
-import { formatPath, type Analysis, type PolicyInfo, type PolicyIR, type RelationshipIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
+import { DEFAULT_TENANT_IDS, formatPath, type Analysis, type PolicyInfo, type PolicyIR, type RelationshipIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
+
 import { assemble, Code, SCAFFOLD_HEADER, TsImports, tsString } from "./code.ts";
 import { entry, eventType, file, type TsFile } from "./domain.ts";
 import { emitExpr, type ExprContext } from "./expr.ts";
@@ -29,6 +30,8 @@ function resolved(L: TsLayout): Resolved[] {
 }
 
 export const policyClass = (p: PolicyIR) => `${pascal(p.name)}Policy`;
+/** The use case works on tenant-scoped data: the policy runs it in the tenant of its event (docs/09 §22). */
+const inTenant = (L: TsLayout, uc: UseCaseIR) => L.scopeOf(uc) === "tenant";
 const runnerInterface = (uc: UseCaseIR) => `${pascal(uc.name)}Runner`;
 const translatorInterface = (upstream: string) => `${upstream}Translator`;
 const isAcl = (r: Resolved) => r.info.crossContext && r.info.relationship?.pattern === "anticorruption_layer";
@@ -88,6 +91,12 @@ export function policiesFile(L: TsLayout): TsFile | undefined {
   for (const uc of runners) {
     imp.type(L.mod("commands"), uc.command);
     c.line();
+    if (inTenant(L, uc)) {
+      imp.type(L.security, "TenantContext");
+      c.doc(`What a policy needs from use case \`${uc.name}\` (${pascal(uc.name)}UseCase satisfies it): it runs in the tenant it is given.`);
+      c.block(`export interface ${runnerInterface(uc)}`, () => c.line(`execute(command: ${uc.command}, context: TenantContext): Promise<unknown>;`));
+      continue;
+    }
     c.doc(`What a policy needs from use case \`${uc.name}\` (${pascal(uc.name)}UseCase satisfies it).`);
     c.block(`export interface ${runnerInterface(uc)}`, () => c.line(`execute(command: ${uc.command}): Promise<unknown>;`));
   }
@@ -131,6 +140,7 @@ export function policiesFile(L: TsLayout): TsFile | undefined {
         `Run: ${r.useCase.name}`,
         ...(args.length ? [`Args: ${args.join(", ")}`] : []),
         ...(isAcl(r) ? [`Translated by: ${translatorInterface(r.info.event.context)}.${prop(p.name)}`] : []),
+        ...(inTenant(L, r.useCase) ? ["Tenant: the event's (the use case runs in the tenant the event belongs to)"] : []),
       ].join("\n"),
     );
     c.block(`export class ${policyClass(p)}`, () => {
@@ -144,14 +154,20 @@ export function policiesFile(L: TsLayout): TsFile | undefined {
       c.doc(`Runs ${r.useCase.name} for one ${r.info.event.name}.`);
       const call = commandCall(L, r, imp);
       // `_event`: the command takes nothing from the event (TypeScript's convention for an unused parameter).
-      const eventParam = isAcl(r) || /\bevent\b/.test(call) ? "event" : "_event";
+      const tenant = inTenant(L, r.useCase);
+      const eventParam = isAcl(r) || tenant || /\bevent\b/.test(call) ? "event" : "_event";
       c.block(`async handle(${eventParam}: ${ev}): Promise<void>`, () => {
         if (isAcl(r)) {
           c.line(`const command = await this.#translator.${prop(p.name)}(event, ${call});`);
         } else {
           c.line(`const command = ${call};`);
         }
-        c.line("await this.#useCase.execute(command);");
+        if (tenant) {
+          c.comment("The reaction runs in the tenant of the event (never another one, never without one).");
+          c.line("await this.#useCase.execute(command, { tenantId: event.tenantId });");
+        } else {
+          c.line("await this.#useCase.execute(command);");
+        }
       });
       c.line();
       c.doc("Event bus entry point (EventHandler).");
@@ -310,6 +326,21 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
     imp.type(L.mod("commands"), uc.command);
     imp.type(L.policies, runnerInterface(uc));
     c.line();
+    if (inTenant(L, uc)) {
+      imp.type(L.security, "TenantContext");
+      c.doc(`Stands in for use case ${uc.name} and records the commands it receives and the tenants it runs in.`);
+      c.block(`class Recording${pascal(uc.name)} implements ${runnerInterface(uc)}`, () => {
+        c.line(`readonly commands: ${uc.command}[] = [];`);
+        c.line("readonly contexts: TenantContext[] = [];");
+        c.line();
+        c.block(`execute(command: ${uc.command}, context: TenantContext): Promise<void>`, () => {
+          c.line("this.commands.push(command);");
+          c.line("this.contexts.push(context);");
+          c.line("return Promise.resolve();");
+        });
+      });
+      continue;
+    }
     c.doc(`Stands in for use case ${uc.name} and records the commands it receives.`);
     c.block(`class Recording${pascal(uc.name)} implements ${runnerInterface(uc)}`, () => {
       c.line(`readonly commands: ${uc.command}[] = [];`);
@@ -355,6 +386,10 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
     imp.value(L.policies, policyClass(r.policy));
     lines.push(`const policy${suffix} = new ${policyClass(r.policy)}({ ${kw.join(", ")} });`);
     const payload = info.fields.map((f) => `${prop(f.name)}: ${sampleLiteral(sample[f.name], f.type, U, imp)}`);
+    if (U.eventHasTenant(r.info.event.name)) {
+      imp.value(L.security, "tenantId");
+      payload.unshift(`tenantId: tenantId(${tsString(DEFAULT_TENANT_IDS[L.model.security!.tenancy!.type])})`);
+    }
     lines.push(`const event${suffix}: ${ev} = { type: ${ev}.type${payload.length ? `, ${payload.join(", ")}` : ""} };`);
 
     // Expected command fields: event paths navigate the sample; ports and literals are re-emitted.
@@ -407,6 +442,10 @@ export function policyTestFile(L: TsLayout, analysis: Analysis): TsFile | undefi
         c.lines_(a.lines);
         c.line(`await policy.handle(${a.event});`);
         c.line("expect(useCase.commands).toHaveLength(1);");
+        if (inTenant(L, r.useCase)) {
+          c.comment("The use case runs in the tenant of the event.");
+          c.line(`expect(useCase.contexts).toEqual([{ tenantId: ${a.event}.tenantId }]);`);
+        }
         imp.value(L.contextTesting, "expectPresent");
         if (a.asserts.length) {
           c.line("const command = expectPresent(useCase.commands[0]);");

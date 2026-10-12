@@ -292,6 +292,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("claim", "アクティブなテナントを運ぶ JWT のクレーム（例: org_id）。テナントはこのクレームだけから決まる"),
     K("type", "テナント ID の型: String / UUID（省略で同じクレームを読む principal の claims の型、なければ String）"),
     K("isolation", "分離の方式: row（既定・唯一。共有スキーマ + tenant_id 列 + PostgreSQL の行レベルセキュリティ）"),
+    K("rls", "PostgreSQL の行レベルセキュリティ（多層防御）: on（既定。ENABLE / FORCE と tenant_isolation のポリシー、トランザクションごとの set_config）/ off（生成しない。どの文にも付く tenant_id の条件は同じ）"),
     K("platform_roles_claim", "プラットフォームのロールを読むクレーム（既定 platform_roles。roles_claim とは別）"),
   ],
   roleDef: [
@@ -958,6 +959,11 @@ function valueCompletions(s: Snapshot, scope: Scope, pos: Extract<Position, { ki
       { label: "global", kind: "value" as const, detail: "全テナントで共有する参照データ", sortRank: 1 },
     ];
   if (c === "security:tenancy" && key === "type") return ["UUID", "String"].map((v, i) => ({ label: v, kind: "value" as const, sortRank: i }));
+  if (c === "security:tenancy" && key === "rls")
+    return [
+      { label: "on", kind: "value" as const, detail: "既定。行レベルセキュリティを多層防御として生成（BYPASSRLS でないアプリ用のロールで接続する）", sortRank: 0 },
+      { label: "off", kind: "value" as const, detail: "生成しない（アプリのロールを BYPASSRLS なしにできないマネージド DB など）", sortRank: 1 },
+    ];
   if (c === "security:tenancy" && key === "isolation") return [{ label: "row", kind: "value" as const, detail: "共有スキーマ + tenant_id 列 + PostgreSQL の行レベルセキュリティ", sortRank: 0 }];
   if (c === "roleDef" && key === "inherits") return (s.model?.security?.roles ?? []).map((r) => ({ label: r, kind: "value" as const, detail: "ロール" }));
   if ((c === "authorize" || c === "queryAuthorize") && key === "permissions" && s.model?.security)

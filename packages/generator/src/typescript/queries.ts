@@ -25,16 +25,20 @@ import {
   type TableIR,
   tableOf,
   type Type,
+  usesPermissions,
 } from "@ddd/core";
+
 import { Code, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
 import type { TsLayout } from "./layout.ts";
 import { camel, ident, pascal, prop, toSnake } from "./names.ts";
 import { activeKeys, itemColumns, queryStatements, repositorySql, type SqlArg, type SqlStatement } from "../sql.ts";
-import { principalLiteral, testFile } from "./tests.ts";
+import { defaultTenant, otherTenant, principalLiteral, tenantLiteral, testFile, withTenant } from "./tests.ts";
+
 import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { tsType, zodSchema } from "./types.ts";
-import { rolesLiteral, rolesText } from "./security.ts";
+import { requirementText, rolesLiteral } from "./security.ts";
+import { requirementLiteral } from "./application.ts";
 
 /** `name(params): result {` at class-member depth, broken like Prettier when it does not fit. */
 function method(c: Code, name: string, params: string[], result: string, body: () => void): void {
@@ -54,7 +58,7 @@ import { canonicalInstant, expectEqual, inputValue, record } from "./values.ts";
 // ---------------------------------------------------------------------------
 
 export function contextPlans(L: TsLayout): QueryPlan[] {
-  return (L.ca.ir.queries ?? []).map((q) => planQuery(L.ca.ir, L.ca.fieldTypes, q)!);
+  return (L.ca.ir.queries ?? []).map((q) => planQuery(L.ca.ir, L.ca.fieldTypes, q, L.model.security)!);
 }
 
 export function hasQueries(L: TsLayout): boolean {
@@ -63,7 +67,12 @@ export function hasQueries(L: TsLayout): boolean {
 
 /** Tables of every aggregate of the context (a context with queries persists all of them). */
 export function contextTables(L: TsLayout): TableIR[] {
-  return L.ca.ir.aggregates.map((a) => tableOf(L.ca.ir, L.ca.fieldTypes, a));
+  return L.ca.ir.aggregates.map((a) => tableOf(L.ca.ir, L.ca.fieldTypes, a, L.model.security));
+}
+
+/** Row level security is generated (tenancy with `rls: on`): repositories and readers set the tenant per transaction. */
+function rls(L: TsLayout): boolean {
+  return !!L.model.security?.tenancy?.rls;
 }
 
 const Q = (plan: QueryPlan) => pascal(plan.query.name);
@@ -198,6 +207,7 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
       }, "],");
       c.line(`size: ${q.page.size},`);
       c.line(`maxSize: ${q.page.maxSize},`);
+      if (plan.table.tenant) c.line(`tenant: ${tsString(plan.table.tenant.name)},`);
     }, ";");
     // Reader port.
     imp.type(L.runtime, "Awaitable");
@@ -215,6 +225,8 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
     imp.value(L.runtime, "parseWith");
     const secured = protectedQuery(L, plan);
     const scope = scopeMembers(L, plan);
+    const tenant = !!plan.table.tenant;
+    const rbac = usesPermissions(L.model.security) || !!L.model.security?.tenancy;
     const required = secured || plan.params.some((p) => p.type.k !== "optional");
     const rest = [...(plan.search ? [searchProp(plan)] : []), "cursor", "limit"];
     c.line();
@@ -226,7 +238,7 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
         ...(secured
           ? [
               "",
-              `Authorize: ${rolesText(auth!.roles)}. \`principal\` is checked first, before the input and before anything is read: Unauthenticated without one${[...(auth!.roles.length ? ["without a required role"] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${prop(m.member)}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${prop(m.member)}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal.`,
+              `Authorize: ${requirementText(auth!.roles, auth!.permissions ?? [])}. \`principal\` is checked first, before the input and before anything is read: Unauthenticated without one${tenant ? " or without an active tenant" : ""}${[...(auth!.roles.length || auth!.permissions?.length ? [`without a required ${auth!.permissions?.length ? "role or permission" : "role"}`] : []), ...scope.filter((m) => m.optional).map((m) => `without principal.${prop(m.member)}`)].map((x, i) => `${i ? " or " : ", NotAuthorized "}${x}`).join("")}.${tenant ? " The rows are those of the caller's tenant only." : ""}${scope.length ? ` The rows are scoped to the caller (${scope.map((m) => `principal.${prop(m.member)}`).join(", ")}), in SQL like every filter.` : ""} Cursors are bound to the principal${tenant ? " and its tenant" : ""}.`,
             ]
           : L.model.security && auth?.kind === "public"
             ? ["", "Authorize: public (no principal needed)."]
@@ -247,9 +259,15 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
       if (secured) imp.type(L.security, "Principal");
       const signature = `async execute(input: ${inputName(plan)}${required ? "" : " = {}"}${secured ? ", principal: Principal | null" : ""}): Promise<${pageName(plan)}>`;
       const body = () => {
-        if (secured) {
+        if (secured && rbac) {
+          const check = tenant ? "authorizeInTenant" : "authorize";
+          imp.value(L.security, check);
+          c.line(`${check}(principal, ${tsString(q.name)}, ${requirementLiteral({ roles: auth!.roles, permissions: auth!.permissions ?? [] })});`);
+        } else if (secured) {
           imp.value(L.security, "authorize");
           c.line(`authorize(principal, ${tsString(q.name)}, ${rolesLiteral(auth!.roles)});`);
+        }
+        if (secured) {
           for (const m of scope.filter((x) => x.optional)) {
             imp.value(L.security, "NotAuthorized");
             const v = ident(m.member);
@@ -270,11 +288,13 @@ export function applicationQueriesFile(L: TsLayout): TsFile {
           return;
         }
         const values = scope.map((m) => (m.optional ? (prop(m.member) === ident(m.member) ? prop(m.member) : `${prop(m.member)}: ${ident(m.member)}`) : `${prop(m.member)}: principal.${prop(m.member)}`));
-        const one = `const scope = { principal: principal.id, values: ${values.length ? `{ ${values.join(", ")} }` : "{}"} };`;
+        const one = `const scope = { principal: principal.id, values: ${values.length ? `{ ${values.join(", ")} }` : "{}"}${tenant ? ", tenant: principal.tenantId" : ""} };`;
         if (strWidth(`    ${one}`) <= PRINT_WIDTH) c.line(one);
         else c.block("const scope =", () => {
           c.line("principal: principal.id,");
-          c.block("values:", () => values.forEach((v) => c.line(`${v},`)), ",");
+          if (values.length) c.block("values:", () => values.forEach((v) => c.line(`${v},`)), ",");
+          else c.line("values: {},");
+          if (tenant) c.line("tenant: principal.tenantId,");
         }, ";");
         c.line("return await runQuery(");
         c.indent(() => {
@@ -415,12 +435,17 @@ export function rowsFile(L: TsLayout): TsFile {
     const ag = t.aggregate;
     imp.value(L.mod("aggregates"), ag);
     c.line();
-    c.doc(`Columns of ${t.schema}.${t.name} in the order the INSERT / UPDATE statements bind them.`);
-    c.line(`export const ${columnsName(ag)} = [${t.columns.map((x) => tsString(x.name)).join(", ")}] as const;`);
+    c.doc(`Columns of ${t.schema}.${t.name} in the order the INSERT / UPDATE statements bind them${t.tenant ? " (the tenant first)" : ""}.`);
+    const columnList = `export const ${columnsName(ag)} = [${[...(t.tenant ? [t.tenant] : []), ...t.columns].map((x) => tsString(x.name)).join(", ")}] as const;`;
+    if (strWidth(columnList) <= PRINT_WIDTH) c.line(columnList);
+    else c.open(`export const ${columnsName(ag)} = [`, () => [...(t.tenant ? [t.tenant] : []), ...t.columns].forEach((x) => c.line(`${tsString(x.name)},`)), "] as const;");
     c.line();
     c.doc(`A ${ag} as a row: what the repository binds and the in-memory readers filter and order on. Value objects are flattened; ${t.columns.some((x) => x.sql === "jsonb") ? "lists, entities and optional value objects are JSON (model field names)." : "there are no jsonb columns."}`);
     c.block(`export function ${toRowName(ag)}(aggregate: ${ag}): SqlRow`, () => {
-      c.block("return", () => t.columns.forEach((col) => c.line(`${col.name}: ${columnValue(col, "aggregate", L)},`)), ";");
+      c.block("return", () => {
+        if (t.tenant) c.line(`${t.tenant.name}: aggregate.tenantId,`);
+        t.columns.forEach((col) => c.line(`${col.name}: ${columnValue(col, "aggregate", L)},`));
+      }, ";");
     });
     c.line();
     c.block(`export function ${toValuesName(ag)}(aggregate: ${ag}): unknown[]`, () => {
@@ -430,7 +455,7 @@ export function rowsFile(L: TsLayout): TsFile {
     c.line();
     c.doc(`The ${ag} of a row, validated like any new instance (schemas, normalization, construct-time invariants).`);
     c.block(`export function ${fromRowName(ag)}(row: SqlRow): ${ag}`, () => {
-      const lines = rowObject(t, [...L.fieldTypes(ag).keys()], imp, L);
+      const lines = [...(t.tenant ? [`tenantId: row.${t.tenant.name},`] : []), ...rowObject(t, [...L.fieldTypes(ag).keys()], imp, L)];
       // The input is validated by `from`; `as never` only skips the static check of the untyped row values.
       c.line(`return ${ag}.from({`);
       c.indent(() => c.lines_(lines));
@@ -498,6 +523,8 @@ function argLiteral(a: SqlArg): string {
       return `{ value: ${encodedLiteral(a.value, a.column)} }`;
     case "principal":
       return `{ principal: ${tsString(prop(a.name))} }`;
+    case "tenant":
+      return "{ tenant: true }";
     case "search":
       return "{ search: true }";
     case "key":
@@ -529,8 +556,9 @@ export function postgresFile(L: TsLayout): TsFile {
     const ag = t.aggregate;
     const idType = tsType(L.tsFieldType(ag, L.aggregate(ag)!.identity)!, imp, L);
     const sql = repositorySql(t);
+    const store = t.tenant ? "PostgresTenantStore" : "PostgresStore";
     imp.type(L.persistenceRuntime, "TableMapping");
-    imp.value(L.persistenceRuntime, "PostgresStore");
+    imp.value(L.persistenceRuntime, store);
     imp.type(L.mod("aggregates"), ag);
     imp.type(L.ports, `${ag}Repository`);
     imp.value(L.rows, toValuesName(ag), fromRowName(ag));
@@ -549,6 +577,26 @@ export function postgresFile(L: TsLayout): TsFile {
       c.line(`fromRow: ${fromRowName(ag)},`);
     }, ";");
     c.line();
+    if (t.tenant) {
+      imp.type(L.security, "TenantId");
+      const id = ident(L.aggregate(ag)!.identity);
+      c.doc(
+        [
+          `${ag}Repository on PostgreSQL with optimistic locking, one tenant per call: every statement filters by the tenant (another tenant's ${ag} is not found; saving one for another tenant is TenantMismatch). \`save\` inserts what it did not load and updates what it loaded only if the row still has the loaded version (else ConcurrencyConflict). Use one instance per unit of work (it remembers the versions it read).`,
+          ...(rls(L) ? ["", "Row level security: it sets `app.tenant_id` for the transaction before its statements, so `client` must be one connection inside a transaction (the unit of work's)."] : []),
+        ].join("\n"),
+      );
+      c.block(`export class Postgres${ag}Repository implements ${ag}Repository`, () => {
+        c.line(`readonly #store: PostgresTenantStore<${ag}, ${idType}>;`);
+        c.line();
+        c.block("constructor(client: SqlClient)", () => c.line(`this.#store = new PostgresTenantStore(client, ${tableName(ag)});`));
+        c.line();
+        method(c, "get", ["tenant: TenantId", `${id}: ${idType}`], `Promise<${ag} | null>`, () => c.line(`return this.#store.get(tenant, ${id});`));
+        c.line();
+        c.block(`save(tenant: TenantId, aggregate: ${ag}): Promise<void>`, () => c.line("return this.#store.save(tenant, aggregate);"));
+      });
+      continue;
+    }
     c.doc(
       `${ag}Repository on PostgreSQL with optimistic locking: \`save\` inserts what it did not load and updates what it loaded only if the row still has the loaded version (else ConcurrencyConflict). Use one instance per unit of work (it remembers the versions it read).`,
     );
@@ -565,7 +613,7 @@ export function postgresFile(L: TsLayout): TsFile {
   for (const plan of contextPlans(L)) {
     const st = queryStatements(plan);
     imp.type(L.persistenceRuntime, "QueryStatements", "QueryRequest", "QueryResult");
-    imp.value(L.persistenceRuntime, "readSql");
+    if (!(plan.table.tenant && rls(L))) imp.value(L.persistenceRuntime, "readSql");
     imp.value(L.queries, specName(plan));
     imp.type(L.queries, readerName(plan), paramsName(plan), itemName(plan));
     imp.value(L.rows, itemFromRow(plan));
@@ -580,7 +628,26 @@ export function postgresFile(L: TsLayout): TsFile {
       }
     }, ";");
     c.line();
-    c.doc(`${readerName(plan)} on PostgreSQL.`);
+    if (plan.table.tenant && rls(L)) {
+      imp.type(L.persistenceRuntime, "SqlTransactions");
+      imp.value(L.persistenceRuntime, "readSqlInTenant");
+      c.doc(
+        `${readerName(plan)} on PostgreSQL: each page is read in its own transaction with \`app.tenant_id\` set for row level security (the statement filters by the tenant as well). \`db\`: PGlite as it is, or \`poolTransactions(pool)\` for node-postgres.`,
+      );
+      c.block(`export class Postgres${readerName(plan)} implements ${readerName(plan)}`, () => {
+        c.line("readonly #db: SqlTransactions;");
+        c.line();
+        c.block("constructor(db: SqlTransactions)", () => c.line("this.#db = db;"));
+        c.line();
+        method(c, "read", [`request: QueryRequest<${paramsName(plan)}>`], `Promise<QueryResult<${itemName(plan)}>>`, () => {
+          const call = `return readSqlInTenant(this.#db, ${specName(plan)}, ${sqlName(plan)}, request, ${itemFromRow(plan)});`;
+          if (strWidth(`    ${call}`) <= PRINT_WIDTH) c.line(call);
+          else c.open("return readSqlInTenant(", () => ["this.#db", specName(plan), sqlName(plan), "request", itemFromRow(plan)].forEach((a) => c.line(`${a},`)), ");");
+        });
+      });
+      continue;
+    }
+    c.doc(plan.table.tenant ? `${readerName(plan)} on PostgreSQL (every statement filters by the request's tenant).` : `${readerName(plan)} on PostgreSQL.`);
     c.block(`export class Postgres${readerName(plan)} implements ${readerName(plan)}`, () => {
       c.line("readonly #client: SqlClient;");
       c.line();
@@ -648,13 +715,19 @@ class GivenTable {
   emit(c: Code): void {
     const { L, aggregate, imp } = this;
     imp.type(L.mod("aggregates"), `${aggregate}Input`);
+    const type = givenType(L, aggregate);
     for (const [key, n] of this.consts) {
       const rows = JSON.parse(key) as Record<string, unknown>[];
       c.line();
-      if (!rows.length) c.line(`const ${n}: ReadonlyArray<${aggregate}Input> = [];`);
-      else c.open(`const ${n}: ReadonlyArray<${aggregate}Input> = [`, () => rows.forEach((r) => c.line(`${record(aggregate, r, imp, L)},`)), "];");
+      if (!rows.length) c.line(`const ${n}: ReadonlyArray<${type}> = [];`);
+      else c.open(`const ${n}: ReadonlyArray<${type}> = [`, () => rows.forEach((r) => c.line(`${record(aggregate, r, imp, L)},`)), "];");
     }
   }
+}
+
+/** The input type of given rows: a tenant-scoped aggregate's tenant is added by `setup`. */
+function givenType(L: TsLayout, aggregate: string): string {
+  return L.tenantScoped(L.aggregate(aggregate)!) ? `Omit<${aggregate}Input, "tenantId">` : `${aggregate}Input`;
 }
 
 /** A value of `t` different from `avoid` (for "cursor reused with other parameters"). */
@@ -767,6 +840,19 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
       body.line(`await expectRejects(() => ${exec(inputObject(L, plan, params, imp, ["limit: 0"]))}, ConstraintViolation);`);
     }, ");");
     if (secured) authorizationTests(L, plan, body, imp, q.scenarios[0]);
+    if (plan.table.tenant) {
+      const sc = sample ?? q.scenarios[0];
+      const data = given.name(sc?.given.aggregates ?? []);
+      body.line();
+      body.doc(`Tenant isolation: the same data stored in another tenant (${otherTenant(L)}) is never read for a caller of ${defaultTenant(L)}.`);
+      body.block(`test("tenancy: another tenant's rows are not read", async () =>`, () => {
+        body.line(`const query = setup(${data}, ${tsString(otherTenant(L))});`);
+        caller(sc);
+        body.line(`const page = await ${exec(inputObject(L, plan, sc?.when.params ?? {}, imp))};`);
+        body.line("expect(page.items).toEqual([]);");
+        body.line("expect(page.nextCursor).toBeNull();");
+      }, ");");
+    }
     if (!sample) {
       body.comment("No scenario expects two or more items: the cursor tests need at least two results.");
       return;
@@ -834,9 +920,24 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
         body.line("expect(next.items).toHaveLength(1);");
       }, ");");
     }
+    if (plan.table.tenant) {
+      const p = scenarioPrincipal(sec!, q, sample);
+      imp.value(L.contextTesting, "expectRejects", "expectPresent");
+      imp.value(L.persistenceRuntime, "InvalidCursor");
+      body.line();
+      body.doc("A cursor is bound to the tenant it was issued in: the same principal acting in another tenant gets InvalidCursor.");
+      body.block(`test("tenancy: a cursor is rejected in another tenant", async () =>`, () => {
+        body.line(`const query = setup(${data});`);
+        caller(sample);
+        body.line(`const first = await ${exec(inputObject(L, plan, params, imp, ["limit: 1"]))};`);
+        body.line(`const cursor = expectPresent(first.nextCursor, "nextCursor");`);
+        body.line(`const elsewhere = ${principalLiteral(L, { ...p, tenant: otherTenant(L) }, imp)};`);
+        body.line(`await expectRejects(() => query.execute(${inputObject(L, plan, params, imp, ["cursor"])}, elsewhere), InvalidCursor);`);
+      }, ");");
+    }
     if (secured) {
       const p = scenarioPrincipal(sec!, q, sample);
-      const other = makePrincipal(sec!, { id: otherPrincipalId(sec!, p.id), roles: p.roles, claims: p.claims });
+      const other = makePrincipal(sec!, { id: otherPrincipalId(sec!, p.id), roles: p.roles, claims: p.claims, ...(p.tenant !== undefined ? { tenant: p.tenant } : {}), ...(p.platformRoles ? { platformRoles: p.platformRoles } : {}) });
       imp.value(L.contextTesting, "expectRejects", "expectPresent");
       imp.value(L.persistenceRuntime, "InvalidCursor");
       body.line();
@@ -859,12 +960,26 @@ export function queryTestFile(L: TsLayout, plan: QueryPlan): TsFile {
   c.line(`const cursors = new HmacCursorCodec({ secrets: [${tsString(TEST_SECRET)}] });`);
   given.emit(c);
   c.line();
-  c.doc(`A ${queryClass(plan)} over an in-memory repository holding \`aggregates\`.`);
-  c.block(`function setup(aggregates: ReadonlyArray<${ag.name}Input>): ${queryClass(plan)}`, () => {
-    c.line(`const repository = new InMemory${ag.name}Repository();`);
-    c.line(`repository.seed(...aggregates.map((input) => ${ag.name}.from(input)));`);
-    c.line(`return new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
-  });
+  if (plan.table.tenant) {
+    c.doc(`A ${queryClass(plan)} over an in-memory repository holding \`aggregates\` in \`tenant\`.`);
+    c.line("function setup(");
+    c.indent(() => {
+      c.line(`aggregates: ReadonlyArray<${givenType(L, ag.name)}>,`);
+      c.line(`tenant = ${tsString(defaultTenant(L))},`);
+    });
+    c.block(`): ${queryClass(plan)}`, () => {
+      c.line(`const repository = new InMemory${ag.name}Repository();`);
+      c.line(`repository.seed(...aggregates.map((input) => ${ag.name}.from({ ...input, tenantId: tenant })));`);
+      c.line(`return new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
+    });
+  } else {
+    c.doc(`A ${queryClass(plan)} over an in-memory repository holding \`aggregates\`.`);
+    c.block(`function setup(aggregates: ReadonlyArray<${ag.name}Input>): ${queryClass(plan)}`, () => {
+      c.line(`const repository = new InMemory${ag.name}Repository();`);
+      c.line(`repository.seed(...aggregates.map((input) => ${ag.name}.from(input)));`);
+      c.line(`return new ${queryClass(plan)}({ reader: new InMemory${readerName(plan)}(repository), cursors });`);
+    });
+  }
   c.line();
   c.doc("Up to `count` pages from the first one, following `nextCursor`.");
   c.line("async function fetchPages(");
@@ -914,11 +1029,12 @@ function authorizationTests(L: TsLayout, plan: QueryPlan, c: Code, imp: TsImport
   imp.value(L.security, "Unauthenticated");
   imp.value(L.queries, queryClass(plan));
   c.line();
-  const lacking = auth.roles.length ? otherRoles(sec, auth) : undefined;
+  const lacking = auth.roles.length || auth.permissions?.length ? otherRoles(sec, auth) : undefined;
   const missing = scopeMembers(L, plan).filter((m) => m.optional);
+  const tenant = !!plan.table.tenant;
   c.doc(
     [
-      `${q.name} checks the caller first: without a principal Unauthenticated${lacking ? `, without ${auth.roles.join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${prop(m.member)}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
+      `${q.name} checks the caller first: without a principal Unauthenticated${tenant ? ", without an active tenant Unauthenticated" : ""}${lacking ? `, without ${[...auth.roles, ...(auth.permissions ?? [])].join(" / ")} NotAuthorized` : ""}${missing.length ? `, without ${missing.map((m) => `principal.${prop(m.member)}`).join(" / ")} (the rows are scoped by it) NotAuthorized` : ""}.`,
       "Nothing is read before: the reader fails the test when called.",
     ].join("\n"),
   );
@@ -928,16 +1044,22 @@ function authorizationTests(L: TsLayout, plan: QueryPlan, c: Code, imp: TsImport
     c.line(`const input = ${inputObject(L, plan, sample?.when.params ?? {}, imp)};`);
     c.line("const anonymous = await expectRejects(() => query.execute(input, null), Unauthenticated);");
     c.line(`expect(anonymous.details).toEqual({ action: ${action} });`);
+    if (tenant) {
+      c.line(`const tenantless = ${principalLiteral(L, { ...base, tenant: null }, imp)};`);
+      c.line("const noTenant = await expectRejects(() => query.execute(input, tenantless), Unauthenticated);");
+      c.line(`expect(noTenant.details).toEqual({ action: ${action}, error: "missing_tenant" });`);
+    }
     if (lacking || missing.length) imp.value(L.security, "NotAuthorized");
     if (lacking) {
-      const p = makePrincipal(sec, { id: base.id, roles: lacking, claims: base.claims });
+      const p = makePrincipal(sec, { id: base.id, roles: lacking, claims: base.claims, ...(base.tenant !== undefined ? { tenant: base.tenant } : {}) });
       c.line(`const lacking = ${principalLiteral(L, p, imp)};`);
       c.line("const refused = await expectRejects(() => query.execute(input, lacking), NotAuthorized);");
-      c.line(`expect(refused.details).toEqual({ action: ${action}, requiredRoles: ${rolesLiteral(auth.roles)} });`);
+      const required = [...(auth.roles.length ? [`requiredRoles: ${rolesLiteral(auth.roles)}`] : []), ...(auth.permissions?.length ? [`requiredPermissions: ${rolesLiteral(auth.permissions)}`] : [])];
+      c.line(`expect(refused.details).toEqual({ action: ${action}, ${required.join(", ")} });`);
     }
     missing.forEach((m, i) => {
       const claims = { ...base.claims, [m.member]: null };
-      const p = makePrincipal(sec, { id: base.id, roles: base.roles, claims });
+      const p = makePrincipal(sec, { id: base.id, roles: base.roles, claims, ...(base.tenant !== undefined ? { tenant: base.tenant } : {}) });
       const v = `unscoped${missing.length > 1 ? String(i + 1) : ""}`;
       c.line(`const ${v} = ${principalLiteral(L, p, imp)};`);
       c.line(`const ${v}Error = await expectRejects(() => query.execute(input, ${v}), NotAuthorized);`);
@@ -995,11 +1117,16 @@ export function persistenceTestFile(L: TsLayout): TsFile {
       imp.value(L.mod("aggregates"), ag);
       imp.value(L.rows, toRowName(ag), fromRowName(ag));
       imp.value(L.postgres, `Postgres${ag}Repository`, tableName(ag));
+      const aggregateLiteral = t.tenant ? `${ag}.from(${withTenant(record(ag, rec, imp, L), tsString(defaultTenant(L)))})` : `${ag}.from(${record(ag, rec, imp, L)})`;
       c.doc(`A ${ag} written as a row and read back is the same aggregate (validated on load).`);
       c.block(`test(${tsString(`${ag}: row round trip`)}, () =>`, () => {
-        c.line(`const aggregate = ${ag}.from(${record(ag, rec, imp, L)});`);
+        c.line(`const aggregate = ${aggregateLiteral};`);
         c.line(`expect(jsonOf(${fromRowName(ag)}(${toRowName(ag)}(aggregate)))).toEqual(jsonOf(aggregate));`);
       }, ");");
+      if (t.tenant) {
+        tenantRepositoryTests(L, c, t, aggregateLiteral, imp);
+        continue;
+      }
       c.line();
       c.doc(
         "Optimistic locking: an aggregate the repository did not load is inserted (version 1); one it loaded is updated only at the loaded version. No row back (a lost race) is a ConcurrencyConflict.",
@@ -1061,6 +1188,61 @@ export function persistenceTestFile(L: TsLayout): TsFile {
     }, ");");
   }, ");");
   return testFile(L, module, `PostgreSQL mapping, optimistic locking, cursor codec and trigram similarity of the ${L.ca.ir.name} context (no database needed).`, imp, c.toString());
+}
+
+/**
+ * The PostgreSQL repository of a tenant-scoped aggregate against a scripted client: the tenant is the first value of
+ * every statement, saving for another tenant never reaches the database, optimistic locking as usual, and (with row
+ * level security) the tenant is set per transaction and checked to hold.
+ */
+function tenantRepositoryTests(L: TsLayout, c: Code, t: TableIR, aggregateLiteral: string, imp: TsImports): void {
+  const ag = t.aggregate;
+  const id = prop(L.aggregate(ag)!.identity);
+  const security = rls(L);
+  imp.value(L.security, "TenantMismatch");
+  const tenant = tenantLiteral(L, imp, defaultTenant(L));
+  const other = tenantLiteral(L, imp, otherTenant(L));
+  /** Statements without the row level security ones (set_config / current_setting). */
+  const data = (v: string) => `${v}.texts.filter((text) => !text.includes("app.tenant_id"))`;
+  c.line();
+  c.doc(
+    `Optimistic locking per tenant: the tenant is the first value of every statement (and of the WHERE), an aggregate the repository did not load is inserted, one it loaded is updated at the loaded version, a lost race is a ConcurrencyConflict.${security ? " Each call first sets app.tenant_id for the transaction (row level security); the first one checks that it holds." : ""}`,
+  );
+  c.block(`test(${tsString(`${ag}: tenant-bound insert, update, conflicts`)}, async () =>`, () => {
+    c.line(`const aggregate = ${aggregateLiteral};`);
+    c.line(`const tenant = ${tenant};`);
+    c.line(
+      security
+        ? "const client = scripted([], [{ tenant }], [{ version: 1 }], [], [{ version: 2 }], [], []);"
+        : "const client = scripted([{ version: 1 }], [{ version: 2 }], []);",
+    );
+    c.line(`const repository = new Postgres${ag}Repository(client);`);
+    c.line("await repository.save(tenant, aggregate);");
+    c.line("await repository.save(tenant, aggregate);");
+    c.line("await expectRejects(() => repository.save(tenant, aggregate), ConcurrencyConflict);");
+    c.line(`expect(${data("client")}).toEqual([${tableName(ag)}.insert, ${tableName(ag)}.update, ${tableName(ag)}.update]);`);
+    c.line(`expect(client.values.filter((values) => values.length > 1).map((values) => values[0])).toEqual([tenant, tenant, tenant]);`);
+    c.line(`const loaded = scripted(${security ? "[], [{ tenant }], " : ""}[{ ...${toRowName(ag)}(aggregate), version: "7" }]);`);
+    c.line(`const found = await new Postgres${ag}Repository(loaded).get(tenant, aggregate.${id});`);
+    c.line("expect(jsonOf(found)).toEqual(jsonOf(aggregate));");
+    c.line(`expect(loaded.values.at(-1)).toEqual([tenant, aggregate.${id}]);`);
+  }, ");");
+  c.line();
+  c.doc("An aggregate of one tenant is never stored for another: TenantMismatch before any statement.");
+  c.block(`test(${tsString(`${ag}: saving for another tenant is refused`)}, async () =>`, () => {
+    c.line("const client = scripted();");
+    c.line(`await expectRejects(() => new Postgres${ag}Repository(client).save(${other}, ${aggregateLiteral}), TenantMismatch);`);
+    c.line("expect(client.texts).toEqual([]);");
+  }, ");");
+  if (security) {
+    c.line();
+    c.doc("Row level security needs the tenant to hold for the transaction: outside one (autocommit) the repository refuses to run instead of silently reading nothing.");
+    c.block(`test(${tsString(`${ag}: row level security needs a transaction`)}, async () =>`, () => {
+      c.line("const client = scripted([], [{ tenant: \"\" }]);");
+      c.line(`const repository = new Postgres${ag}Repository(client);`);
+      c.line(`await expect(repository.get(${tenant}, ${aggregateLiteral}.${id})).rejects.toThrow("transaction");`);
+    }, ");");
+  }
 }
 
 /** `show_trgm('staff@example.com')` on PostgreSQL 18 (pg_trgm), sorted. */

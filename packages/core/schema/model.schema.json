@@ -1184,6 +1184,20 @@
                 "row"
               ]
             },
+            "rls": {
+              "description": "PostgreSQL row level security as defense in depth: on (default) or off. The tenant filter of the generated statements applies either way.",
+              "anyOf": [
+                {
+                  "enum": [
+                    "on",
+                    "off"
+                  ]
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
             "platform_roles_claim": {
               "description": "JWT claim holding the platform roles (default platform_roles).",
               "type": "string",

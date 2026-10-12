@@ -1,4 +1,23 @@
-import { deriveViolations, derivedTestName, makePrincipal, otherRoles, scenarioPrincipal, type ResolvedPrincipal, type SecurityIR, type AggregateIR, type AggregateScenarioIR, type ScenarioThenIR, type Type, type UseCaseIR, type UseCaseScenarioIR } from "@ddd/core";
+import {
+  DEFAULT_TENANT_IDS,
+  deriveViolations,
+  derivedTestName,
+  makePrincipal,
+  OTHER_TENANT_IDS,
+  otherRoles,
+  scenarioPrincipal,
+  TENANT_FIELD,
+  usesPermissions,
+  type ResolvedPrincipal,
+  type SecurityIR,
+  type AggregateIR,
+  type AggregateScenarioIR,
+  type ScenarioThenIR,
+  type Type,
+  type UseCaseIR,
+  type UseCaseScenarioIR,
+} from "@ddd/core";
+
 import { depParams, repoName, useCaseAuthorization, useCaseClass, useCaseDeps } from "./application.ts";
 import { assemble, Code, header, relativeSpecifier, TsImports, tsString } from "./code.ts";
 import { file, type TsFile } from "./domain.ts";
@@ -20,16 +39,21 @@ export function testingFile(L: TsLayout): TsFile {
   c.comment("Shared test doubles (unit of work, clock, ids, event publisher, assertions).");
   c.line(`export * from "${relativeSpecifier(mod, L.testing)}";`);
   for (const ag of L.ca.ir.aggregates) {
-    imp.value(L.testing, "InMemoryRepository");
+    const base = L.tenantScoped(ag) ? "InMemoryTenantRepository" : "InMemoryRepository";
+    imp.value(L.testing, base);
     imp.type(L.testing, "FakeUnitOfWork");
     imp.type(L.ports, `${ag.name}Repository`);
     imp.type(L.mod("aggregates"), ag.name);
     const idType = tsType(L.tsFieldType(ag.name, ag.identity)!, imp, L);
     c.line();
-    c.doc(`In-memory ${ag.name}Repository. Writes are staged until the unit of work commits.`);
+    c.doc(
+      L.tenantScoped(ag)
+        ? `In-memory ${ag.name}Repository of tenant-scoped aggregates (another tenant's are not found, saving for another tenant fails). Writes are staged until the unit of work commits.`
+        : `In-memory ${ag.name}Repository. Writes are staged until the unit of work commits.`,
+    );
     c.line(`export class InMemory${ag.name}Repository`);
     c.indent(() => {
-      c.line(`extends InMemoryRepository<${ag.name}, ${idType}>`);
+      c.line(`extends ${base}<${ag.name}, ${idType}>`);
       c.line(`implements ${ag.name}Repository`);
     });
     c.line("{");
@@ -178,9 +202,41 @@ function recordAsserts(L: TsLayout, c: Code, target: string, owner: string, rec:
   }
 }
 
-export function build(L: TsLayout, owner: string, kind: "vo" | "entity" | "aggregate", rec: Record<string, unknown>, imp: TsImports): string {
+export function build(L: TsLayout, owner: string, kind: "vo" | "entity" | "aggregate", rec: Record<string, unknown>, imp: TsImports, tenant?: string): string {
   imp.value(L.typeModule(kind), owner);
-  return `${owner}.${kind === "vo" ? "create" : "from"}(${record(owner, rec, imp, L)})`;
+  const fields = record(owner, rec, imp, L);
+  // A tenant-scoped aggregate belongs to a tenant: the scenario's (the default test tenant unless given).
+  const ag = kind === "aggregate" ? L.aggregate(owner) : undefined;
+  if (ag && L.tenantScoped(ag)) return `${owner}.from(${withTenant(fields, tsString(tenant ?? defaultTenant(L)))})`;
+  return `${owner}.${kind === "vo" ? "create" : "from"}(${fields})`;
+}
+
+/** `{ tenantId: <tenant>, … }`: an object literal with the tenant first. */
+export function withTenant(fields: string, tenant: string): string {
+  return fields === "{}" ? `{ tenantId: ${tenant} }` : fields.replace(/^\{ /, `{ tenantId: ${tenant}, `);
+}
+
+/** The tenant generated tests run in (given aggregates are seeded into it). */
+export function defaultTenant(L: TsLayout): string {
+  return DEFAULT_TENANT_IDS[L.model.security!.tenancy!.type];
+}
+
+/** Another tenant (cross-tenant isolation tests). */
+export function otherTenant(L: TsLayout): string {
+  return OTHER_TENANT_IDS[L.model.security!.tenancy!.type];
+}
+
+/** The tenant a use case scenario's data lives in: the target tenant of a cross-tenant use case, else the default. */
+export function scenarioTenant(L: TsLayout, uc: UseCaseIR, sc: UseCaseScenarioIR): string | undefined {
+  if (!L.model.security?.tenancy) return undefined;
+  const target = sc.when.input[TENANT_FIELD];
+  return uc.authorize?.crossTenant && target !== undefined && target !== null ? String(target) : defaultTenant(L);
+}
+
+/** `tenantId("…")`: a typed tenant id literal. */
+export function tenantLiteral(L: TsLayout, imp: TsImports, tenant: string): string {
+  imp.value(L.security, "tenantId");
+  return `tenantId(${tsString(tenant)})`;
 }
 
 export function aggregateTestFile(L: TsLayout, ag: AggregateIR): TsFile | undefined {
@@ -211,7 +267,10 @@ function aggregateScenario(L: TsLayout, c: Code, ag: AggregateIR, sc: AggregateS
       const member = w.kind === "operation" ? ag.operations.find((o) => o.name === w.operation)! : ag.factories.find((f) => f.name === w.factory)!;
       const types = L.paramTypes(ag, member.parameters);
       const set = member.parameters.filter((p) => p.name in w.args);
-      const args = set.length ? `{ ${set.map((p) => `${prop(p.name)}: ${typedValue(w.args[p.name], types.get(p.name)!, imp, L)}`).join(", ")} }` : "";
+      // A factory of a tenant-scoped aggregate takes the tenant it creates the aggregate in.
+      const tenantArg = w.kind === "factory" && L.tenantScoped(ag) ? [`tenantId: ${tenantLiteral(L, imp, defaultTenant(L))}`] : [];
+      const entries = [...tenantArg, ...set.map((p) => `${prop(p.name)}: ${typedValue(w.args[p.name], types.get(p.name)!, imp, L)}`)];
+      const args = entries.length ? `{ ${entries.join(", ")} }` : "";
       if (w.kind === "factory") imp.value(L.mod("aggregates"), ag.name);
       call = w.kind === "operation" ? `aggregate.${prop(w.operation)}(${args})` : `${ag.name}.${prop(w.factory)}(${args})`;
     }
@@ -313,7 +372,8 @@ export function useCaseSetup(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseSce
     T(`InMemory${r}Repository`);
     c.line(`const ${repoName(r)} = new InMemory${r}Repository(${deps.uow ? "unitOfWork" : ""});`);
   }
-  for (const a of g.aggregates) c.line(`${repoName(a.type)}.seed(${build(L, a.type, "aggregate", a.fields, imp)});`);
+  const tenant = scenarioTenant(L, uc, sc);
+  for (const a of g.aggregates) c.line(`${repoName(a.type)}.seed(${build(L, a.type, "aggregate", a.fields, imp, tenant)});`);
   if (deps.clock) {
     T("FixedClock");
     c.line(`const clock = new FixedClock(${tsString(g.clock ?? "1970-01-01T00:00:00+00:00")});`);
@@ -338,6 +398,10 @@ export function useCaseSetup(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseSce
     T("InMemoryIdempotencyStore");
     c.line(`const idempotencyStore = new InMemoryIdempotencyStore(${deps.uow ? "unitOfWork" : ""});`);
   }
+  if (deps.audit) {
+    T("RecordingCrossTenantAudit");
+    c.line("const audit = new RecordingCrossTenantAudit();");
+  }
   const params = depParams(deps);
   c.line(`const useCase = new ${cls}(${params.length ? `{ ${params.map((p) => p.name).join(", ")} }` : ""});`);
   return [...repos].sort();
@@ -360,7 +424,8 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
   c.doc(scenarioDoc(sc, [`Given: ${givenText.join("; ") || "nothing"}`, `When: ${uc.name}`, `Then: ${describeThen(then).join("; ")}`]));
   c.block(`test(${tsString(sc.name)}, async () =>`, () => {
     useCaseSetup(L, c, uc, sc, imp);
-    c.line(`const command = ${uc.command}.create(${record(uc.command, sc.when.input, imp, L)});`);
+    const tenant = scenarioTenant(L, uc, sc);
+    c.line(`const command = ${uc.command}.create(${commandRecord(L, uc, sc.when.input, imp)});`);
     const caller = principalArg(L, c, uc, sc, imp);
     const call = `useCase.execute(command${caller})`;
     const needsResult = !!info.returnType && (then.hasReturns || (!!uc.idempotencyKey && !then.raises));
@@ -378,12 +443,18 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
       if (then.hasReturns && info.returnType) c.line(expectEqual("result", then.returns, info.returnType, imp, L));
       if (deps.uow) c.line("expect(unitOfWork.committed).toBe(true);");
     }
+    if (deps.audit) {
+      // Cross-tenant: the access was recorded (before anything was loaded) — unless authorization refused it.
+      if (then.raises === "NotAuthorized" || then.raises === "Unauthenticated") c.line("expect(audit.accesses).toEqual([]);");
+      else c.line(`expect(audit.accesses).toEqual([{ action: ${tsString(uc.name)}, principal, tenantId: command.tenantId }]);`);
+    }
     if (Array.isArray(then.state)) {
       then.state.forEach((s, i) => {
         const ag = L.aggregate(s.aggregate)!;
         T("expectPresent");
         const key = typedValue(s.id, L.tsFieldType(ag.name, ag.identity)!, imp, L);
-        c.line(`const stored${i} = expectPresent(${repoName(ag.name)}.get(${key}), ${tsString(`stored ${ag.name}`)});`);
+        const bound = tenant !== undefined && L.tenantScoped(ag) ? `${tenantLiteral(L, imp, tenant)}, ` : "";
+        c.line(`const stored${i} = expectPresent(${repoName(ag.name)}.get(${bound}${key}), ${tsString(`stored ${ag.name}`)});`);
         recordAsserts(L, c, `stored${i}`, ag.name, s.fields, imp);
         aggregateJsonAssert(L, c, `stored${i}`, ag.name, imp);
       });
@@ -394,8 +465,12 @@ function useCaseScenario(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenari
     }
     if (uc.idempotencyKey && caller !== ", null") {
       const key = `String(command.${prop(uc.idempotencyKey)})`;
-      // Keys of a use case that needs a principal are kept per principal.
-      if (caller) c.line(`const key = \`\${principal.id}:\${${key}}\`;`);
+      const scope = L.scopeOf(uc);
+      // Keys of a use case that needs a principal are kept per principal (and per tenant with tenancy).
+      if (scope === "tenant" && caller === ", principal") c.line(`const key = \`\${String(principal.tenantId)}:\${principal.id}:\${${key}}\`;`);
+      else if (scope === "cross_tenant") c.line(`const key = \`\${command.tenantId}:\${principal.id}:\${${key}}\`;`);
+      else if (scope === "tenant") c.line(`const key = \`\${context.tenantId}:\${${key}}\`;`);
+      else if (caller) c.line(`const key = \`\${principal.id}:\${${key}}\`;`);
       const recorded = `idempotencyStore.get(${tsString(uc.name)}, ${caller ? "key" : key})`;
       if (then.raises) {
         c.comment("A failed run is not recorded, so a retry with the same key runs again.");
@@ -420,7 +495,8 @@ export function principalLiteral(L: TsLayout, p: ResolvedPrincipal, imp: TsImpor
   const sec = L.model.security!;
   imp.value(L.security, "Principal");
   const value = (v: unknown): string => (Array.isArray(v) ? `[${v.map(value).join(", ")}]` : typeof v === "string" ? tsString(v) : String(v));
-  const parts = [`id: ${tsString(p.id)}`, `roles: [${p.roles.map(tsString).join(", ")}]`];
+  const parts = [`id: ${tsString(p.id)}`, ...(p.tenant !== undefined && p.tenant !== null ? [`tenantId: ${tsString(p.tenant)}`] : []), `roles: [${p.roles.map(tsString).join(", ")}]`];
+  if (p.platformRoles?.length) parts.push(`platformRoles: [${p.platformRoles.map(tsString).join(", ")}]`);
   for (const c of sec.principal.claims) {
     const v = p.claims[c.name];
     if (v !== null && v !== undefined) parts.push(`${prop(c.name)}: ${value(v)}`);
@@ -428,9 +504,22 @@ export function principalLiteral(L: TsLayout, p: ResolvedPrincipal, imp: TsImpor
   return `Principal.create({ ${parts.join(", ")} })`;
 }
 
+/** The command literal of a scenario: a cross-tenant use case's command also names its target tenant. */
+function commandRecord(L: TsLayout, uc: UseCaseIR, input: Record<string, unknown>, imp: TsImports): string {
+  const fields = record(uc.command, input, imp, L);
+  const target = input[TENANT_FIELD];
+  if (!uc.authorize?.crossTenant || !L.model.security?.tenancy || target === undefined || target === null) return fields;
+  return withTenant(fields, tsString(String(target)));
+}
+
 /** Declares `principal` for a scenario of a use case that needs one; returns the extra execute argument. */
 function principalArg(L: TsLayout, c: Code, uc: UseCaseIR, sc: UseCaseScenarioIR, imp: TsImports): string {
   const sec = L.model.security;
+  if (sec?.tenancy && !useCaseAuthorization(L, uc) && L.scopeOf(uc) === "tenant") {
+    // An internal use case on tenant data runs in the tenant it is given (as a policy would pass it).
+    c.line(`const context = { tenantId: ${tenantLiteral(L, imp, defaultTenant(L))} };`);
+    return ", context";
+  }
   if (!sec || !useCaseAuthorization(L, uc)) return "";
   const p = scenarioPrincipal(sec, uc, sc);
   if (p.anonymous) return ", null";
@@ -457,6 +546,10 @@ function untouchedSetup(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): vo
     T("CapturingEventPublisher");
     c.line("const eventPublisher = new CapturingEventPublisher();");
   }
+  if (deps.audit) {
+    T("RecordingCrossTenantAudit");
+    c.line("const audit = new RecordingCrossTenantAudit();");
+  }
   const params = depParams(deps).map((p) => {
     if (p.type.endsWith("Repository")) return `${p.name}: untouched`;
     switch (p.name) {
@@ -472,6 +565,8 @@ function untouchedSetup(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): vo
       case "idempotencyStore":
         T("InMemoryIdempotencyStore");
         return "idempotencyStore: new InMemoryIdempotencyStore()";
+      case "audit":
+        return "audit";
       default:
         return p.name;
     }
@@ -495,7 +590,40 @@ function authorizationTests(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports)
   if (!uc.scenarios.some((s) => s.given.principal?.anonymous)) {
     cases.push({ name: "authorization: an anonymous caller is refused before any load", doc: `Without a principal ${uc.name} raises Unauthenticated before it touches a repository.`, principal: "null", error: "Unauthenticated", details: `{ action: ${tsString(uc.name)} }` });
   }
-  if (auth.roles.length) {
+  const scope = L.scopeOf(uc);
+  if (sec.tenancy && scope === "tenant") {
+    const base = scenarioPrincipal(sec, uc, { given: {} });
+    cases.push({
+      name: "authorization: a token without an active tenant is refused before any load",
+      doc: `A principal whose token names no tenant (and so holds no tenant role) cannot act on tenant data: ${uc.name} raises Unauthenticated (missing_tenant) before it touches a repository.`,
+      principal: principalLiteral(L, { ...base, tenant: null }, imp),
+      error: "Unauthenticated",
+      details: `{ action: ${tsString(uc.name)}, error: "missing_tenant" }`,
+    });
+  }
+  if (sec.tenancy && scope === "cross_tenant") {
+    // Every tenant role, in the caller's own tenant: tenant roles never act across tenants.
+    const p = makePrincipal(sec, { roles: [...sec.roles], claims: {} });
+    const required = [...(auth.roles.length ? [`requiredRoles: [${auth.roles.map(tsString).join(", ")}]`] : []), ...(auth.permissions.length ? [`requiredPermissions: [${auth.permissions.map(tsString).join(", ")}]`] : [])];
+    cases.push({
+      name: "authorization: tenant roles do not act across tenants",
+      doc: `A principal holding every tenant role (${sec.roles.join(", ")}) but no platform role cannot run cross-tenant ${uc.name}: NotAuthorized before the access is recorded or anything is loaded.`,
+      principal: principalLiteral(L, p, imp),
+      error: "NotAuthorized",
+      details: `{ action: ${tsString(uc.name)}, ${required.join(", ")} }`,
+    });
+  } else if (usesPermissions(sec) && (auth.roles.length || auth.permissions.length)) {
+    const roles = otherRoles(sec, uc.authorize!);
+    const p = makePrincipal(sec, { roles, claims: {} });
+    const required = [...(auth.roles.length ? [`requiredRoles: [${auth.roles.map(tsString).join(", ")}]`] : []), ...(auth.permissions.length ? [`requiredPermissions: [${auth.permissions.map(tsString).join(", ")}]`] : [])];
+    cases.push({
+      name: "authorization: a missing role or permission is refused before any load",
+      doc: `A principal with ${roles.length ? `only the other roles (${roles.join(", ")})` : "no role"} lacks ${[...auth.roles, ...auth.permissions].join(" / ")}: ${uc.name} raises NotAuthorized naming the requirement, before it touches a repository.`,
+      principal: principalLiteral(L, p, imp),
+      error: "NotAuthorized",
+      details: `{ action: ${tsString(uc.name)}, ${required.join(", ")} }`,
+    });
+  } else if (auth.roles.length) {
     const roles = otherRoles(sec, uc.authorize!);
     const p = makePrincipal(sec, { roles, claims: {} });
     cases.push({
@@ -513,12 +641,43 @@ function authorizationTests(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports)
     c.doc(k.doc);
     c.block(`test(${tsString(k.name)}, async () =>`, () => {
       untouchedSetup(L, c, uc, imp);
-      c.line(`const command = ${uc.command}.create(${record(uc.command, sc.when.input, imp, L)});`);
+      c.line(`const command = ${uc.command}.create(${commandRecord(L, uc, sc.when.input, imp)});`);
       if (k.principal !== "null") c.line(`const principal = ${k.principal};`);
       c.line(`const error = await expectRejects(() => useCase.execute(command, ${k.principal === "null" ? "null" : "principal"}), ${k.error});`);
       c.line(`expect(error.details).toEqual(${k.details});`);
       if (deps.uow) c.line("expect(unitOfWork.committed).toBe(false);");
       if (deps.publisher) c.line("expect(eventPublisher.published).toEqual([]);");
+      if (deps.audit) c.line("expect(audit.accesses).toEqual([]);");
     }, ");");
   }
+  otherTenantTest(L, c, uc, imp);
+}
+
+/**
+ * Tenant isolation of a use case (docs/09 §22): the first successful scenario that loads stored data, run by the same
+ * principal in another tenant, finds nothing — the aggregate of the other tenant is "not found" (no existence leak),
+ * nothing is committed.
+ */
+function otherTenantTest(L: TsLayout, c: Code, uc: UseCaseIR, imp: TsImports): void {
+  const sec = L.model.security;
+  if (!sec?.tenancy || L.scopeOf(uc) !== "tenant" || !useCaseAuthorization(L, uc)) return;
+  const first = uc.steps[0];
+  if (first?.kind !== "load" || !L.tenantScoped(L.aggregate(first.aggregate)!)) return;
+  const sc = uc.scenarios.find((s) => !s.then.raises && s.given.aggregates.some((a) => a.type === first.aggregate) && !s.given.principal?.anonymous && (s.given.principal?.tenant === undefined));
+  if (!sc) return;
+  const p = scenarioPrincipal(sec, uc, sc);
+  const error = first.notFound ?? "AggregateNotFound";
+  importError(L, imp, error);
+  imp.value(L.mod("commands"), uc.command);
+  const deps = useCaseDeps(L, uc);
+  c.line();
+  c.doc(`Scenario \`${sc.name}\` run by the same principal in another tenant: the ${first.aggregate} of tenant ${defaultTenant(L)} does not exist there (${error}), and nothing is committed.`);
+  c.block(`test("tenancy: another tenant's ${first.aggregate} is not found", async () =>`, () => {
+    useCaseSetup(L, c, uc, sc, imp);
+    c.line(`const command = ${uc.command}.create(${commandRecord(L, uc, sc.when.input, imp)});`);
+    c.line(`const principal = ${principalLiteral(L, { ...p, tenant: otherTenant(L) }, imp)};`);
+    c.line(`await expectRejects(() => useCase.execute(command, principal), ${error});`);
+    if (deps.uow) c.line("expect(unitOfWork.committed).toBe(false);");
+    if (deps.publisher) c.line("expect(eventPublisher.published).toEqual([]);");
+  }, ");");
 }

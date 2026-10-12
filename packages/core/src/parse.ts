@@ -856,7 +856,12 @@ function readSecurity(r: Reader, value: unknown): SecurityIR | undefined {
     const tpath = [...path, "tenancy"];
     const to = r.obj(o.tenancy, tpath, "security.tenancy");
     if (to) {
-      r.keys(to, ["claim", "type", "isolation", "platform_roles_claim"], tpath, "security.tenancy");
+      r.keys(to, ["claim", "type", "isolation", "rls", "platform_roles_claim"], tpath, "security.tenancy");
+      // rls: on | off (YAML 1.1 readers may give booleans).
+      const rlsValue = to.rls === undefined || to.rls === null ? "on" : to.rls === true ? "on" : to.rls === false ? "off" : String(to.rls);
+      if (rlsValue !== "on" && rlsValue !== "off") {
+        r.bag.error("invalid-value", `tenancy.rls must be on or off, got "${rlsValue}"`, [...tpath, "rls"], { hint: "on (default): PostgreSQL row level security as defense in depth; off: the tenant filter of the generated statements only" });
+      }
       const claim = r.str(to, "claim", tpath, true) ?? "tenant_id";
       const declared = r.str(to, "type", tpath, false);
       if (declared !== undefined && !(TENANT_ID_TYPES as readonly string[]).includes(declared)) {
@@ -871,7 +876,7 @@ function readSecurity(r: Reader, value: unknown): SecurityIR | undefined {
           hint: "Only row is supported (shared tables with a tenant_id column and PostgreSQL row level security); schema- or database-per-tenant is not generated",
         });
       }
-      tenancy = { claim, type, isolation: "row", platformRolesClaim: r.str(to, "platform_roles_claim", tpath, false) ?? "platform_roles", path: tpath };
+      tenancy = { claim, type, isolation: "row", rls: rlsValue !== "off", platformRolesClaim: r.str(to, "platform_roles_claim", tpath, false) ?? "platform_roles", path: tpath };
     }
   }
   return {
