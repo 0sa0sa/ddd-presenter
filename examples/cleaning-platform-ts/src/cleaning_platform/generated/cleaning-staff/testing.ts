@@ -5,7 +5,7 @@
 
 import { type QueryRequest, type QueryResult, readRows } from "../persistence.js";
 import type { Id } from "../runtime.js";
-import { type FakeUnitOfWork, InMemoryRepository } from "../testing.js";
+import { type FakeUnitOfWork, InMemoryTenantRepository } from "../testing.js";
 import type { CleaningStaffInvitationRepository, Extensions } from "./application/ports.js";
 import {
   SEARCH_INVITATIONS_SPEC,
@@ -20,10 +20,11 @@ import { cleaningStaffInvitationToRow, searchInvitationsItemFromRow } from "./pe
 export * from "../testing.js";
 
 /**
- * In-memory CleaningStaffInvitationRepository. Writes are staged until the unit of work commits.
+ * In-memory CleaningStaffInvitationRepository of tenant-scoped aggregates (another tenant's are not
+ * found, saving for another tenant fails). Writes are staged until the unit of work commits.
  */
 export class InMemoryCleaningStaffInvitationRepository
-  extends InMemoryRepository<CleaningStaffInvitation, Id<"CleaningStaffInvitation">>
+  extends InMemoryTenantRepository<CleaningStaffInvitation, Id<"CleaningStaffInvitation">>
   implements CleaningStaffInvitationRepository
 {
   constructor(unitOfWork?: FakeUnitOfWork) {

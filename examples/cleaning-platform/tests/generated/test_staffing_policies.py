@@ -10,6 +10,7 @@ from uuid import UUID
 
 from cleaning_platform.generated._runtime import dispatch
 from cleaning_platform.generated.cleaning_staff.domain import events as cleaning_staff_events
+from cleaning_platform.generated.security import TenantContext, TenantId
 from cleaning_platform.generated.staffing.application.policies import (
     RegisterStaffOnAcceptancePolicy,
     subscriptions,
@@ -18,13 +19,17 @@ from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
 
 
 class RecordingRegisterStaff:
-    """Stands in for use case register_staff and records the commands it receives."""
+    """Stands in for use case register_staff and records the commands it receives and the tenants it
+    runs in.
+    """
 
     def __init__(self) -> None:
         self.commands: list[RegisterStaff] = []
+        self.contexts: list[TenantContext] = []
 
-    def execute(self, command: RegisterStaff) -> None:
+    def execute(self, command: RegisterStaff, context: TenantContext) -> None:
         self.commands.append(command)
+        self.contexts.append(context)
 
 
 def test_register_staff_on_acceptance() -> None:
@@ -37,11 +42,14 @@ def test_register_staff_on_acceptance() -> None:
     use_case = RecordingRegisterStaff()
     policy = RegisterStaffOnAcceptancePolicy(use_case=use_case)
     event = cleaning_staff_events.InvitationAccepted(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-0000000000e1"),
         at=datetime.fromisoformat("2026-01-02T09:00:00+00:00"),
     )
     policy.handle(event)
     assert len(use_case.commands) == 1
+    # The use case runs in the tenant of the event.
+    assert [context.tenant_id for context in use_case.contexts] == [event.tenant_id]
     command = use_case.commands[0]
     assert command.invitation_id == UUID("00000000-0000-0000-0000-0000000000e1")
     assert command.joined_at == datetime.fromisoformat("2026-01-02T09:00:00+00:00")
@@ -52,6 +60,7 @@ def test_staffing_subscriptions_route_each_event_to_its_policies() -> None:
     use_case_0 = RecordingRegisterStaff()
     policy_0 = RegisterStaffOnAcceptancePolicy(use_case=use_case_0)
     event_0 = cleaning_staff_events.InvitationAccepted(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-0000000000e1"),
         at=datetime.fromisoformat("2026-01-02T09:00:00+00:00"),
     )

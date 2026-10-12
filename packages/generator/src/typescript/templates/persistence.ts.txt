@@ -211,7 +211,7 @@ export interface QueryScope {
   readonly principal: string;
   readonly values: Readonly<Record<string, unknown>>;
   //#if tenancy
-  /** The caller's active tenant (tenant-scoped queries): rows of it only; cursors are bound to it. */
+  /** The caller's active tenant (tenant-scoped queries): its rows only; cursors are bound to it. */
   readonly tenant?: string;
   //#endif
 }
@@ -761,7 +761,7 @@ export class PostgresStore<A, K> {
  * `save` refuses an aggregate of another tenant (TenantMismatch) before it reaches the database.
  //#if rls
  * Before its statements it sets `app.tenant_id` for row level security (defense in depth) and, the
- * first time, checks that the setting holds: the client must be one connection inside a transaction.
+ * first time, checks that the setting holds: the client must be a connection inside a transaction.
  //#endif
  */
 export class PostgresTenantStore<A extends { readonly tenantId: string }, K> {
@@ -849,7 +849,7 @@ export interface SqlTransactions {
   transaction<T>(run: (client: SqlClient) => Promise<T>): Promise<T>;
 }
 
-/** A pool handing out connections (node-postgres `Pool`: `connect()` → a client with `release()`). */
+/** A pool handing out connections (node-postgres `Pool`: `connect()` gives a client to release). */
 export interface SqlPool {
   connect(): Promise<SqlClient & { release(): void }>;
 }

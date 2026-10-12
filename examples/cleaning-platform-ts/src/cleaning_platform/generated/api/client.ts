@@ -34,6 +34,7 @@ function cleaningStaffClient(transport: Transport) {
       issueInvitation: useCaseCaller(transport, useCases.issueInvitation, errors),
       acceptInvitation: useCaseCaller(transport, useCases.acceptInvitation, errors),
       revokeInvitation: useCaseCaller(transport, useCases.revokeInvitation, errors),
+      inspectInvitation: useCaseCaller(transport, useCases.inspectInvitation, errors),
     },
     aggregates: {
       cleaningStaffInvitation: readCaller(transport, aggregates.cleaningStaffInvitation, errors),

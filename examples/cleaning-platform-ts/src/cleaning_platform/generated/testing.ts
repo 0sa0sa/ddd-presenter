@@ -16,6 +16,12 @@ import {
   type RecordedResult,
   type UUID,
 } from "./runtime.js";
+import {
+  type CrossTenantAccess,
+  type CrossTenantAudit,
+  type TenantId,
+  TenantMismatch,
+} from "./security.js";
 
 interface Transactional {
   commitStaged(): void;
@@ -79,6 +85,57 @@ export class InMemoryRepository<A extends AggregateRoot, K> implements Transacti
 
   discardStaged(): void {
     this.#pending.clear();
+  }
+}
+
+/**
+ * In-memory repository of a tenant-scoped aggregate (the semantics of the PostgreSQL adapter):
+ * `get` sees the given tenant's aggregates only (another tenant's is null, like a missing one) and
+ * `save` refuses an aggregate of another tenant, or an id another tenant already uses
+ * (TenantMismatch).
+ */
+export class InMemoryTenantRepository<
+  A extends AggregateRoot & { readonly tenantId: TenantId },
+  K,
+> {
+  readonly #store: InMemoryRepository<A, K>;
+  readonly #identity: (aggregate: A) => K;
+
+  constructor(identity: (aggregate: A) => K, unitOfWork?: FakeUnitOfWork) {
+    this.#store = new InMemoryRepository(identity, unitOfWork);
+    this.#identity = identity;
+  }
+
+  /** Stores aggregates (of any tenant: each keeps its own `tenantId`). */
+  seed(...aggregates: A[]): void {
+    this.#store.seed(...aggregates);
+  }
+
+  get(tenant: TenantId, id: K): A | null {
+    const aggregate = this.#store.get(id);
+    return aggregate !== null && aggregate.tenantId === tenant ? aggregate : null;
+  }
+
+  save(tenant: TenantId, aggregate: A): void {
+    const existing = this.#store.get(this.#identity(aggregate));
+    if (aggregate.tenantId !== tenant || (existing !== null && existing.tenantId !== tenant)) {
+      throw new TenantMismatch();
+    }
+    this.#store.save(aggregate);
+  }
+
+  /** Every committed aggregate, of every tenant (in-memory readers filter by tenant). */
+  all(): A[] {
+    return this.#store.all();
+  }
+}
+
+/** CrossTenantAudit that keeps every recorded access (for assertions). */
+export class RecordingCrossTenantAudit implements CrossTenantAudit {
+  readonly accesses: CrossTenantAccess[] = [];
+
+  record(access: CrossTenantAccess): void {
+    this.accesses.push(access);
   }
 }
 

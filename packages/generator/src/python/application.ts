@@ -365,6 +365,11 @@ function useCase(L: Layout, c: Code, uc: UseCaseIR, imp: Imports): void {
           c.line("self._unit_of_work.rollback()");
           c.line("raise");
         });
+      } else if (L.model.security?.tenancy && ret !== "None" && !uc.idempotencyKey && !(deps.publisher && info.publishes.length)) {
+        // Nothing runs after the steps: return their result directly (ruff RET504; tenancy models only, so the
+        // output of older models stays byte for byte the same).
+        c.line(`return ${call}`);
+        return;
       } else {
         c.line(ret === "None" ? call : `result = ${call}`);
         record();

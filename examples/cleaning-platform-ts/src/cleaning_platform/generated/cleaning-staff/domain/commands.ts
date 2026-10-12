@@ -6,6 +6,7 @@
 import { z } from "zod";
 
 import { InstantSchema, parseWith, uuidSchema } from "../../runtime.js";
+import { TenantIdSchema } from "../../security.js";
 import { EmailAddressSchema } from "./value-objects.js";
 
 const IssueInvitationFields = z
@@ -66,5 +67,29 @@ export const RevokeInvitation = {
   },
   parse(input: unknown): RevokeInvitation {
     return parseWith(RevokeInvitationFields, input, "RevokeInvitation");
+  },
+} as const;
+
+const InspectInvitationFields = z
+  .strictObject({
+    tenantId: TenantIdSchema,
+    invitationId: uuidSchema,
+  })
+  .readonly();
+
+/**
+ * Input of use case `inspect_invitation` (actor: 運用担当). `tenantId` is the tenant it acts in
+ * (cross-tenant: platform roles only).
+ */
+export type InspectInvitation = z.output<typeof InspectInvitationFields>;
+export type InspectInvitationInput = z.input<typeof InspectInvitationFields>;
+
+export const InspectInvitation = {
+  schema: InspectInvitationFields,
+  create(input: InspectInvitationInput): InspectInvitation {
+    return parseWith(InspectInvitationFields, input, "InspectInvitation");
+  },
+  parse(input: unknown): InspectInvitation {
+    return parseWith(InspectInvitationFields, input, "InspectInvitation");
   },
 } as const;

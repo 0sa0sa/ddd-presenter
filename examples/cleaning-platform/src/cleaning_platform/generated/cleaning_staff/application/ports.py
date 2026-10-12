@@ -13,6 +13,7 @@ from uuid import UUID
 from cleaning_platform.generated._runtime import DomainEvent
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
 __all__ = [
     "CleaningStaffInvitationRepository",
@@ -25,13 +26,17 @@ __all__ = [
 
 
 class CleaningStaffInvitationRepository(Protocol):
-    """Loads and stores CleaningStaffInvitation aggregates. Implemented by an adapter outside the
-    domain.
+    """Loads and stores CleaningStaffInvitation aggregates of one tenant at a time. Implemented by
+    an adapter outside the domain.
+
+    Every call names the tenant (the use case passes the caller's): `get` returns None for an
+    aggregate of another tenant (the same as a missing one, so nothing leaks), and `save` refuses an
+    aggregate whose `tenant_id` is not `tenant` (TenantMismatch).
     """
 
-    def get(self, id: UUID) -> CleaningStaffInvitation | None: ...
+    def get(self, tenant: TenantId, id: UUID) -> CleaningStaffInvitation | None: ...
 
-    def save(self, aggregate: CleaningStaffInvitation) -> None: ...
+    def save(self, tenant: TenantId, aggregate: CleaningStaffInvitation) -> None: ...
 
 
 class Clock(Protocol):

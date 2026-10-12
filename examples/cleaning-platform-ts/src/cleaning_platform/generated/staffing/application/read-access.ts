@@ -4,22 +4,23 @@
 /** Read access of the Staffing aggregates: authorization around loading by identity. */
 
 import type { Id } from "../../runtime.js";
-import { authorize, type Principal } from "../../security.js";
+import { authorizeInTenant, type Principal } from "../../security.js";
 import type { StaffMember } from "../domain/aggregates.js";
 import type { StaffMemberRepository } from "./ports.js";
 
 /**
- * Loads StaffMember for `principal` (`authorize` of StaffMember): the role admin.
+ * Loads StaffMember for `principal` (`authorize` of StaffMember): the permission staff.read.
  *
- * The roles are checked before loading. Returns null when it does not exist; throws Unauthenticated
- * or NotAuthorized.
+ * The roles are checked before loading, in the caller's active tenant; the aggregate is loaded from
+ * that tenant only (another tenant's is null, like a missing one). Returns null when it does not
+ * exist; throws Unauthenticated or NotAuthorized.
  */
 export async function readStaffMember(
   repository: Pick<StaffMemberRepository, "get">,
   id: Id<"StaffMember">,
   principal: Principal | null,
 ): Promise<StaffMember | null> {
-  authorize(principal, "read StaffMember", ["admin"]);
-  const aggregate = await repository.get(id);
+  authorizeInTenant(principal, "read StaffMember", { permissions: ["staff.read"] });
+  const aggregate = await repository.get(principal.tenantId, id);
   return aggregate;
 }

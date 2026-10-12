@@ -4,19 +4,29 @@
 /** Ports (interfaces to the outside world) of the CleaningStaff context. */
 
 import type { Awaitable, Id } from "../../runtime.js";
+import type { TenantId } from "../../security.js";
 import type { CleaningStaffInvitation } from "../domain/aggregates.js";
 import type { EmailAddress } from "../domain/value-objects.js";
 
 // Ports shared by every context (defined once in the runtime).
 export type { Clock, EventPublisher, IdGenerator, UnitOfWork } from "../../runtime.js";
+// Records cross-tenant access by platform roles (defined in the security module).
+export type { CrossTenantAudit } from "../../security.js";
 
 /**
- * Loads and stores CleaningStaffInvitation aggregates. Implemented by an adapter outside the
- * domain.
+ * Loads and stores CleaningStaffInvitation aggregates of one tenant at a time. Implemented by an
+ * adapter outside the domain.
+ *
+ * Every call names the tenant (the use case passes the caller's): `get` returns null for an
+ * aggregate of another tenant (the same as a missing one, so nothing leaks), and `save` refuses an
+ * aggregate whose `tenantId` is not `tenant` (TenantMismatch).
  */
 export interface CleaningStaffInvitationRepository {
-  get(id: Id<"CleaningStaffInvitation">): Awaitable<CleaningStaffInvitation | null>;
-  save(aggregate: CleaningStaffInvitation): Awaitable<void>;
+  get(
+    tenant: TenantId,
+    id: Id<"CleaningStaffInvitation">,
+  ): Awaitable<CleaningStaffInvitation | null>;
+  save(tenant: TenantId, aggregate: CleaningStaffInvitation): Awaitable<void>;
 }
 
 /**

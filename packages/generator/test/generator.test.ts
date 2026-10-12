@@ -10,10 +10,10 @@ import { emitExpr, Imports } from "../src/python/support.ts";
 const EXAMPLE = join(import.meta.dir, "../../../examples/cleaning-platform");
 const MODEL = readFileSync(join(EXAMPLE, "model.ddd.yaml"), "utf8");
 
-/** The model without its revoke_invitation use case (the last use case of CleaningStaff, before its queries). */
+/** The model without its revoke_invitation use case (it is followed by the cross-tenant inspect_invitation and the queries). */
 function withoutRevoke(text: string): string {
   const start = text.indexOf("      - name: revoke_invitation");
-  const ends = ["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
+  const ends = ["\n      # 運用担当", "\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
   return text.slice(0, start) + text.slice(Math.min(...ends) + 1);
 }
 

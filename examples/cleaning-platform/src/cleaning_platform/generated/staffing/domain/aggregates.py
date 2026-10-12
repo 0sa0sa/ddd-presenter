@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import AwareDatetime
 
 from cleaning_platform.generated._runtime import AggregateRoot, DomainEvent, Transition
+from cleaning_platform.generated.security import TenantId
 from cleaning_platform.generated.staffing.domain.events import StaffRegistered
 
 __all__ = ["StaffMember"]
@@ -21,10 +22,13 @@ class StaffMember(AggregateRoot):
     """登録済みのスタッフ
 
     Identity: id. Instances are immutable; operations return a Transition with the new state.
+    Tenant-scoped: `tenant_id` is the tenant it belongs to, set by its factory from the caller's
+    tenant and never changed.
     """
 
     identity_field: ClassVar[str] = "id"
 
+    tenant_id: TenantId
     id: UUID
     invitation_id: UUID
     joined_at: AwareDatetime
@@ -35,6 +39,7 @@ class StaffMember(AggregateRoot):
     @classmethod
     def register(
         cls,
+        tenant_id: TenantId,
         id: UUID,
         invitation_id: UUID,
         joined_at: datetime,
@@ -43,8 +48,16 @@ class StaffMember(AggregateRoot):
 
         Factory: construct-time invariants are checked on the new instance.
         Emits: StaffRegistered.
+        `tenant_id` is the caller's tenant (the use case passes it; it never comes from the input).
         """
-        aggregate = cls(id=id, invitation_id=invitation_id, joined_at=joined_at)
+        aggregate = cls(
+            tenant_id=tenant_id,
+            id=id,
+            invitation_id=invitation_id,
+            joined_at=joined_at,
+        )
         events: list[DomainEvent] = []
-        events.append(StaffRegistered(id=id, invitation_id=invitation_id))
+        events.append(
+            StaffRegistered(tenant_id=aggregate.tenant_id, id=id, invitation_id=invitation_id)
+        )
         return Transition(aggregate=aggregate, events=tuple(events))

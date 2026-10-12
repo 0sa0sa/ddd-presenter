@@ -5,11 +5,15 @@
 
 import * as cleaningStaffEvents from "../../cleaning-staff/domain/events.js";
 import type { EventHandler, Subscriptions } from "../../runtime.js";
+import type { TenantContext } from "../../security.js";
 import { RegisterStaff } from "../domain/commands.js";
 
-/** What a policy needs from use case `register_staff` (RegisterStaffUseCase satisfies it). */
+/**
+ * What a policy needs from use case `register_staff` (RegisterStaffUseCase satisfies it): it runs
+ * in the tenant it is given.
+ */
 export interface RegisterStaffRunner {
-  execute(command: RegisterStaff): Promise<unknown>;
+  execute(command: RegisterStaff, context: TenantContext): Promise<unknown>;
 }
 
 /**
@@ -18,6 +22,7 @@ export interface RegisterStaffRunner {
  * When: CleaningStaff.InvitationAccepted (CleaningStaff, customer_supplier)
  * Run: register_staff
  * Args: invitation_id=event.id, joined_at=event.at
+ * Tenant: the event's (the use case runs in the tenant the event belongs to)
  */
 export class RegisterStaffOnAcceptancePolicy {
   static readonly eventType = cleaningStaffEvents.InvitationAccepted.type;
@@ -30,7 +35,8 @@ export class RegisterStaffOnAcceptancePolicy {
   /** Runs register_staff for one InvitationAccepted. */
   async handle(event: cleaningStaffEvents.InvitationAccepted): Promise<void> {
     const command = RegisterStaff.create({ invitationId: event.id, joinedAt: event.at });
-    await this.#useCase.execute(command);
+    // The reaction runs in the tenant of the event (never another one, never without one).
+    await this.#useCase.execute(command, { tenantId: event.tenantId });
   }
 
   /** Event bus entry point (EventHandler). */

@@ -12,31 +12,44 @@ from pydantic import AwareDatetime, Field, TypeAdapter
 
 from cleaning_platform.generated._runtime import DomainEvent, parse_with
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
 __all__ = ["AnyEvent", "InvitationAccepted", "InvitationIssued", "InvitationRevoked", "parse_event"]
 
 
 class InvitationAccepted(DomainEvent):
-    """Emitted by CleaningStaffInvitation.accept."""
+    """Emitted by CleaningStaffInvitation.accept.
+
+    Carries the tenant (`tenant_id`) of the aggregate it comes from.
+    """
 
     event_type: Literal["CleaningStaff.InvitationAccepted"] = "CleaningStaff.InvitationAccepted"
+    tenant_id: TenantId
     id: UUID
     at: AwareDatetime
 
 
 class InvitationIssued(DomainEvent):
-    """Emitted by CleaningStaffInvitation.issue."""
+    """Emitted by CleaningStaffInvitation.issue.
+
+    Carries the tenant (`tenant_id`) of the aggregate it comes from.
+    """
 
     event_type: Literal["CleaningStaff.InvitationIssued"] = "CleaningStaff.InvitationIssued"
+    tenant_id: TenantId
     id: UUID
     email: EmailAddress
     expires_at: AwareDatetime
 
 
 class InvitationRevoked(DomainEvent):
-    """Emitted by CleaningStaffInvitation.revoke."""
+    """Emitted by CleaningStaffInvitation.revoke.
+
+    Carries the tenant (`tenant_id`) of the aggregate it comes from.
+    """
 
     event_type: Literal["CleaningStaff.InvitationRevoked"] = "CleaningStaff.InvitationRevoked"
+    tenant_id: TenantId
     id: UUID
 
 

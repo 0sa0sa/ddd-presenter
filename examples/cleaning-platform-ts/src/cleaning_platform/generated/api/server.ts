@@ -13,7 +13,7 @@ import type { Principal } from "../security.js";
 import * as staffing from "../staffing/index.js";
 import { contract } from "./contract.js";
 import { queryRoute } from "./query-runtime.js";
-import { apiHandler, type ApiHandlerOptions, readRoute, useCaseRoute } from "./runtime.js";
+import { apiHandler, type ApiHandlerOptions, tenantReadRoute, useCaseRoute } from "./runtime.js";
 
 /**
  * What the handler calls, per context. Only what is given is served: a use case or repository left
@@ -26,6 +26,7 @@ export interface ApiDependencies {
       readonly issueInvitation?: Pick<cleaningStaff.IssueInvitationUseCase, "execute">;
       readonly acceptInvitation?: Pick<cleaningStaff.AcceptInvitationUseCase, "execute">;
       readonly revokeInvitation?: Pick<cleaningStaff.RevokeInvitationUseCase, "execute">;
+      readonly inspectInvitation?: Pick<cleaningStaff.InspectInvitationUseCase, "execute">;
     };
     readonly queries?: {
       readonly searchInvitations?: Pick<cleaningStaffQueries.SearchInvitationsQuery, "execute">;
@@ -78,16 +79,20 @@ export function createApiHandler(
         contract.cleaningStaff.useCases.revokeInvitation,
         (d) => d.cleaningStaff?.useCases?.revokeInvitation,
       ),
+      useCaseRoute(
+        contract.cleaningStaff.useCases.inspectInvitation,
+        (d) => d.cleaningStaff?.useCases?.inspectInvitation,
+      ),
       queryRoute(
         contract.cleaningStaff.queries.searchInvitations,
         (d) => d.cleaningStaff?.queries?.searchInvitations,
       ),
-      readRoute(
+      tenantReadRoute(
         contract.cleaningStaff.aggregates.cleaningStaffInvitation,
         (d) => d.cleaningStaff?.repositories?.cleaningStaffInvitationRepository,
         cleaningStaff.readCleaningStaffInvitation,
       ),
-      readRoute(
+      tenantReadRoute(
         contract.staffing.aggregates.staffMember,
         (d) => d.staffing?.repositories?.staffMemberRepository,
         staffing.readStaffMember,

@@ -40,7 +40,14 @@ export type ErrorStatuses = Readonly<Record<string, ErrorStatus>>;
  */
 export type EndpointAuth =
   | { readonly kind: "public" }
-  | { readonly kind: "principal"; readonly roles: ReadonlyArray<string> };
+  | {
+      readonly kind: "principal";
+      readonly roles: ReadonlyArray<string>;
+      /** Permissions any of which also admits (map-form roles). */
+      readonly permissions?: ReadonlyArray<string>;
+      /** The endpoint runs in the caller's active tenant (from the token only): 401 without one. */
+      readonly tenant?: boolean;
+    };
 
 /** A use case exposed as `POST path`: the command's schema in, the use case's result out. */
 export interface UseCaseEndpoint<I extends z.ZodType, O extends z.ZodType> {
@@ -205,6 +212,12 @@ export interface ApiHandlerOptions<P = unknown> {
    * X-Forwarded-For only behind a proxy you control that overwrites it.
    */
   readonly clientIp?: (request: Request) => string | undefined;
+  /**
+   * The tenant a request names in its path, if your routes carry one (e.g. `/orgs/:org/...`
+   * matched by your router before this handler). The tenant always comes from the verified token;
+   * when the path names another one the handler answers 403 (`details.error: "tenant_mismatch"`).
+   */
+  readonly tenantOf?: (request: Request) => string | undefined;
 }
 
 export function useCaseRoute<D, P, I extends z.ZodType, O extends z.ZodType>(
@@ -272,8 +285,12 @@ export function readRoute<
  * `WWW-Authenticate: Bearer`), rate limits `by: principal`, then the use case or read access,
  * which authorizes (403). Limited endpoints answer the RateLimit headers; a used-up limit answers
  * 429 with Retry-After.
+ *
+ * Tenant-scoped endpoints need the token's active tenant (401 without one) and, with
+ * `options.tenantOf`, a path naming the same tenant (403 otherwise); limits `by: tenant` count per
+ * tenant (one noisy tenant cannot use up the others' budget).
  */
-export function apiHandler<D, P extends { readonly id: string }>(
+export function apiHandler<D, P extends { readonly id: string; readonly tenantId?: string | null }>(
   routes: ReadonlyArray<Route<D, P>>,
   dependencies: D | ((request: Request) => Awaitable<D>),
   options: ApiHandlerOptions<P> = {},
@@ -313,7 +330,9 @@ export function apiHandler<D, P extends { readonly id: string }>(
       const headers: Record<string, string> = {};
       try {
         const limit = route.rateLimit;
-        const early = limit !== null && (limit.by !== "principal" || route.auth.kind === "public");
+        const early =
+          limit !== null &&
+          ((limit.by !== "principal" && limit.by !== "tenant") || route.auth.kind === "public");
         if (early) {
           // A public endpoint has no principal: its limit counts per client IP.
           const subject = limit.by === "global" ? "*" : (options.clientIp?.(request) ?? "unknown");
@@ -324,8 +343,23 @@ export function apiHandler<D, P extends { readonly id: string }>(
         if (route.auth.kind === "principal") {
           principal = (await options.authenticate?.(request)) ?? null;
           if (principal === null) return unauthenticated(undefined, headers);
+          const tenant = principal.tenantId ?? null;
+          if (route.auth.tenant === true) {
+            // The tenant comes from the verified token only; a path may name it, never change it.
+            if (tenant === null) return unauthenticated(MISSING_TENANT, headers);
+            const named = options.tenantOf?.(request);
+            if (named !== undefined && named !== tenant) {
+              const body = {
+                code: "not_authorized",
+                message: "The request names another tenant than the token",
+                details: { error: "tenant_mismatch" },
+              };
+              return json(403, body, headers);
+            }
+          }
           if (limit !== null && !early) {
-            const refused = await take(limit, principal.id, headers);
+            const subject = limit.by === "tenant" && tenant !== null ? tenant : principal.id;
+            const refused = await take(limit, subject, headers);
             if (refused) return refused;
           }
         }
@@ -364,17 +398,59 @@ export function apiHandler<D, P extends { readonly id: string }>(
  * `error="invalid_token"` when the authenticator rejected them.
  */
 function unauthenticated(
-  error: DomainError | undefined,
+  error: DomainError | { readonly message: string; readonly details: ErrorDetails } | undefined,
   headers: Record<string, string>,
 ): Response {
-  const invalid = error?.details["error"] === "invalid_token";
-  const challenge = invalid ? 'Bearer error="invalid_token"' : "Bearer";
+  const reason = error?.details["error"];
+  const invalid = reason === "invalid_token";
+  // A valid token naming no active tenant cannot act on tenant data (RFC 6750 invalid_token).
+  const tenantless = reason === "missing_tenant";
+  const challenge = invalid
+    ? 'Bearer error="invalid_token"'
+    : tenantless
+      ? 'Bearer error="invalid_token", error_description="no active tenant"'
+      : "Bearer";
   const body = {
     code: HTTP_ERROR_CODES.unauthenticated,
     message: error?.message ?? "Authentication is required",
-    ...(invalid ? { details: { error: "invalid_token" } } : {}),
+    ...(invalid || tenantless ? { details: { error: reason } } : {}),
   };
   return json(401, body, { ...headers, "www-authenticate": challenge });
+}
+
+/** The 401 of a tenant-scoped endpoint called with a token that names no active tenant. */
+const MISSING_TENANT = {
+  message: "The token names no active tenant",
+  details: { error: "missing_tenant" },
+} as const;
+
+/**
+ * Loading a tenant-scoped aggregate by identity: always through its generated read access, which
+ * loads it from the caller's tenant only (another tenant's is 404, like a missing one).
+ */
+export function tenantReadRoute<D, P, K extends z.ZodType, O extends z.ZodType, R>(
+  endpoint: ReadEndpoint<K, O>,
+  dependency: (dependencies: D) => R | undefined,
+  read: (repository: R, id: z.output<K>, principal: P | null) => Promise<unknown>,
+): Route<D, P> {
+  return {
+    method: endpoint.method,
+    path: endpoint.path,
+    errors: endpoint.errors,
+    auth: endpoint.auth,
+    rateLimit: endpoint.rateLimit,
+    async handle(_request, dependencies, id, principal) {
+      const repository = dependency(dependencies);
+      if (repository === undefined) return undefined;
+      const raw = endpoint.idType === "number" && /^-?\d+$/.test(id) ? Number(id) : id;
+      const key = parseWith(endpoint.id, raw, endpoint.name + " id");
+      const aggregate = await read(repository, key, principal);
+      if (aggregate === null || aggregate === undefined) {
+        throw new AggregateNotFound({ aggregate: endpoint.name, id });
+      }
+      return json(200, aggregate);
+    },
+  };
 }
 
 /** `instanceof DomainError`, typed with the default details (instanceof alone gives `any`). */

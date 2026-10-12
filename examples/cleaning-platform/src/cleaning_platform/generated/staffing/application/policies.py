@@ -9,15 +9,18 @@ from typing import ClassVar, Protocol
 
 from cleaning_platform.generated._runtime import DomainEvent, EventHandler
 from cleaning_platform.generated.cleaning_staff.domain import events as cleaning_staff_events
+from cleaning_platform.generated.security import TenantContext
 from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
 
 __all__ = ["RegisterStaffOnAcceptancePolicy", "RegisterStaffRunner", "subscriptions"]
 
 
 class RegisterStaffRunner(Protocol):
-    """What a policy needs from use case `register_staff` (RegisterStaffUseCase satisfies it)."""
+    """What a policy needs from use case `register_staff` (RegisterStaffUseCase satisfies it): it
+    runs in the tenant it is given.
+    """
 
-    def execute(self, command: RegisterStaff) -> object: ...
+    def execute(self, command: RegisterStaff, context: TenantContext) -> object: ...
 
 
 class RegisterStaffOnAcceptancePolicy:
@@ -26,6 +29,7 @@ class RegisterStaffOnAcceptancePolicy:
     When: CleaningStaff.InvitationAccepted (CleaningStaff, customer_supplier)
     Run: register_staff
     Args: invitation_id=event.id, joined_at=event.at
+    Tenant: the event's (the use case runs in the tenant the event belongs to)
     """
 
     event_type: ClassVar[type[cleaning_staff_events.InvitationAccepted]] = (
@@ -38,7 +42,8 @@ class RegisterStaffOnAcceptancePolicy:
     def handle(self, event: cleaning_staff_events.InvitationAccepted) -> None:
         """Runs register_staff for one InvitationAccepted."""
         command = RegisterStaff(invitation_id=event.id, joined_at=event.at)
-        self._use_case.execute(command)
+        # The reaction runs in the tenant of the event (never another one, never without one).
+        self._use_case.execute(command, TenantContext(tenant_id=event.tenant_id))
 
     def __call__(self, event: DomainEvent) -> None:
         """Event bus entry point (EventHandler)."""

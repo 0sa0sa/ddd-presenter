@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from cleaning_platform.generated.security import Principal, authorize
+from cleaning_platform.generated.security import Principal, authorize_in_tenant
 from cleaning_platform.generated.staffing.application.ports import StaffMemberRepository
 from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 
@@ -17,10 +17,15 @@ __all__ = ["read_staff_member"]
 def read_staff_member(
     repository: StaffMemberRepository, id: UUID, principal: Principal | None
 ) -> StaffMember | None:
-    """Loads StaffMember for `principal` (`authorize` of StaffMember): the role admin.
+    """Loads StaffMember for `principal` (`authorize` of StaffMember): the permission staff.read.
+    Loaded from the caller's tenant only.
 
     The roles are checked before loading. Returns None when it does not exist; raises
     Unauthenticated or NotAuthorized.
     """
-    principal = authorize(principal, "read StaffMember", ("admin",))
-    return repository.get(id)
+    principal, tenant = authorize_in_tenant(
+        principal,
+        "read StaffMember",
+        permissions=("staff.read",),
+    )
+    return repository.get(tenant, id)

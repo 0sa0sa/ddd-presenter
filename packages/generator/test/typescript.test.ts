@@ -61,10 +61,10 @@ function analyze(text: string) {
   return r.analysis!;
 }
 
-/** The model without its revoke_invitation use case (the last use case of CleaningStaff, before its queries). */
+/** The model without its revoke_invitation use case (it is followed by the cross-tenant inspect_invitation and the queries). */
 function withoutRevoke(text: string): string {
   const start = text.indexOf("      - name: revoke_invitation");
-  const ends = ["\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
+  const ends = ["\n      # 運用担当", "\n    # 読み取り", "\n    queries:", "\n  - name: Staffing"].map((m) => text.indexOf(m, start)).filter((i) => i > start);
   return text.slice(0, start) + text.slice(Math.min(...ends) + 1);
 }
 
@@ -596,10 +596,13 @@ describe("TypeScript target: HTTP API and TanStack Query client", () => {
     expect(contract).toContain(
       "errors: {\n        constraint_violation: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n        email_blocked: 422,\n        invalid_invitation_window: 422,\n        concurrency_conflict: 409,\n      },",
     );
-    // The protected query: 401 / 403 next to its 400s, and who may call it.
+    // The protected query: 401 / 403 next to its 400s, who may call it (a permission, in the caller's tenant: docs/09
+    // §22) and the default rate limit counted per tenant.
     expect(contract).toContain(
-      'errors: {\n        constraint_violation: 400,\n        invalid_cursor: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n      },\n      auth: { kind: "principal", roles: ["admin"] },\n      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "principal" },',
+      'errors: {\n        constraint_violation: 400,\n        invalid_cursor: 400,\n        unauthenticated: 401,\n        not_authorized: 403,\n      },\n      auth: { kind: "principal", roles: [], permissions: ["invitation.list"], tenant: true },\n      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "tenant" },',
     );
+    // The cross-tenant use case is not tenant-scoped for the HTTP layer (its tenant comes from the input).
+    expect(contract).toContain('auth: { kind: "principal", roles: [], permissions: ["invitation.read"] },');
     expect(contract).toContain('path: "/api/cleaning-staff/cleaning-staff-invitation/:id",\n      id: idSchema("CleaningStaffInvitation"),\n      idType: "string",\n      output: CleaningStaffInvitationJson,');
     expect(contract).toContain("acceptedAt: InstantSchema.nullable(),");
     expect(file("api/contract.ts")).toContain('export const API_BASE_PATH = "/api";');
@@ -884,7 +887,7 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+65 passed/);
+      expect(vitest.out).toMatch(/Tests\s+86 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });

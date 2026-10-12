@@ -23,6 +23,7 @@ describe("CleaningStaff invariants", () => {
     const error = expectThrows(
       () =>
         CleaningStaffInvitation.from({
+          tenantId: "00000000-0000-4000-8000-0000000000a1",
           id: "00000000-0000-0000-0000-000000000001",
           email: { value: "staff@example.com" },
           status: "pending",
@@ -45,6 +46,7 @@ describe("CleaningStaff invariants", () => {
     const error = expectThrows(
       () =>
         CleaningStaffInvitation.from({
+          tenantId: "00000000-0000-4000-8000-0000000000a1",
           id: "00000000-0000-0000-0000-000000000001",
           email: { value: "staff@example.com" },
           status: "accepted",

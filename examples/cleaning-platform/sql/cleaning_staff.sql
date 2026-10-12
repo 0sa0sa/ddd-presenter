@@ -4,21 +4,39 @@
 -- Desired PostgreSQL schema (13 or later) of the CleaningStaff context: one table per aggregate and the indexes
 -- its queries need. Idempotent (IF NOT EXISTS): apply it to create a database. It does not alter existing
 -- tables; derive migrations by comparing a database with this file (e.g. with a schema diff tool).
+--
+-- Multi-tenant (row isolation, docs/09 §22): tenant-scoped tables carry tenant_id and every generated statement
+-- filters by it; row level security enforces the same as defense in depth.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE SCHEMA IF NOT EXISTS cleaning_staff;
 
--- Aggregate CleaningStaffInvitation. version: optimistic locking (incremented by every save).
+-- Aggregate CleaningStaffInvitation (tenant-scoped). tenant_id: the tenant a row belongs to (set on insert, never updated);
+-- every generated statement filters by it. version: optimistic locking (incremented by every save).
 CREATE TABLE IF NOT EXISTS cleaning_staff.cleaning_staff_invitation (
   id uuid PRIMARY KEY,
+  tenant_id uuid NOT NULL,
   email_value text NOT NULL,
   status text NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
   created_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
   accepted_at timestamptz,
-  version bigint NOT NULL
+  version bigint NOT NULL,
+  UNIQUE (tenant_id, id)
 );
+
+-- Row level security: defense in depth behind the tenant_id filter of every statement. Connect as a role that
+-- does not own the table and has no BYPASSRLS (owners and superusers bypass it; FORCE covers the owner too).
+-- The policy reads app.tenant_id, which the repositories / readers set per transaction (set_config(..., true),
+-- SET LOCAL semantics: it ends with the transaction, so pooled connections never carry it over). Without
+-- it the policy matches no row and refuses every write (fail closed).
+ALTER TABLE cleaning_staff.cleaning_staff_invitation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cleaning_staff.cleaning_staff_invitation FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON cleaning_staff.cleaning_staff_invitation;
+CREATE POLICY tenant_isolation ON cleaning_staff.cleaning_staff_invitation
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Trigram search on email.value (search_invitations).
 -- The search filters with % (served by this index), which compares with pg_trgm.similarity_threshold
@@ -26,6 +44,6 @@ CREATE TABLE IF NOT EXISTS cleaning_staff.cleaning_staff_invitation (
 CREATE INDEX IF NOT EXISTS cleaning_staff_invitation_email_value_trgm_idx
   ON cleaning_staff.cleaning_staff_invitation USING gin (lower(email_value) gin_trgm_ops);
 
--- Keyset order of search_invitations when it does not search (a search orders by relevance first).
+-- Keyset order of search_invitations, per tenant when it does not search (a search orders by relevance first).
 CREATE INDEX IF NOT EXISTS cleaning_staff_invitation_search_invitations_order_idx
-  ON cleaning_staff.cleaning_staff_invitation (created_at DESC, id DESC);
+  ON cleaning_staff.cleaning_staff_invitation (tenant_id, created_at DESC, id DESC);

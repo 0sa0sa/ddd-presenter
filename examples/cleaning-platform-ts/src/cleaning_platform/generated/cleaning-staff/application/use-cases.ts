@@ -4,14 +4,27 @@
 /** Use cases (application services) of the CleaningStaff context. */
 
 import type { DomainEvent, Id, UUID } from "../../runtime.js";
-import { allowIf, authorize, type Principal } from "../../security.js";
+import {
+  allowIf,
+  authorizeAcrossTenants,
+  authorizeInTenant,
+  type Principal,
+  type TenantId,
+} from "../../security.js";
 import { CleaningStaffInvitation } from "../domain/aggregates.js";
-import type { AcceptInvitation, IssueInvitation, RevokeInvitation } from "../domain/commands.js";
+import type {
+  AcceptInvitation,
+  InspectInvitation,
+  IssueInvitation,
+  RevokeInvitation,
+} from "../domain/commands.js";
+import type { InvitationStatus } from "../domain/enums.js";
 import { EmailBlocked, InvitationNotFound } from "../domain/errors.js";
 import { InvitationAccepted, InvitationIssued, InvitationRevoked } from "../domain/events.js";
 import type {
   CleaningStaffInvitationRepository,
   Clock,
+  CrossTenantAudit,
   EventPublisher,
   Extensions,
   IdGenerator,
@@ -23,7 +36,9 @@ import type {
  *
  * Actor: 清掃会社の管理者
  * Transaction: required
- * Authorize: the role admin
+ * Authorize: the permission invitation.issue
+ * Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+ * it.
  *
  * Steps:
  *   1. if is_blocked_email(email):
@@ -62,15 +77,15 @@ export class IssueInvitationUseCase {
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
    *
-   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-   * role (before anything is loaded) or when allow_if does not hold.
+   * `principal` is checked first: Unauthenticated without one or without an active tenant,
+   * NotAuthorized without a required role or permission in that tenant (before anything is loaded).
    */
   async execute(command: IssueInvitation, principal: Principal | null): Promise<UUID> {
-    authorize(principal, "issue_invitation", ["admin"]);
+    authorizeInTenant(principal, "issue_invitation", { permissions: ["invitation.issue"] });
     const afterCommit: DomainEvent[] = [];
     let result: UUID;
     try {
-      result = await this.#run(command, afterCommit);
+      result = await this.#run(command, principal.tenantId, afterCommit);
       await this.#unitOfWork.commit();
     } catch (error) {
       await this.#unitOfWork.rollback();
@@ -80,7 +95,11 @@ export class IssueInvitationUseCase {
     return result;
   }
 
-  async #run(command: IssueInvitation, afterCommit: DomainEvent[]): Promise<UUID> {
+  async #run(
+    command: IssueInvitation,
+    tenant: TenantId,
+    afterCommit: DomainEvent[],
+  ): Promise<UUID> {
     const emitted: DomainEvent[] = [];
     // 1. if is_blocked_email(email)
     if (await this.#extensions.isBlockedEmail(command.email)) {
@@ -89,6 +108,7 @@ export class IssueInvitationUseCase {
     }
     // 3. create CleaningStaffInvitation via issue
     const transition3 = CleaningStaffInvitation.issue({
+      tenantId: tenant,
       id: this.#ids.newId(),
       email: command.email,
       at: this.#clock.now(),
@@ -97,7 +117,7 @@ export class IssueInvitationUseCase {
     const invitation = transition3.aggregate;
     emitted.push(...transition3.events);
     // 4. save invitation
-    await this.#cleaningStaffInvitationRepository.save(invitation);
+    await this.#cleaningStaffInvitationRepository.save(tenant, invitation);
     // 5. publish InvitationIssued after commit
     afterCommit.push(...emitted.filter(InvitationIssued.is));
     // 6. return
@@ -110,9 +130,11 @@ export class IssueInvitationUseCase {
  *
  * Actor: スタッフ候補
  * Transaction: required
- * Authorize: the role candidate
+ * Authorize: the permission invitation.accept
  *   allow_if principal.email != null and principal.email == invitation.email.value (after loading
  *   invitation)
+ * Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+ * it.
  *
  * Steps:
  *   1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
@@ -142,14 +164,15 @@ export class AcceptInvitationUseCase {
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
    *
-   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-   * role (before anything is loaded) or when allow_if does not hold.
+   * `principal` is checked first: Unauthenticated without one or without an active tenant,
+   * NotAuthorized without a required role or permission in that tenant (before anything is loaded)
+   * or when allow_if does not hold.
    */
   async execute(command: AcceptInvitation, principal: Principal | null): Promise<void> {
-    authorize(principal, "accept_invitation", ["candidate"]);
+    authorizeInTenant(principal, "accept_invitation", { permissions: ["invitation.accept"] });
     const afterCommit: DomainEvent[] = [];
     try {
-      await this.#run(command, principal, afterCommit);
+      await this.#run(command, principal, principal.tenantId, afterCommit);
       await this.#unitOfWork.commit();
     } catch (error) {
       await this.#unitOfWork.rollback();
@@ -161,11 +184,13 @@ export class AcceptInvitationUseCase {
   async #run(
     command: AcceptInvitation,
     principal: Principal,
+    tenant: TenantId,
     afterCommit: DomainEvent[],
   ): Promise<void> {
     const emitted: DomainEvent[] = [];
     // 1. load CleaningStaffInvitation
     const loaded1 = await this.#cleaningStaffInvitationRepository.get(
+      tenant,
       command.invitationId as Id<"CleaningStaffInvitation">,
     );
     if (loaded1 === null) throw new InvitationNotFound({ id: command.invitationId });
@@ -180,7 +205,7 @@ export class AcceptInvitationUseCase {
     invitation = transition2.aggregate;
     emitted.push(...transition2.events);
     // 3. save invitation
-    await this.#cleaningStaffInvitationRepository.save(invitation);
+    await this.#cleaningStaffInvitationRepository.save(tenant, invitation);
     // 4. publish InvitationAccepted after commit
     afterCommit.push(...emitted.filter(InvitationAccepted.is));
   }
@@ -191,7 +216,9 @@ export class AcceptInvitationUseCase {
  *
  * Actor: 清掃会社の管理者
  * Transaction: required
- * Authorize: the role admin
+ * Authorize: the permission invitation.revoke
+ * Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+ * it.
  *
  * Steps:
  *   1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
@@ -222,15 +249,15 @@ export class RevokeInvitationUseCase {
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
    *
-   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-   * role (before anything is loaded) or when allow_if does not hold.
+   * `principal` is checked first: Unauthenticated without one or without an active tenant,
+   * NotAuthorized without a required role or permission in that tenant (before anything is loaded).
    */
   async execute(command: RevokeInvitation, principal: Principal | null): Promise<boolean> {
-    authorize(principal, "revoke_invitation", ["admin"]);
+    authorizeInTenant(principal, "revoke_invitation", { permissions: ["invitation.revoke"] });
     const afterCommit: DomainEvent[] = [];
     let result: boolean;
     try {
-      result = await this.#run(command, afterCommit);
+      result = await this.#run(command, principal.tenantId, afterCommit);
       await this.#unitOfWork.commit();
     } catch (error) {
       await this.#unitOfWork.rollback();
@@ -240,10 +267,15 @@ export class RevokeInvitationUseCase {
     return result;
   }
 
-  async #run(command: RevokeInvitation, afterCommit: DomainEvent[]): Promise<boolean> {
+  async #run(
+    command: RevokeInvitation,
+    tenant: TenantId,
+    afterCommit: DomainEvent[],
+  ): Promise<boolean> {
     const emitted: DomainEvent[] = [];
     // 1. load CleaningStaffInvitation
     const loaded1 = await this.#cleaningStaffInvitationRepository.get(
+      tenant,
       command.invitationId as Id<"CleaningStaffInvitation">,
     );
     if (loaded1 === null) throw new InvitationNotFound({ id: command.invitationId });
@@ -255,7 +287,7 @@ export class RevokeInvitationUseCase {
       invitation = transition3.aggregate;
       emitted.push(...transition3.events);
       // 4. save invitation
-      await this.#cleaningStaffInvitationRepository.save(invitation);
+      await this.#cleaningStaffInvitationRepository.save(tenant, invitation);
       // 5. publish InvitationRevoked after commit
       afterCommit.push(...emitted.filter(InvitationRevoked.is));
       // 6. return
@@ -264,5 +296,64 @@ export class RevokeInvitationUseCase {
       // 7. return
       return false;
     }
+  }
+}
+
+/**
+ * Use case inspect_invitation.
+ *
+ * Actor: 運用担当
+ * Transaction: none
+ * Authorize: the permission invitation.read
+ * Tenant: command.tenantId (cross-tenant: platform roles only; every access is recorded by the
+ * CrossTenantAudit port first).
+ *
+ * Steps:
+ *   1. load CleaningStaffInvitation by invitation_id as invitation (not found: InvitationNotFound)
+ *   2. return invitation.status
+ */
+export class InspectInvitationUseCase {
+  readonly #cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
+  readonly #audit: CrossTenantAudit;
+
+  constructor(deps: {
+    readonly cleaningStaffInvitationRepository: CleaningStaffInvitationRepository;
+    readonly audit: CrossTenantAudit;
+  }) {
+    this.#cleaningStaffInvitationRepository = deps.cleaningStaffInvitationRepository;
+    this.#audit = deps.audit;
+  }
+
+  /**
+   * Runs the steps without a transaction boundary.
+   *
+   * `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+   * platform role or permission (before anything is loaded). Then the access to command.tenantId is
+   * recorded.
+   */
+  async execute(
+    command: InspectInvitation,
+    principal: Principal | null,
+  ): Promise<InvitationStatus> {
+    authorizeAcrossTenants(principal, "inspect_invitation", { permissions: ["invitation.read"] });
+    // Every cross-tenant access is recorded before anything of the tenant is read.
+    await this.#audit.record({
+      action: "inspect_invitation",
+      principal,
+      tenantId: command.tenantId,
+    });
+    const result = await this.#run(command, command.tenantId);
+    return result;
+  }
+
+  async #run(command: InspectInvitation, tenant: TenantId): Promise<InvitationStatus> {
+    // 1. load CleaningStaffInvitation
+    const invitation = await this.#cleaningStaffInvitationRepository.get(
+      tenant,
+      command.invitationId as Id<"CleaningStaffInvitation">,
+    );
+    if (invitation === null) throw new InvitationNotFound({ id: command.invitationId });
+    // 2. return
+    return invitation.status;
   }
 }

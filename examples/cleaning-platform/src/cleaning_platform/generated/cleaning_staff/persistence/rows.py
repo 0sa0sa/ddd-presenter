@@ -22,6 +22,7 @@ __all__ = [
 # Columns of cleaning_staff.cleaning_staff_invitation in the order the INSERT / UPDATE statements
 # bind them.
 CLEANING_STAFF_INVITATION_COLUMNS: Final = (
+    "tenant_id",
     "id",
     "email_value",
     "status",
@@ -37,6 +38,7 @@ def cleaning_staff_invitation_to_row(aggregate: CleaningStaffInvitation) -> dict
     JSON (model field names).
     """
     return {
+        "tenant_id": aggregate.tenant_id,
         "id": aggregate.id,
         "email_value": aggregate.email.value,
         "status": aggregate.status.value,
@@ -57,6 +59,7 @@ def cleaning_staff_invitation_from_row(row: Mapping[str, Any]) -> CleaningStaffI
     """
     return CleaningStaffInvitation.model_validate(
         {
+            "tenant_id": row["tenant_id"],
             "id": row["id"],
             "email": {
                 "value": row["email_value"],

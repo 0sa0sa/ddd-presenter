@@ -6,16 +6,20 @@
 import { z } from "zod";
 
 import { type DomainEvent, type EventType, parseWith, uuidSchema } from "../../runtime.js";
+import { TenantIdSchema } from "../../security.js";
 
 const StaffRegisteredSchema = z
   .strictObject({
     type: z.literal("Staffing.StaffRegistered"),
+    tenantId: TenantIdSchema,
     id: uuidSchema,
     invitationId: uuidSchema,
   })
   .readonly();
 
-/** Emitted by StaffMember.register. */
+/**
+ * Emitted by StaffMember.register. Carries the tenant (`tenantId`) of the aggregate it comes from.
+ */
 export type StaffRegistered = z.output<typeof StaffRegisteredSchema>;
 /** Payload of `StaffRegistered.create`: the event without its `type`. */
 export type StaffRegisteredInput = Omit<z.input<typeof StaffRegisteredSchema>, "type">;

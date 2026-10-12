@@ -11,6 +11,7 @@ import {
   type CleaningStaffInvitationInput,
 } from "../../src/cleaning_platform/generated/cleaning-staff/domain/aggregates.js";
 import { RevokeInvitation } from "../../src/cleaning_platform/generated/cleaning-staff/domain/commands.js";
+import { InvitationNotFound } from "../../src/cleaning_platform/generated/cleaning-staff/domain/errors.js";
 import { parseCleaningStaffEvent } from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import {
   aggregateViaJson,
@@ -27,6 +28,7 @@ import { id } from "../../src/cleaning_platform/generated/runtime.js";
 import {
   NotAuthorized,
   Principal,
+  tenantId,
   Unauthenticated,
 } from "../../src/cleaning_platform/generated/security.js";
 
@@ -47,6 +49,7 @@ describe("revoke_invitation", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -63,12 +66,17 @@ describe("revoke_invitation", () => {
     const command = RevokeInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["admin"],
+    });
     const result = await useCase.execute(command, principal);
     expect(result).toBe(true);
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
       cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
         id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
@@ -103,6 +111,7 @@ describe("revoke_invitation", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "accepted",
@@ -120,7 +129,11 @@ describe("revoke_invitation", () => {
     const command = RevokeInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["admin"],
+    });
     const result = await useCase.execute(command, principal);
     expect(result).toBe(false);
     expect(unitOfWork.committed).toBe(true);
@@ -157,10 +170,10 @@ describe("revoke_invitation", () => {
   });
 
   /**
-   * A principal with only the other roles (candidate) lacks admin: revoke_invitation raises
-   * NotAuthorized naming the required roles, before it touches a repository.
+   * A principal whose token names no tenant (and so holds no tenant role) cannot act on tenant
+   * data: revoke_invitation raises Unauthenticated (missing_tenant) before it touches a repository.
    */
-  test("authorization: a missing role is refused before any load", async () => {
+  test("authorization: a token without an active tenant is refused before any load", async () => {
     // Repositories that fail the test when the use case touches them: authorization comes first.
     const untouched = {
       get: (): never => {
@@ -180,9 +193,86 @@ describe("revoke_invitation", () => {
     const command = RevokeInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const error = await expectRejects(() => useCase.execute(command, principal), Unauthenticated);
+    expect(error.details).toEqual({ action: "revoke_invitation", error: "missing_tenant" });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * A principal with only the other roles (staff, candidate) lacks invitation.revoke:
+   * revoke_invitation raises NotAuthorized naming the requirement, before it touches a repository.
+   */
+  test("authorization: a missing role or permission is refused before any load", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new RevokeInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = RevokeInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff", "candidate"],
+    });
     const error = await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
-    expect(error.details).toEqual({ action: "revoke_invitation", requiredRoles: ["admin"] });
+    expect(error.details).toEqual({
+      action: "revoke_invitation",
+      requiredPermissions: ["invitation.revoke"],
+    });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * Scenario `open_invitation_is_revoked` run by the same principal in another tenant: the
+   * CleaningStaffInvitation of tenant 00000000-0000-4000-8000-0000000000a1 does not exist there
+   * (InvitationNotFound), and nothing is committed.
+   */
+  test("tenancy: another tenant's CleaningStaffInvitation is not found", async () => {
+    const unitOfWork = new FakeUnitOfWork();
+    const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
+      unitOfWork,
+    );
+    cleaningStaffInvitationRepository.seed(
+      CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
+        id: "00000000-0000-0000-0000-000000000001",
+        email: { value: "staff@example.com" },
+        status: "pending",
+        createdAt: "2026-01-01T10:00:00+00:00",
+        expiresAt: "2026-01-08T10:00:00+00:00",
+      }),
+    );
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new RevokeInvitationUseCase({
+      cleaningStaffInvitationRepository,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = RevokeInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000b2",
+      roles: ["admin"],
+    });
+    await expectRejects(() => useCase.execute(command, principal), InvitationNotFound);
     expect(unitOfWork.committed).toBe(false);
     expect(eventPublisher.published).toEqual([]);
   });

@@ -27,7 +27,7 @@ from cleaning_platform.generated.cleaning_staff.testing import (
     FixedClock,
     InMemoryCleaningStaffInvitationRepository,
 )
-from cleaning_platform.generated.security import NotAuthorized, Principal, Unauthenticated
+from cleaning_platform.generated.security import NotAuthorized, Principal, TenantId, Unauthenticated
 
 
 def test_pending_invitation_is_accepted() -> None:
@@ -43,6 +43,7 @@ def test_pending_invitation_is_accepted() -> None:
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
     cleaning_staff_invitation_repository.seed(
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.PENDING,
@@ -59,11 +60,17 @@ def test_pending_invitation_is_accepted() -> None:
         unit_of_work=unit_of_work,
     )
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
-    principal = Principal(id="candidate-1", roles=("candidate",), email="staff@example.com")
+    principal = Principal(
+        id="candidate-1",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("candidate",),
+        email="staff@example.com",
+    )
     use_case.execute(command, principal)
     assert unit_of_work.committed
     stored_0 = cleaning_staff_invitation_repository.get(
-        UUID("00000000-0000-0000-0000-000000000001")
+        TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        UUID("00000000-0000-0000-0000-000000000001"),
     )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.ACCEPTED
@@ -91,6 +98,7 @@ def test_expired_invitation_is_rejected() -> None:
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
     cleaning_staff_invitation_repository.seed(
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.PENDING,
@@ -107,13 +115,19 @@ def test_expired_invitation_is_rejected() -> None:
         unit_of_work=unit_of_work,
     )
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
-    principal = Principal(id="candidate-1", roles=("candidate",), email="staff@example.com")
+    principal = Principal(
+        id="candidate-1",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("candidate",),
+        email="staff@example.com",
+    )
     with pytest.raises(InvitationNotDeliverable):
         use_case.execute(command, principal)
     assert not unit_of_work.committed
     assert unit_of_work.rolled_back
     stored_0 = cleaning_staff_invitation_repository.get(
-        UUID("00000000-0000-0000-0000-000000000001")
+        TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        UUID("00000000-0000-0000-0000-000000000001"),
     )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.PENDING
@@ -138,7 +152,12 @@ def test_unknown_invitation_is_not_found() -> None:
         unit_of_work=unit_of_work,
     )
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000099"))
-    principal = Principal(id="candidate-1", roles=("candidate",), email="staff@example.com")
+    principal = Principal(
+        id="candidate-1",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("candidate",),
+        email="staff@example.com",
+    )
     with pytest.raises(InvitationNotFound):
         use_case.execute(command, principal)
     assert not unit_of_work.committed
@@ -158,6 +177,7 @@ def test_another_candidate_cannot_accept() -> None:
     cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
     cleaning_staff_invitation_repository.seed(
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.PENDING,
@@ -174,12 +194,18 @@ def test_another_candidate_cannot_accept() -> None:
         unit_of_work=unit_of_work,
     )
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
-    principal = Principal(id="candidate-2", roles=("candidate",), email="someone-else@example.com")
+    principal = Principal(
+        id="candidate-2",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("candidate",),
+        email="someone-else@example.com",
+    )
     with pytest.raises(NotAuthorized):
         use_case.execute(command, principal)
     assert not unit_of_work.committed
     stored_0 = cleaning_staff_invitation_repository.get(
-        UUID("00000000-0000-0000-0000-000000000001")
+        TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        UUID("00000000-0000-0000-0000-000000000001"),
     )
     assert stored_0 is not None
     assert stored_0.status == InvitationStatus.PENDING
@@ -191,10 +217,10 @@ class _UntouchedCleaningStaffInvitationRepository:
     first.
     """
 
-    def get(self, id: UUID) -> NoReturn:
+    def get(self, tenant: TenantId, id: UUID) -> NoReturn:
         raise AssertionError("loaded before authorization")
 
-    def save(self, aggregate: CleaningStaffInvitation) -> NoReturn:
+    def save(self, tenant: TenantId, aggregate: CleaningStaffInvitation) -> NoReturn:
         raise AssertionError("saved before authorization")
 
 
@@ -218,9 +244,9 @@ def test_authorization_anonymous_is_unauthenticated() -> None:
     assert event_publisher.published == []
 
 
-def test_authorization_missing_role_is_refused() -> None:
-    """A principal with only the other roles (admin) lacks candidate: accept_invitation raises
-    NotAuthorized naming the required roles, before it touches a repository.
+def test_authorization_without_tenant_is_unauthenticated() -> None:
+    """A principal whose token names no tenant (and so holds no tenant role) cannot act on tenant
+    data: accept_invitation raises Unauthenticated (missing_tenant) before it touches a repository.
     """
     unit_of_work = FakeUnitOfWork()
     event_publisher = CapturingEventPublisher()
@@ -231,9 +257,72 @@ def test_authorization_missing_role_is_refused() -> None:
         unit_of_work=unit_of_work,
     )
     command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
-    principal = Principal(id="test-principal", roles=("admin",))
-    with pytest.raises(NotAuthorized) as raised:
+    principal = Principal(id="test-principal", roles=("candidate",))
+    with pytest.raises(Unauthenticated) as raised:
         use_case.execute(command, principal)
-    assert raised.value.details == {"action": "accept_invitation", "required_roles": ["candidate"]}
+    assert raised.value.details == {"action": "accept_invitation", "error": "missing_tenant"}
     assert not unit_of_work.committed
     assert event_publisher.published == []
+
+
+def test_authorization_missing_role_or_permission_is_refused() -> None:
+    """A principal with only the other roles (admin, staff) lacks invitation.accept:
+    accept_invitation raises NotAuthorized naming the requirement, before it touches a repository.
+    """
+    unit_of_work = FakeUnitOfWork()
+    event_publisher = CapturingEventPublisher()
+    use_case = AcceptInvitationUseCase(
+        cleaning_staff_invitation_repository=_UntouchedCleaningStaffInvitationRepository(),
+        clock=FixedClock(datetime.fromisoformat("1970-01-01T00:00:00+00:00")),
+        event_publisher=event_publisher,
+        unit_of_work=unit_of_work,
+    )
+    command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("admin", "staff"),
+    )
+    with pytest.raises(NotAuthorized) as raised:
+        use_case.execute(command, principal)
+    assert raised.value.details == {
+        "action": "accept_invitation",
+        "required_permissions": ["invitation.accept"],
+    }
+    assert not unit_of_work.committed
+    assert event_publisher.published == []
+
+
+def test_tenancy_another_tenants_cleaning_staff_invitation_is_not_found() -> None:
+    """Scenario `pending_invitation_is_accepted` run by the same principal in another tenant: the
+    CleaningStaffInvitation of tenant 00000000-0000-4000-8000-0000000000a1 does not exist there
+    (InvitationNotFound), and nothing is committed.
+    """
+    unit_of_work = FakeUnitOfWork()
+    cleaning_staff_invitation_repository = InMemoryCleaningStaffInvitationRepository(unit_of_work)
+    cleaning_staff_invitation_repository.seed(
+        CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+            id=UUID("00000000-0000-0000-0000-000000000001"),
+            email=EmailAddress(value="staff@example.com"),
+            status=InvitationStatus.PENDING,
+            created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
+            expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
+        )
+    )
+    use_case = AcceptInvitationUseCase(
+        cleaning_staff_invitation_repository=cleaning_staff_invitation_repository,
+        clock=FixedClock(datetime.fromisoformat("2026-01-02T10:00:00+00:00")),
+        event_publisher=CapturingEventPublisher(),
+        unit_of_work=unit_of_work,
+    )
+    command = AcceptInvitation(invitation_id=UUID("00000000-0000-0000-0000-000000000001"))
+    principal = Principal(
+        id="candidate-1",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000b2")),
+        roles=("candidate",),
+        email="staff@example.com",
+    )
+    with pytest.raises(InvitationNotFound):
+        use_case.execute(command, principal)
+    assert not unit_of_work.committed

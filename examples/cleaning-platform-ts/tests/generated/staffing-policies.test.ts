@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 
 import * as cleaningStaffEvents from "../../src/cleaning_platform/generated/cleaning-staff/domain/events.js";
 import { dispatch, instant, uuid } from "../../src/cleaning_platform/generated/runtime.js";
+import { type TenantContext, tenantId } from "../../src/cleaning_platform/generated/security.js";
 import {
   RegisterStaffOnAcceptancePolicy,
   type RegisterStaffRunner,
@@ -15,12 +16,17 @@ import {
 import type { RegisterStaff } from "../../src/cleaning_platform/generated/staffing/domain/commands.js";
 import { expectPresent } from "../../src/cleaning_platform/generated/staffing/testing.js";
 
-/** Stands in for use case register_staff and records the commands it receives. */
+/**
+ * Stands in for use case register_staff and records the commands it receives and the tenants it
+ * runs in.
+ */
 class RecordingRegisterStaff implements RegisterStaffRunner {
   readonly commands: RegisterStaff[] = [];
+  readonly contexts: TenantContext[] = [];
 
-  execute(command: RegisterStaff): Promise<void> {
+  execute(command: RegisterStaff, context: TenantContext): Promise<void> {
     this.commands.push(command);
+    this.contexts.push(context);
     return Promise.resolve();
   }
 }
@@ -38,11 +44,14 @@ describe("Staffing policies", () => {
     const policy = new RegisterStaffOnAcceptancePolicy({ useCase: useCase });
     const event: cleaningStaffEvents.InvitationAccepted = {
       type: cleaningStaffEvents.InvitationAccepted.type,
+      tenantId: tenantId("00000000-0000-4000-8000-0000000000a1"),
       id: uuid("00000000-0000-0000-0000-0000000000e1"),
       at: instant("2026-01-02T09:00:00+00:00"),
     };
     await policy.handle(event);
     expect(useCase.commands).toHaveLength(1);
+    // The use case runs in the tenant of the event.
+    expect(useCase.contexts).toEqual([{ tenantId: event.tenantId }]);
     const command = expectPresent(useCase.commands[0]);
     expect(command.invitationId).toBe(uuid("00000000-0000-0000-0000-0000000000e1"));
     expect(command.joinedAt).toBe(instant("2026-01-02T09:00:00+00:00"));
@@ -54,6 +63,7 @@ describe("Staffing policies", () => {
     const policy0 = new RegisterStaffOnAcceptancePolicy({ useCase: useCase0 });
     const event0: cleaningStaffEvents.InvitationAccepted = {
       type: cleaningStaffEvents.InvitationAccepted.type,
+      tenantId: tenantId("00000000-0000-4000-8000-0000000000a1"),
       id: uuid("00000000-0000-0000-0000-0000000000e1"),
       at: instant("2026-01-02T09:00:00+00:00"),
     };

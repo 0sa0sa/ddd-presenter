@@ -36,6 +36,7 @@ import { id } from "../../src/cleaning_platform/generated/runtime.js";
 import {
   NotAuthorized,
   Principal,
+  tenantId,
   Unauthenticated,
 } from "../../src/cleaning_platform/generated/security.js";
 
@@ -56,6 +57,7 @@ describe("accept_invitation", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -76,6 +78,7 @@ describe("accept_invitation", () => {
     });
     const principal = Principal.create({
       id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "staff@example.com",
     });
@@ -83,6 +86,7 @@ describe("accept_invitation", () => {
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
       cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
         id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
@@ -122,6 +126,7 @@ describe("accept_invitation", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -142,6 +147,7 @@ describe("accept_invitation", () => {
     });
     const principal = Principal.create({
       id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "staff@example.com",
     });
@@ -150,6 +156,7 @@ describe("accept_invitation", () => {
     expect(unitOfWork.rolledBack).toBe(true);
     const stored0 = expectPresent(
       cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
         id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
@@ -189,6 +196,7 @@ describe("accept_invitation", () => {
     });
     const principal = Principal.create({
       id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "staff@example.com",
     });
@@ -213,6 +221,7 @@ describe("accept_invitation", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -233,6 +242,7 @@ describe("accept_invitation", () => {
     });
     const principal = Principal.create({
       id: "candidate-2",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "someone-else@example.com",
     });
@@ -240,6 +250,7 @@ describe("accept_invitation", () => {
     expect(unitOfWork.committed).toBe(false);
     const stored0 = expectPresent(
       cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
         id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
       "stored CleaningStaffInvitation",
@@ -285,10 +296,10 @@ describe("accept_invitation", () => {
   });
 
   /**
-   * A principal with only the other roles (admin) lacks candidate: accept_invitation raises
-   * NotAuthorized naming the required roles, before it touches a repository.
+   * A principal whose token names no tenant (and so holds no tenant role) cannot act on tenant
+   * data: accept_invitation raises Unauthenticated (missing_tenant) before it touches a repository.
    */
-  test("authorization: a missing role is refused before any load", async () => {
+  test("authorization: a token without an active tenant is refused before any load", async () => {
     // Repositories that fail the test when the use case touches them: authorization comes first.
     const untouched = {
       get: (): never => {
@@ -309,9 +320,90 @@ describe("accept_invitation", () => {
     const command = AcceptInvitation.create({
       invitationId: "00000000-0000-0000-0000-000000000001",
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const error = await expectRejects(() => useCase.execute(command, principal), Unauthenticated);
+    expect(error.details).toEqual({ action: "accept_invitation", error: "missing_tenant" });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * A principal with only the other roles (admin, staff) lacks invitation.accept: accept_invitation
+   * raises NotAuthorized naming the requirement, before it touches a repository.
+   */
+  test("authorization: a missing role or permission is refused before any load", async () => {
+    // Repositories that fail the test when the use case touches them: authorization comes first.
+    const untouched = {
+      get: (): never => {
+        throw new Error("loaded before authorization");
+      },
+      save: (): never => {
+        throw new Error("saved before authorization");
+      },
+    };
+    const unitOfWork = new FakeUnitOfWork();
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new AcceptInvitationUseCase({
+      cleaningStaffInvitationRepository: untouched,
+      clock: new FixedClock("1970-01-01T00:00:00+00:00"),
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = AcceptInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["admin", "staff"],
+    });
     const error = await expectRejects(() => useCase.execute(command, principal), NotAuthorized);
-    expect(error.details).toEqual({ action: "accept_invitation", requiredRoles: ["candidate"] });
+    expect(error.details).toEqual({
+      action: "accept_invitation",
+      requiredPermissions: ["invitation.accept"],
+    });
+    expect(unitOfWork.committed).toBe(false);
+    expect(eventPublisher.published).toEqual([]);
+  });
+
+  /**
+   * Scenario `pending_invitation_is_accepted` run by the same principal in another tenant: the
+   * CleaningStaffInvitation of tenant 00000000-0000-4000-8000-0000000000a1 does not exist there
+   * (InvitationNotFound), and nothing is committed.
+   */
+  test("tenancy: another tenant's CleaningStaffInvitation is not found", async () => {
+    const unitOfWork = new FakeUnitOfWork();
+    const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
+      unitOfWork,
+    );
+    cleaningStaffInvitationRepository.seed(
+      CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
+        id: "00000000-0000-0000-0000-000000000001",
+        email: { value: "staff@example.com" },
+        status: "pending",
+        createdAt: "2026-01-01T10:00:00+00:00",
+        expiresAt: "2026-01-08T10:00:00+00:00",
+      }),
+    );
+    const clock = new FixedClock("2026-01-02T10:00:00+00:00");
+    const eventPublisher = new CapturingEventPublisher();
+    const useCase = new AcceptInvitationUseCase({
+      cleaningStaffInvitationRepository,
+      clock,
+      eventPublisher,
+      unitOfWork,
+    });
+    const command = AcceptInvitation.create({
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    });
+    const principal = Principal.create({
+      id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000b2",
+      roles: ["candidate"],
+      email: "staff@example.com",
+    });
+    await expectRejects(() => useCase.execute(command, principal), InvitationNotFound);
     expect(unitOfWork.committed).toBe(false);
     expect(eventPublisher.published).toEqual([]);
   });

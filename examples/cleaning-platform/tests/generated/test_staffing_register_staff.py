@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from cleaning_platform.generated.security import TenantContext, TenantId
 from cleaning_platform.generated.staffing.application.use_cases import RegisterStaffUseCase
 from cleaning_platform.generated.staffing.domain.commands import RegisterStaff
 from cleaning_platform.generated.staffing.domain.events import StaffRegistered, parse_event
@@ -43,10 +44,14 @@ def test_accepted_invitation_registers_staff() -> None:
         invitation_id=UUID("00000000-0000-0000-0000-000000000001"),
         joined_at=datetime.fromisoformat("2026-01-02T10:00:00+00:00"),
     )
-    result = use_case.execute(command)
+    context = TenantContext(tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")))
+    result = use_case.execute(command, context)
     assert result == UUID("00000000-0000-0000-0000-0000000000bb")
     assert unit_of_work.committed
-    stored_0 = staff_member_repository.get(UUID("00000000-0000-0000-0000-0000000000bb"))
+    stored_0 = staff_member_repository.get(
+        TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        UUID("00000000-0000-0000-0000-0000000000bb"),
+    )
     assert stored_0 is not None
     assert stored_0.invitation_id == UUID("00000000-0000-0000-0000-000000000001")
     assert stored_0.joined_at == datetime.fromisoformat("2026-01-02T10:00:00+00:00")

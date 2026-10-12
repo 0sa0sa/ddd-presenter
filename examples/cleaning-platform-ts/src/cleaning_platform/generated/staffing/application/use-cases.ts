@@ -4,6 +4,7 @@
 /** Use cases (application services) of the Staffing context. */
 
 import type { DomainEvent, UUID } from "../../runtime.js";
+import type { TenantContext, TenantId } from "../../security.js";
 import { StaffMember } from "../domain/aggregates.js";
 import type { RegisterStaff } from "../domain/commands.js";
 import { StaffRegistered } from "../domain/events.js";
@@ -14,7 +15,8 @@ import type { EventPublisher, IdGenerator, StaffMemberRepository, UnitOfWork } f
  *
  * Actor: システム（ポリシー）
  * Transaction: required
- * Authorize: internal (run in-process, e.g. by a policy; never served over HTTP)
+ * Authorize: internal (run in-process, e.g. by a policy, in the tenant it is given; never served
+ * over HTTP)
  *
  * Steps:
  *   1. create StaffMember via register(id=ids.new, invitation_id=invitation_id,
@@ -44,12 +46,15 @@ export class RegisterStaffUseCase {
   /**
    * Runs the steps in one transaction. Events marked publish_after_commit are published only after
    * a successful commit.
+   *
+   * `context` names the tenant it runs in (a policy passes its event's tenant); every repository
+   * call is bound to it.
    */
-  async execute(command: RegisterStaff): Promise<UUID> {
+  async execute(command: RegisterStaff, context: TenantContext): Promise<UUID> {
     const afterCommit: DomainEvent[] = [];
     let result: UUID;
     try {
-      result = await this.#run(command, afterCommit);
+      result = await this.#run(command, context.tenantId, afterCommit);
       await this.#unitOfWork.commit();
     } catch (error) {
       await this.#unitOfWork.rollback();
@@ -59,10 +64,11 @@ export class RegisterStaffUseCase {
     return result;
   }
 
-  async #run(command: RegisterStaff, afterCommit: DomainEvent[]): Promise<UUID> {
+  async #run(command: RegisterStaff, tenant: TenantId, afterCommit: DomainEvent[]): Promise<UUID> {
     const emitted: DomainEvent[] = [];
     // 1. create StaffMember via register
     const transition1 = StaffMember.register({
+      tenantId: tenant,
       id: this.#ids.newId(),
       invitationId: command.invitationId,
       joinedAt: command.joinedAt,
@@ -70,7 +76,7 @@ export class RegisterStaffUseCase {
     const staff = transition1.aggregate;
     emitted.push(...transition1.events);
     // 2. save staff
-    await this.#staffMemberRepository.save(staff);
+    await this.#staffMemberRepository.save(tenant, staff);
     // 3. publish StaffRegistered after commit
     afterCommit.push(...emitted.filter(StaffRegistered.is));
     // 4. return

@@ -29,6 +29,8 @@ import {
 } from "../../src/cleaning_platform/generated/runtime.js";
 
 const invitationInput = {
+  // Invitations are tenant-scoped (security.tenancy): each belongs to one tenant.
+  tenantId: "00000000-0000-4000-8000-0000000000a1",
   id: "00000000-0000-0000-0000-000000000001",
   email: { value: "staff@example.com" },
   status: "pending",
@@ -115,6 +117,7 @@ describe("LocalDate", () => {
 describe("JSON", () => {
   test("an event round-trips; its instants are canonical strings", () => {
     const event = InvitationIssued.create({
+      tenantId: invitationInput.tenantId,
       id: invitationInput.id,
       email: invitationInput.email,
       expiresAt: invitationInput.expiresAt,

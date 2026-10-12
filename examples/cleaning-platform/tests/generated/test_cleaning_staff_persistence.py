@@ -36,6 +36,7 @@ from cleaning_platform.generated.cleaning_staff.persistence.rows import (
     cleaning_staff_invitation_from_row,
     cleaning_staff_invitation_to_row,
 )
+from cleaning_platform.generated.security import TenantId, TenantMismatch
 
 
 class _Cursor:
@@ -84,6 +85,7 @@ def test_cleaning_staff_invitation_row_round_trip() -> None:
     the same aggregate.
     """
     aggregate = CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000001"),
         email=EmailAddress(value="staff@example.com"),
         status=InvitationStatus.PENDING,
@@ -98,42 +100,85 @@ def test_cleaning_staff_invitation_row_round_trip() -> None:
     ).same_state_as(aggregate)
 
 
-def test_cleaning_staff_invitation_insert_update_at_the_loaded_version_and_conflicts() -> None:
-    """Optimistic locking: what the repository did not load is inserted (version 1); what it loaded
-    is updated only at the loaded version. No row back (a lost race) is a ConcurrencyConflict.
+def test_cleaning_staff_invitation_tenant_bound_insert_update_and_conflicts() -> None:
+    """Optimistic locking per tenant: the tenant is the first value of every statement, what the
+    repository did not load is inserted, what it loaded is updated at the loaded version, a lost
+    race is a ConcurrencyConflict. Each call first sets app.tenant_id for the transaction (row level
+    security); the first one checks that it holds.
     """
     aggregate = CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000001"),
         email=EmailAddress(value="staff@example.com"),
         status=InvitationStatus.PENDING,
         created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
         expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
     )
-    connection = _ScriptedConnection([{"version": 1}], [{"version": 2}], [])
+    tenant = TenantId(UUID("00000000-0000-4000-8000-0000000000a1"))
+    connection = _ScriptedConnection(
+        [], [{"tenant": str(tenant)}], [{"version": 1}], [], [{"version": 2}], [], []
+    )
     repository: CleaningStaffInvitationRepository = PostgresCleaningStaffInvitationRepository(
         connection
     )
-    repository.save(aggregate)
-    repository.save(aggregate)
+    repository.save(tenant, aggregate)
+    repository.save(tenant, aggregate)
     with pytest.raises(ConcurrencyConflict):
-        repository.save(aggregate)
-    assert connection.queries == [
+        repository.save(tenant, aggregate)
+    pairs = list(zip(connection.queries, connection.params, strict=True))
+    data = [(q, p) for q, p in pairs if "app.tenant_id" not in q]
+    assert [q for q, _ in data] == [
         CLEANING_STAFF_INVITATION_TABLE.insert,
         CLEANING_STAFF_INVITATION_TABLE.update,
         CLEANING_STAFF_INVITATION_TABLE.update,
     ]
-    assert [params.get("p7") for params in connection.params] == [None, 1, 2]
-    loaded = _ScriptedConnection(
-        [{**_database_row(cleaning_staff_invitation_to_row(aggregate)), "version": 7}],
-        [],
-    )
-    other = PostgresCleaningStaffInvitationRepository(loaded)
-    found = other.get(aggregate.id)
+    assert [p["p1"] for _, p in data] == [tenant, tenant, tenant]
+    assert [p.get("p8") for _, p in data] == [None, 1, 2]
+    row = {**_database_row(cleaning_staff_invitation_to_row(aggregate)), "version": 7}
+    loaded = _ScriptedConnection([], [{"tenant": str(tenant)}], [row])
+    found = PostgresCleaningStaffInvitationRepository(loaded).get(tenant, aggregate.id)
     assert found is not None
     assert found.same_state_as(aggregate)
-    with pytest.raises(ConcurrencyConflict):
-        other.save(aggregate)
-    assert loaded.params[1]["p7"] == 7
+    assert loaded.params[-1] == {"p1": tenant, "p2": aggregate.id}
+
+
+def test_cleaning_staff_invitation_saving_for_another_tenant_is_refused() -> None:
+    """An aggregate of one tenant is never stored for another: TenantMismatch before any
+    statement.
+    """
+    connection = _ScriptedConnection()
+    with pytest.raises(TenantMismatch):
+        PostgresCleaningStaffInvitationRepository(connection).save(
+            TenantId(UUID("00000000-0000-4000-8000-0000000000b2")),
+            CleaningStaffInvitation(
+                tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+                id=UUID("00000000-0000-0000-0000-000000000001"),
+                email=EmailAddress(value="staff@example.com"),
+                status=InvitationStatus.PENDING,
+                created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
+                expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
+            ),
+        )
+    assert connection.queries == []
+
+
+def test_cleaning_staff_invitation_row_level_security_needs_a_transaction() -> None:
+    """Outside a transaction (autocommit) the tenant setting does not hold: the repository refuses
+    to run instead of silently reading nothing.
+    """
+    connection = _ScriptedConnection([], [{"tenant": ""}])
+    with pytest.raises(RuntimeError, match="transaction"):
+        PostgresCleaningStaffInvitationRepository(connection).get(
+            TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+            CleaningStaffInvitation(
+                tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+                id=UUID("00000000-0000-0000-0000-000000000001"),
+                email=EmailAddress(value="staff@example.com"),
+                status=InvitationStatus.PENDING,
+                created_at=datetime.fromisoformat("2026-01-01T10:00:00+00:00"),
+                expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
+            ).id,
+        )
 
 
 def test_cursor_codec_signature_fingerprint_rotation_and_expiry() -> None:

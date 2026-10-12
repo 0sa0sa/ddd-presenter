@@ -17,10 +17,15 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
     parse_event,
 )
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
+
+# Invitations are tenant-scoped (security.tenancy): each belongs to one tenant.
+TENANT = TenantId(UUID("00000000-0000-4000-8000-0000000000a1"))
 
 
 def invitation() -> CleaningStaffInvitation:
     return CleaningStaffInvitation(
+        tenant_id=TENANT,
         id=UUID(int=1),
         email=EmailAddress(value="staff@example.com"),
         status=InvitationStatus.PENDING,
@@ -60,6 +65,7 @@ def test_constraint_violation_keeps_the_pydantic_error_as_cause() -> None:
 
 def test_events_round_trip_through_json() -> None:
     event = InvitationIssued(
+        tenant_id=TENANT,
         id=UUID(int=1),
         email=EmailAddress(value="staff@example.com"),
         expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),

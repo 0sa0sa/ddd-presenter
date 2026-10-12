@@ -22,6 +22,7 @@ from cleaning_platform.generated.cleaning_staff.persistence.rows import (
     cleaning_staff_invitation_to_row,
     search_invitations_item_from_row,
 )
+from cleaning_platform.generated.security import CrossTenantAccess, TenantId, TenantMismatch
 
 __all__ = [
     "CapturingEventPublisher",
@@ -29,6 +30,7 @@ __all__ = [
     "FixedClock",
     "InMemoryCleaningStaffInvitationRepository",
     "InMemorySearchInvitationsReader",
+    "RecordingCrossTenantAudit",
     "SequentialIds",
     "StubExtensions",
 ]
@@ -63,8 +65,9 @@ class FakeUnitOfWork:
 
 
 class InMemoryCleaningStaffInvitationRepository:
-    """In-memory CleaningStaffInvitationRepository. Writes are staged until the unit of work
-    commits.
+    """In-memory CleaningStaffInvitationRepository of tenant-scoped aggregates: `get` sees the given
+    tenant's only (another tenant's is None), `save` refuses another tenant's aggregate or an id
+    another tenant uses (TenantMismatch). Writes are staged until the unit of work commits.
     """
 
     def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:
@@ -75,19 +78,25 @@ class InMemoryCleaningStaffInvitationRepository:
             unit_of_work.enlist(self)
 
     def seed(self, *aggregates: CleaningStaffInvitation) -> None:
+        """Stores aggregates (of any tenant: each keeps its own `tenant_id`)."""
         for aggregate in aggregates:
             self._committed[aggregate.id] = aggregate
 
-    def get(self, id: UUID) -> CleaningStaffInvitation | None:
-        return self._pending.get(id, self._committed.get(id))
+    def get(self, tenant: TenantId, id: UUID) -> CleaningStaffInvitation | None:
+        aggregate = self._pending.get(id, self._committed.get(id))
+        return aggregate if aggregate is not None and aggregate.tenant_id == tenant else None
 
-    def save(self, aggregate: CleaningStaffInvitation) -> None:
+    def save(self, tenant: TenantId, aggregate: CleaningStaffInvitation) -> None:
+        existing = self._pending.get(aggregate.id, self._committed.get(aggregate.id))
+        if aggregate.tenant_id != tenant or (existing is not None and existing.tenant_id != tenant):
+            raise TenantMismatch
         if self._unit_of_work is None:
             self._committed[aggregate.id] = aggregate
         else:
             self._pending[aggregate.id] = aggregate
 
     def all(self) -> list[CleaningStaffInvitation]:
+        """Every committed aggregate, of every tenant (in-memory readers filter by tenant)."""
         return list(self._committed.values())
 
     def _commit(self) -> None:
@@ -109,6 +118,16 @@ class InMemorySearchInvitationsReader:
     def read(self, request: QueryRequest) -> QueryResult[SearchInvitationsItem]:
         rows = [cleaning_staff_invitation_to_row(aggregate) for aggregate in self._source.all()]
         return read_rows(SEARCH_INVITATIONS_SPEC, request, rows, search_invitations_item_from_row)
+
+
+class RecordingCrossTenantAudit:
+    """CrossTenantAudit that keeps every recorded access (for assertions)."""
+
+    def __init__(self) -> None:
+        self.accesses: list[CrossTenantAccess] = []
+
+    def record(self, access: CrossTenantAccess) -> None:
+        self.accesses.append(access)
 
 
 class FixedClock:

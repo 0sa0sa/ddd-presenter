@@ -78,12 +78,36 @@ describe("bearer JWT authentication (RFC 6750, RFC 7519, RFC 8725)", () => {
    */
   test("a valid token becomes the principal", async () => {
     const valid = await token({
-      roles: ["admin", "candidate", "not_a_declared_role"],
+      org_id: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["admin", "staff", "not_a_declared_role"],
+      platform_roles: ["operator"],
       email: "sample",
     });
     expect(await authenticate(request(valid))).toEqual(
-      Principal.create({ id: "user-1", roles: ["admin", "candidate"], email: "sample" }),
+      Principal.create({
+        id: "user-1",
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
+        roles: ["admin", "staff"],
+        platformRoles: ["operator"],
+        email: "sample",
+      }),
     );
+  });
+
+  /**
+   * Tenant roles hold in the active tenant only: a token without `org_id` holds none. Platform
+   * roles come from `platform_roles` only: a platform role in `roles` (or a tenant role in
+   * `platform_roles`) is dropped.
+   */
+  test("roles need an active tenant; platform roles come from their own claim", async () => {
+    const tenantless = await authenticate(
+      request(
+        await token({ roles: ["admin", "staff", "operator"], platform_roles: ["admin", "staff"] }),
+      ),
+    );
+    expect(tenantless?.tenantId).toBeNull();
+    expect(tenantless?.roles).toEqual([]);
+    expect(tenantless?.platformRoles).toEqual([]);
   });
 
   /**

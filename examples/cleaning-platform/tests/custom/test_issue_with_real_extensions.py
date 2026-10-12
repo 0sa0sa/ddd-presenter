@@ -19,10 +19,15 @@ from cleaning_platform.generated.cleaning_staff.testing import (
     InMemoryCleaningStaffInvitationRepository,
     SequentialIds,
 )
-from cleaning_platform.generated.security import Principal
+from cleaning_platform.generated.security import Principal, TenantId
 
-# issue_invitation needs an admin (authorize: { roles: [admin] }).
-ADMIN = Principal(id="admin-1", roles=("admin",))
+# issue_invitation needs invitation.issue, which admin has through staff (role inheritance), in the
+# caller's active tenant (the token's org_id).
+ADMIN = Principal(
+    id="admin-1",
+    tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+    roles=("admin",),
+)
 
 
 def make_use_case(blocked: frozenset[str]) -> IssueInvitationUseCase:

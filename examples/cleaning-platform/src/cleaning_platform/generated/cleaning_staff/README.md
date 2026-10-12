@@ -55,6 +55,13 @@
 - Transaction: required
 - Scenarios: `open_invitation_is_revoked`, `closed_invitation_is_left_untouched`
 
+## Use case inspect_invitation
+
+- Class: `InspectInvitationUseCase`, command: `InspectInvitation`
+- Actor: 運用担当
+- Transaction: none
+- Scenarios: `operator_inspects_another_tenant`
+
 ## Context map
 
 ```mermaid

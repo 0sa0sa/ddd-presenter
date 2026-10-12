@@ -31,6 +31,7 @@ import {
   type SqlRow,
   trigrams,
 } from "../../src/cleaning_platform/generated/persistence.js";
+import { tenantId, TenantMismatch } from "../../src/cleaning_platform/generated/security.js";
 
 /** A SqlClient that records the statements and answers each with the next scripted rows. */
 function scripted(
@@ -56,6 +57,7 @@ describe("CleaningStaff persistence", () => {
    */
   test("CleaningStaffInvitation: row round trip", () => {
     const aggregate = CleaningStaffInvitation.from({
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "staff@example.com" },
       status: "pending",
@@ -68,39 +70,95 @@ describe("CleaningStaff persistence", () => {
   });
 
   /**
-   * Optimistic locking: an aggregate the repository did not load is inserted (version 1); one it
-   * loaded is updated only at the loaded version. No row back (a lost race) is a
-   * ConcurrencyConflict.
+   * Optimistic locking per tenant: the tenant is the first value of every statement (and of the
+   * WHERE), an aggregate the repository did not load is inserted, one it loaded is updated at the
+   * loaded version, a lost race is a ConcurrencyConflict. Each call first sets app.tenant_id for
+   * the transaction (row level security); the first one checks that it holds.
    */
-  test("CleaningStaffInvitation: insert, update at the loaded version, conflicts", async () => {
+  test("CleaningStaffInvitation: tenant-bound insert, update, conflicts", async () => {
     const aggregate = CleaningStaffInvitation.from({
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "staff@example.com" },
       status: "pending",
       createdAt: "2026-01-01T10:00:00+00:00",
       expiresAt: "2026-01-08T10:00:00+00:00",
     });
-    const client = scripted([{ version: 1 }], [{ version: 2 }], []);
+    const tenant = tenantId("00000000-0000-4000-8000-0000000000a1");
+    const client = scripted([], [{ tenant }], [{ version: 1 }], [], [{ version: 2 }], [], []);
     const repository = new PostgresCleaningStaffInvitationRepository(client);
-    await repository.save(aggregate);
-    await repository.save(aggregate);
-    await expectRejects(() => repository.save(aggregate), ConcurrencyConflict);
-    expect(client.texts).toEqual([
+    await repository.save(tenant, aggregate);
+    await repository.save(tenant, aggregate);
+    await expectRejects(() => repository.save(tenant, aggregate), ConcurrencyConflict);
+    expect(client.texts.filter((text) => !text.includes("app.tenant_id"))).toEqual([
       CLEANING_STAFF_INVITATION_TABLE.insert,
       CLEANING_STAFF_INVITATION_TABLE.update,
       CLEANING_STAFF_INVITATION_TABLE.update,
     ]);
-    expect(client.values.map((values) => values.at(-1))).toEqual([
-      cleaningStaffInvitationToRow(aggregate).accepted_at,
-      1,
-      2,
+    expect(client.values.filter((values) => values.length > 1).map((values) => values[0])).toEqual([
+      tenant,
+      tenant,
+      tenant,
     ]);
-    const loaded = scripted([{ ...cleaningStaffInvitationToRow(aggregate), version: "7" }], []);
-    const other = new PostgresCleaningStaffInvitationRepository(loaded);
-    const found = await other.get(aggregate.id);
+    const loaded = scripted(
+      [],
+      [{ tenant }],
+      [{ ...cleaningStaffInvitationToRow(aggregate), version: "7" }],
+    );
+    const found = await new PostgresCleaningStaffInvitationRepository(loaded).get(
+      tenant,
+      aggregate.id,
+    );
     expect(jsonOf(found)).toEqual(jsonOf(aggregate));
-    await expectRejects(() => other.save(aggregate), ConcurrencyConflict);
-    expect(loaded.values[1]?.at(-1)).toBe(7);
+    expect(loaded.values.at(-1)).toEqual([tenant, aggregate.id]);
+  });
+
+  /**
+   * An aggregate of one tenant is never stored for another: TenantMismatch before any statement.
+   */
+  test("CleaningStaffInvitation: saving for another tenant is refused", async () => {
+    const client = scripted();
+    await expectRejects(
+      () =>
+        new PostgresCleaningStaffInvitationRepository(client).save(
+          tenantId("00000000-0000-4000-8000-0000000000b2"),
+          CleaningStaffInvitation.from({
+            tenantId: "00000000-0000-4000-8000-0000000000a1",
+            id: "00000000-0000-0000-0000-000000000001",
+            email: { value: "staff@example.com" },
+            status: "pending",
+            createdAt: "2026-01-01T10:00:00+00:00",
+            expiresAt: "2026-01-08T10:00:00+00:00",
+          }),
+        ),
+      TenantMismatch,
+    );
+    expect(client.texts).toEqual([]);
+  });
+
+  /**
+   * Row level security needs the tenant to hold for the transaction: outside one (autocommit) the
+   * repository refuses to run instead of silently reading nothing.
+   */
+  test("CleaningStaffInvitation: row level security needs a transaction", async () => {
+    const client = scripted([], [{ tenant: "" }]);
+    const repository = new PostgresCleaningStaffInvitationRepository(client);
+    const error = await expectRejects(
+      () =>
+        repository.get(
+          tenantId("00000000-0000-4000-8000-0000000000a1"),
+          CleaningStaffInvitation.from({
+            tenantId: "00000000-0000-4000-8000-0000000000a1",
+            id: "00000000-0000-0000-0000-000000000001",
+            email: { value: "staff@example.com" },
+            status: "pending",
+            createdAt: "2026-01-01T10:00:00+00:00",
+            expiresAt: "2026-01-08T10:00:00+00:00",
+          }).id,
+        ),
+      Error,
+    );
+    expect(error.message).toContain("transaction");
   });
 
   /**

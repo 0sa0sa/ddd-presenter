@@ -16,6 +16,7 @@ from cleaning_platform.generated.cleaning_staff.domain.aggregates import Cleanin
 from cleaning_platform.generated.cleaning_staff.domain.enums import InvitationStatus
 from cleaning_platform.generated.cleaning_staff.domain.errors import InvalidInvitationWindow
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
 
 def test_invariant_cleaning_staff_invitation_expiry_after_creation() -> None:
@@ -26,6 +27,7 @@ def test_invariant_cleaning_staff_invitation_expiry_after_creation() -> None:
     """
     with pytest.raises(InvalidInvitationWindow) as raised:
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.PENDING,
@@ -44,6 +46,7 @@ def test_invariant_cleaning_staff_invitation_accepted_invitation_has_accepted_at
     """
     with pytest.raises(InvalidInvitationWindow) as raised:
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.ACCEPTED,

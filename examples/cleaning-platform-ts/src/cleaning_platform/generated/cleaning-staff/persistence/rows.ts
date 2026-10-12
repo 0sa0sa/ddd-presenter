@@ -13,9 +13,10 @@ import { CleaningStaffInvitation } from "../domain/aggregates.js";
 
 /**
  * Columns of cleaning_staff.cleaning_staff_invitation in the order the INSERT / UPDATE statements
- * bind them.
+ * bind them (the tenant first).
  */
 export const CLEANING_STAFF_INVITATION_COLUMNS = [
+  "tenant_id",
   "id",
   "email_value",
   "status",
@@ -30,6 +31,7 @@ export const CLEANING_STAFF_INVITATION_COLUMNS = [
  */
 export function cleaningStaffInvitationToRow(aggregate: CleaningStaffInvitation): SqlRow {
   return {
+    tenant_id: aggregate.tenantId,
     id: aggregate.id,
     email_value: aggregate.email.value,
     status: aggregate.status,
@@ -50,6 +52,7 @@ export function cleaningStaffInvitationToValues(aggregate: CleaningStaffInvitati
  */
 export function cleaningStaffInvitationFromRow(row: SqlRow): CleaningStaffInvitation {
   return CleaningStaffInvitation.from({
+    tenantId: row.tenant_id,
     id: row.id,
     email: {
       value: row.email_value,

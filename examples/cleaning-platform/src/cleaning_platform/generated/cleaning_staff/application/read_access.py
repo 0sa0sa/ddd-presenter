@@ -11,7 +11,12 @@ from cleaning_platform.generated.cleaning_staff.application.ports import (
     CleaningStaffInvitationRepository,
 )
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
-from cleaning_platform.generated.security import Principal, allow_if, authorize
+from cleaning_platform.generated.security import (
+    Principal,
+    allow_if,
+    authorize_in_tenant,
+    has_permission,
+)
 
 __all__ = ["read_cleaning_staff_invitation"]
 
@@ -20,18 +25,23 @@ def read_cleaning_staff_invitation(
     repository: CleaningStaffInvitationRepository, id: UUID, principal: Principal | None
 ) -> CleaningStaffInvitation | None:
     """Loads CleaningStaffInvitation for `principal` (`authorize` of CleaningStaffInvitation): one
-    of the roles admin, candidate, and `has_role(principal, admin) or (principal.email != null and
-    principal.email == email.value)` must hold for the loaded aggregate.
+    of the permissions invitation.read, invitation.accept, and `has_permission(principal,
+    invitation.read) or (principal.email != null and principal.email == email.value)` must hold for
+    the loaded aggregate. Loaded from the caller's tenant only.
 
     The roles are checked before loading. Returns None when it does not exist; raises
     Unauthenticated or NotAuthorized.
     """
-    principal = authorize(principal, "read CleaningStaffInvitation", ("admin", "candidate"))
-    aggregate = repository.get(id)
+    principal, tenant = authorize_in_tenant(
+        principal,
+        "read CleaningStaffInvitation",
+        permissions=("invitation.read", "invitation.accept"),
+    )
+    aggregate = repository.get(tenant, id)
     if aggregate is not None:
         allow_if(
             (
-                "admin" in principal.roles
+                has_permission(principal, "invitation.read")
                 or (principal.email is not None and principal.email == aggregate.email.value)
             ),
             "read CleaningStaffInvitation",

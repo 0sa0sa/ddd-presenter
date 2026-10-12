@@ -22,6 +22,7 @@ import {
 import { SearchInvitationsQuery } from "../../src/cleaning_platform/generated/cleaning-staff/application/queries.js";
 import {
   AcceptInvitationUseCase,
+  InspectInvitationUseCase,
   IssueInvitationUseCase,
   RevokeInvitationUseCase,
 } from "../../src/cleaning_platform/generated/cleaning-staff/application/use-cases.js";
@@ -39,6 +40,7 @@ import {
   InMemoryCleaningStaffInvitationRepository,
   InMemorySearchInvitationsReader,
   jsonOf,
+  RecordingCrossTenantAudit,
   SequentialIds,
   StubExtensions,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
@@ -47,6 +49,7 @@ import { AggregateNotFound, id } from "../../src/cleaning_platform/generated/run
 import {
   NotAuthorized,
   Principal,
+  tenantId,
   Unauthenticated,
 } from "../../src/cleaning_platform/generated/security.js";
 
@@ -56,10 +59,15 @@ import {
  * any test of TanStack Query.
  */
 /**
- * A principal holding every role: the requests of these tests authenticate as it unless a test says
- * otherwise.
+ * A principal holding every role in the test tenant (00000000-0000-4000-8000-0000000000a1) and
+ * every platform role: the requests of these tests authenticate as it unless a test says otherwise.
  */
-const everyone = Principal.create({ id: "test-principal", roles: ["admin", "candidate"] });
+const everyone = Principal.create({
+  id: "test-principal",
+  tenantId: "00000000-0000-4000-8000-0000000000a1",
+  roles: ["admin", "staff", "candidate"],
+  platformRoles: ["operator"],
+});
 
 /** What the client sends (`getToken`) and the test authenticator accepts. */
 const AUTHORIZATION = { authorization: "Bearer test-token" };
@@ -229,10 +237,10 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
   });
 
   /**
-   * A principal without admin is refused by issue_invitation: 403, and the client rejects with
-   * NotAuthorized.
+   * A principal without invitation.issue is refused by issue_invitation: 403, and the client
+   * rejects with NotAuthorized.
    */
-  test("authorization: issue_invitation without a required role is 403", async () => {
+  test("authorization: issue_invitation without a required role or permission is 403", async () => {
     const unitOfWork = new FakeUnitOfWork();
     const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository(
       unitOfWork,
@@ -249,7 +257,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["candidate"],
+    });
     const { mutations, queryClient, statuses } = connect(
       { cleaningStaff: { useCases: { issueInvitation: useCase } } },
       principal,
@@ -263,14 +275,14 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
         }),
       NotAuthorized,
     );
-    expect(error.details).toMatchObject({ requiredRoles: ["admin"] });
+    expect(error.details).toMatchObject({ requiredPermissions: ["invitation.issue"] });
     expect(statuses).toEqual([403]);
   });
 
   /**
-   * `POST /api/cleaning-staff/issue-invitation` allows 10 request(s) per 60 s (by principal): then
-   * 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint
-   * is not wired, so allowed requests answer 404 after taking their token.
+   * `POST /api/cleaning-staff/issue-invitation` allows 10 request(s) per 60 s (by tenant): then 429
+   * with Retry-After and the IETF RateLimit headers, until a token has refilled. The endpoint is
+   * not wired, so allowed requests answer 404 after taking their token.
    */
   test("rate limit: issue_invitation answers 429 when used up, then refills", async () => {
     let now = Date.parse("2026-01-01T00:00:00Z");
@@ -307,6 +319,94 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     now += 6000;
     expect((await send()).status).toBe(404);
     expect((await send()).status).toBe(429);
+  });
+
+  /**
+   * `POST /api/cleaning-staff/issue-invitation` runs in the caller's tenant: a valid token that
+   * names no active tenant (claim org_id) answers 401 with `error="invalid_token"` before anything
+   * runs.
+   */
+  test("tenancy: a token without an active tenant is 401", async () => {
+    const tenantless = Principal.create({
+      id: "test-principal",
+      roles: ["admin", "staff", "candidate"],
+    });
+    const handler = createApiHandler({}, { authenticate: () => Promise.resolve(tenantless) });
+    const response = await handler(
+      new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+        method: "POST",
+        body: "{}",
+      }),
+    );
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe(
+      'Bearer error="invalid_token", error_description="no active tenant"',
+    );
+    expect(await responseJson(response)).toMatchObject({
+      code: "unauthenticated",
+      details: { error: "missing_tenant" },
+    });
+  });
+
+  /**
+   * The tenant comes from the token only: a request whose path names another tenant
+   * (`options.tenantOf`) is 403; the same tenant passes on (to the unwired endpoint: 404).
+   */
+  test("tenancy: a path naming another tenant than the token is 403", async () => {
+    let named = "00000000-0000-4000-8000-0000000000b2";
+    const handler = createApiHandler(
+      {},
+      { authenticate: () => Promise.resolve(everyone), tenantOf: () => named },
+    );
+    const send = () =>
+      handler(
+        new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+          method: "POST",
+          body: "{}",
+        }),
+      );
+    const mismatch = await send();
+    expect(mismatch.status).toBe(403);
+    expect(await responseJson(mismatch)).toMatchObject({
+      code: "not_authorized",
+      details: { error: "tenant_mismatch" },
+    });
+    named = "00000000-0000-4000-8000-0000000000a1";
+    expect((await send()).status).toBe(404);
+  });
+
+  /**
+   * `POST /api/cleaning-staff/issue-invitation` counts 10 request(s) per tenant: when one tenant
+   * has used up its bucket (429), another tenant's requests still pass (noisy-neighbour isolation).
+   */
+  test("tenancy: the rate limit of issue_invitation is per tenant", async () => {
+    const other = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000b2",
+      roles: ["admin", "staff", "candidate"],
+      platformRoles: ["operator"],
+    });
+    const handler = createApiHandler(
+      {},
+      {
+        authenticate: (request) =>
+          Promise.resolve(request.headers.get("authorization") === "Bearer b" ? other : everyone),
+        rateLimiter: new RateLimiter({ now: () => Date.parse("2026-01-01T00:00:00Z") }),
+      },
+    );
+    const send = (token: string) =>
+      handler(
+        new Request("http://localhost/api/cleaning-staff/issue-invitation", {
+          method: "POST",
+          body: "{}",
+          headers: { authorization: token },
+        }),
+      );
+    for (let i = 0; i < 10; i++) {
+      expect((await send("Bearer a")).status).toBe(404);
+    }
+    expect((await send("Bearer a")).status).toBe(429);
+    expect((await send("Bearer b")).status).toBe(404);
   });
 
   /**
@@ -356,10 +456,10 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
   });
 
   /**
-   * A principal without admin is refused by search_invitations before anything is read: 403, and
-   * the infinite query rejects with NotAuthorized.
+   * A principal without invitation.list is refused by search_invitations before anything is read:
+   * 403, and the infinite query rejects with NotAuthorized.
    */
-  test("search_invitations: without a required role is 403", async () => {
+  test("search_invitations: without a required role or permission is 403", async () => {
     const reader = {
       read: (): never => {
         throw new Error("read before authorization");
@@ -367,7 +467,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     };
     const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
     const searchInvitations = new SearchInvitationsQuery({ reader, cursors });
-    const principal = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["candidate"],
+    });
     const { queries, queryClient, statuses } = connect(
       { cleaningStaff: { queries: { searchInvitations } } },
       principal,
@@ -375,14 +479,14 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     const options = cleaningStaffInvitationQueries.searchInvitations({});
     const error = await expectRejects(() => queryClient.infiniteQuery(options), NotAuthorized);
-    expect(error.details).toMatchObject({ requiredRoles: ["admin"] });
+    expect(error.details).toMatchObject({ requiredPermissions: ["invitation.list"] });
     expect(statuses).toEqual([403]);
   });
 
   /**
-   * `GET /api/cleaning-staff/queries/search-invitations` allows 60 request(s) per 60 s (by
-   * principal): then 429 with Retry-After and the IETF RateLimit headers, until a token has
-   * refilled. The endpoint is not wired, so allowed requests answer 404 after taking their token.
+   * `GET /api/cleaning-staff/queries/search-invitations` allows 60 request(s) per 60 s (by tenant):
+   * then 429 with Retry-After and the IETF RateLimit headers, until a token has refilled. The
+   * endpoint is not wired, so allowed requests answer 404 after taking their token.
    */
   test("rate limit: search_invitations answers 429 when used up, then refills", async () => {
     let now = Date.parse("2026-01-01T00:00:00Z");
@@ -429,6 +533,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     });
     const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
     const stored = CleaningStaffInvitation.from({
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "staff@example.com" },
       status: "pending",
@@ -447,7 +552,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     ]);
     const data = await queryClient.query(options);
     expect(statuses).toEqual([200]);
-    expect(jsonOf(data)).toEqual(jsonOf(stored));
+    expect(jsonOf(data)).toEqual({ ...(jsonOf(stored) as object), tenantId: undefined });
     expect(queryClient.getQueryState(options.queryKey)?.status).toBe("success");
     const missing = cleaningStaffInvitationQueries.detail("ffffffff-ffff-4fff-bfff-ffffffffffff");
     const error = await expectRejects(() => queryClient.query(missing), AggregateNotFound);
@@ -511,6 +616,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const repository = new InMemoryCleaningStaffInvitationRepository();
     repository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -518,6 +624,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
         expiresAt: "2026-01-08T10:00:00+00:00",
       }),
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000002",
         email: { value: "stuff.manager@example.com" },
         status: "accepted",
@@ -526,6 +633,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
         acceptedAt: "2026-01-03T10:00:00+00:00",
       }),
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000003",
         email: { value: "alice@example.org" },
         status: "pending",
@@ -538,7 +646,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       reader: new InMemorySearchInvitationsReader(repository),
       cursors,
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const { handler, queries, queryClient, statuses } = connect(
       { cleaningStaff: { queries: { searchInvitations } } },
       principal,
@@ -600,7 +712,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const { queries, mutations, queryClient, statuses } = connect(
       {
         cleaningStaff: {
@@ -635,15 +751,13 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const after0 = await queryClient.query(
       cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-0000000000aa"),
     );
-    expect(jsonOf(after0)).toEqual(
-      jsonOf(
-        expectPresent(
-          cleaningStaffInvitationRepository.get(
-            id("CleaningStaffInvitation", "00000000-0000-0000-0000-0000000000aa"),
-          ),
-        ),
+    const stored0 = expectPresent(
+      cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-0000000000aa"),
       ),
     );
+    expect(jsonOf(after0)).toEqual({ ...(jsonOf(stored0) as object), tenantId: undefined });
   });
 
   /**
@@ -668,7 +782,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const { queries, mutations, queryClient, statuses } = connect(
       {
         cleaningStaff: {
@@ -716,6 +834,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -733,6 +852,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     });
     const principal = Principal.create({
       id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "staff@example.com",
     });
@@ -777,15 +897,13 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const after0 = await queryClient.query(
       cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
-    expect(jsonOf(after0)).toEqual(
-      jsonOf(
-        expectPresent(
-          cleaningStaffInvitationRepository.get(
-            id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
-          ),
-        ),
+    const stored0 = expectPresent(
+      cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
     );
+    expect(jsonOf(after0)).toEqual({ ...(jsonOf(stored0) as object), tenantId: undefined });
   });
 
   /**
@@ -800,6 +918,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -817,6 +936,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     });
     const principal = Principal.create({
       id: "candidate-1",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       roles: ["candidate"],
       email: "staff@example.com",
     });
@@ -872,6 +992,7 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     );
     cleaningStaffInvitationRepository.seed(
       CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
         id: "00000000-0000-0000-0000-000000000001",
         email: { value: "staff@example.com" },
         status: "pending",
@@ -885,7 +1006,11 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
       eventPublisher,
       unitOfWork,
     });
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["admin"],
+    });
     const { queries, mutations, queryClient, statuses } = connect(
       {
         cleaningStaff: {
@@ -928,14 +1053,71 @@ describe("CleaningStaff API (server handler + TanStack Query client)", () => {
     const after0 = await queryClient.query(
       cleaningStaffInvitationQueries.detail("00000000-0000-0000-0000-000000000001"),
     );
-    expect(jsonOf(after0)).toEqual(
-      jsonOf(
-        expectPresent(
-          cleaningStaffInvitationRepository.get(
-            id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
-          ),
-        ),
+    const stored0 = expectPresent(
+      cleaningStaffInvitationRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
+        id("CleaningStaffInvitation", "00000000-0000-0000-0000-000000000001"),
       ),
     );
+    expect(jsonOf(after0)).toEqual({ ...(jsonOf(stored0) as object), tenantId: undefined });
+  });
+
+  /**
+   * Scenario `operator_inspects_another_tenant` of inspect_invitation as a mutation (`POST
+   * /api/cleaning-staff/inspect-invitation`).
+   * It saves no aggregate and invalidates nothing.
+   */
+  test("inspect_invitation: operator_inspects_another_tenant", async () => {
+    const cleaningStaffInvitationRepository = new InMemoryCleaningStaffInvitationRepository();
+    cleaningStaffInvitationRepository.seed(
+      CleaningStaffInvitation.from({
+        tenantId: "00000000-0000-4000-8000-0000000000a1",
+        id: "00000000-0000-0000-0000-000000000001",
+        email: { value: "staff@example.com" },
+        status: "pending",
+        createdAt: "2026-01-01T10:00:00+00:00",
+        expiresAt: "2026-01-08T10:00:00+00:00",
+      }),
+    );
+    const audit = new RecordingCrossTenantAudit();
+    const useCase = new InspectInvitationUseCase({ cleaningStaffInvitationRepository, audit });
+    const principal = Principal.create({
+      id: "operator-1",
+      roles: [],
+      platformRoles: ["operator"],
+    });
+    const { queries, mutations, queryClient, statuses } = connect(
+      {
+        cleaningStaff: {
+          useCases: { inspectInvitation: useCase },
+          repositories: { cleaningStaffInvitationRepository },
+        },
+      },
+      principal,
+    );
+    const cleaningStaffInvitationQueries = queries.cleaningStaff.cleaningStaffInvitation;
+    // Cache entries a mutation could make stale: the stored aggregates, a list and an unrelated
+    // detail.
+    const cleaningStaffInvitationList = [
+      { ...cleaningStaffInvitationQueries.lists()[0], filter: "probe" },
+    ] as const;
+    const cleaningStaffInvitationOther = [
+      {
+        ...cleaningStaffInvitationQueries.details()[0],
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      },
+    ] as const;
+    queryClient.setQueryData(cleaningStaffInvitationList, []);
+    queryClient.setQueryData(cleaningStaffInvitationOther, null);
+    const observer = new MutationObserver(queryClient, mutations.cleaningStaff.inspectInvitation);
+    const input = {
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      invitationId: "00000000-0000-0000-0000-000000000001",
+    };
+    const result = await observer.mutate(input);
+    expect(statuses.at(-1)).toBe(200);
+    expect(result).toBe("pending");
+    expect(queryClient.getQueryState(cleaningStaffInvitationList)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(cleaningStaffInvitationOther)?.isInvalidated).toBe(false);
   });
 });

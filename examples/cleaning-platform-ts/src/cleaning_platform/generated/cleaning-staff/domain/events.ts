@@ -12,17 +12,22 @@ import {
   parseWith,
   uuidSchema,
 } from "../../runtime.js";
+import { TenantIdSchema } from "../../security.js";
 import { EmailAddressSchema } from "./value-objects.js";
 
 const InvitationAcceptedSchema = z
   .strictObject({
     type: z.literal("CleaningStaff.InvitationAccepted"),
+    tenantId: TenantIdSchema,
     id: uuidSchema,
     at: InstantSchema,
   })
   .readonly();
 
-/** Emitted by CleaningStaffInvitation.accept. */
+/**
+ * Emitted by CleaningStaffInvitation.accept. Carries the tenant (`tenantId`) of the aggregate it
+ * comes from.
+ */
 export type InvitationAccepted = z.output<typeof InvitationAcceptedSchema>;
 /** Payload of `InvitationAccepted.create`: the event without its `type`. */
 export type InvitationAcceptedInput = Omit<z.input<typeof InvitationAcceptedSchema>, "type">;
@@ -51,13 +56,17 @@ export const InvitationAccepted = {
 const InvitationIssuedSchema = z
   .strictObject({
     type: z.literal("CleaningStaff.InvitationIssued"),
+    tenantId: TenantIdSchema,
     id: uuidSchema,
     email: EmailAddressSchema,
     expiresAt: InstantSchema,
   })
   .readonly();
 
-/** Emitted by CleaningStaffInvitation.issue. */
+/**
+ * Emitted by CleaningStaffInvitation.issue. Carries the tenant (`tenantId`) of the aggregate it
+ * comes from.
+ */
 export type InvitationIssued = z.output<typeof InvitationIssuedSchema>;
 /** Payload of `InvitationIssued.create`: the event without its `type`. */
 export type InvitationIssuedInput = Omit<z.input<typeof InvitationIssuedSchema>, "type">;
@@ -86,11 +95,15 @@ export const InvitationIssued = {
 const InvitationRevokedSchema = z
   .strictObject({
     type: z.literal("CleaningStaff.InvitationRevoked"),
+    tenantId: TenantIdSchema,
     id: uuidSchema,
   })
   .readonly();
 
-/** Emitted by CleaningStaffInvitation.revoke. */
+/**
+ * Emitted by CleaningStaffInvitation.revoke. Carries the tenant (`tenantId`) of the aggregate it
+ * comes from.
+ */
 export type InvitationRevoked = z.output<typeof InvitationRevokedSchema>;
 /** Payload of `InvitationRevoked.create`: the event without its `type`. */
 export type InvitationRevokedInput = Omit<z.input<typeof InvitationRevokedSchema>, "type">;

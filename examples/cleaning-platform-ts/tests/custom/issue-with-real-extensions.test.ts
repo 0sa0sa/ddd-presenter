@@ -16,8 +16,13 @@ import {
   SequentialIds,
 } from "../../src/cleaning_platform/generated/cleaning-staff/testing.js";
 
-// issue_invitation needs an admin (authorize: { roles: [admin] }).
-const admin = Principal.create({ id: "admin-1", roles: ["admin"] });
+// issue_invitation needs invitation.issue, which admin has through staff (role inheritance), in the
+// caller's active tenant (the token's org_id).
+const admin = Principal.create({
+  id: "admin-1",
+  tenantId: "00000000-0000-4000-8000-0000000000a1",
+  roles: ["admin"],
+});
 
 function makeUseCase(blocked: string[]) {
   const unitOfWork = new FakeUnitOfWork();

@@ -234,9 +234,9 @@ export interface ApiHandlerOptions<P = unknown> {
   readonly clientIp?: (request: Request) => string | undefined;
   //#if tenancy
   /**
-   * The tenant a request names in its path, if your routes carry one (e.g. `/orgs/:org/…` matched by
-   * your router before this handler). The tenant always comes from the verified token; when the path
-   * names another one the handler answers 403 (`details.error: "tenant_mismatch"`).
+   * The tenant a request names in its path, if your routes carry one (e.g. `/orgs/:org/...`
+   * matched by your router before this handler). The tenant always comes from the verified token;
+   * when the path names another one the handler answers 403 (`details.error: "tenant_mismatch"`).
    */
   readonly tenantOf?: (request: Request) => string | undefined;
   //#endif

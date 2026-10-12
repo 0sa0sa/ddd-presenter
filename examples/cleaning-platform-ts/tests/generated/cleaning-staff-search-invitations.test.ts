@@ -37,7 +37,7 @@ import {
 
 const cursors = new HmacCursorCodec({ secrets: ["generated-tests-cursor-secret-0123456789"] });
 
-const GIVEN_1: ReadonlyArray<CleaningStaffInvitationInput> = [
+const GIVEN_1: ReadonlyArray<Omit<CleaningStaffInvitationInput, "tenantId">> = [
   {
     id: "00000000-0000-0000-0000-000000000001",
     email: { value: "staff@example.com" },
@@ -62,10 +62,15 @@ const GIVEN_1: ReadonlyArray<CleaningStaffInvitationInput> = [
   },
 ];
 
-/** A SearchInvitationsQuery over an in-memory repository holding `aggregates`. */
-function setup(aggregates: ReadonlyArray<CleaningStaffInvitationInput>): SearchInvitationsQuery {
+/** A SearchInvitationsQuery over an in-memory repository holding `aggregates` in `tenant`. */
+function setup(
+  aggregates: ReadonlyArray<Omit<CleaningStaffInvitationInput, "tenantId">>,
+  tenant = "00000000-0000-4000-8000-0000000000a1",
+): SearchInvitationsQuery {
   const repository = new InMemoryCleaningStaffInvitationRepository();
-  repository.seed(...aggregates.map((input) => CleaningStaffInvitation.from(input)));
+  repository.seed(
+    ...aggregates.map((input) => CleaningStaffInvitation.from({ ...input, tenantId: tenant })),
+  );
   return new SearchInvitationsQuery({
     reader: new InMemorySearchInvitationsReader(repository),
     cursors,
@@ -101,7 +106,11 @@ describe("search_invitations", () => {
    */
   test("newest_first_across_pages", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const pages = await fetchPages(query, { limit: 2 }, 2, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items.map((item) => String(item.id))).toEqual([
@@ -122,7 +131,11 @@ describe("search_invitations", () => {
    */
   test("pending_only", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const pages = await fetchPages(query, { status: "pending" }, 1, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items.map((item) => String(item.id))).toEqual([
@@ -142,7 +155,11 @@ describe("search_invitations", () => {
    */
   test("search_by_email", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const pages = await fetchPages(query, { q: "staff" }, 1, principal);
     const items = pages.flatMap((page) => page.items);
     expect(items).toHaveLength(1);
@@ -159,15 +176,19 @@ describe("search_invitations", () => {
    */
   test("limit is clamped to the maximum page size", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const page = await query.execute({ limit: 101 }, principal);
     expect(page.items.length).toBeLessThanOrEqual(100);
     await expectRejects(() => query.execute({ limit: 0 }, principal), ConstraintViolation);
   });
 
   /**
-   * search_invitations checks the caller first: without a principal Unauthenticated, without admin
-   * NotAuthorized.
+   * search_invitations checks the caller first: without a principal Unauthenticated, without an
+   * active tenant Unauthenticated, without invitation.list NotAuthorized.
    * Nothing is read before: the reader fails the test when called.
    */
   test("authorization: refused before anything is read", async () => {
@@ -180,9 +201,35 @@ describe("search_invitations", () => {
     const input = {};
     const anonymous = await expectRejects(() => query.execute(input, null), Unauthenticated);
     expect(anonymous.details).toEqual({ action: "search_invitations" });
-    const lacking = Principal.create({ id: "test-principal", roles: ["candidate"] });
+    const tenantless = Principal.create({ id: "test-principal", roles: ["staff"] });
+    const noTenant = await expectRejects(() => query.execute(input, tenantless), Unauthenticated);
+    expect(noTenant.details).toEqual({ action: "search_invitations", error: "missing_tenant" });
+    const lacking = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["candidate"],
+    });
     const refused = await expectRejects(() => query.execute(input, lacking), NotAuthorized);
-    expect(refused.details).toEqual({ action: "search_invitations", requiredRoles: ["admin"] });
+    expect(refused.details).toEqual({
+      action: "search_invitations",
+      requiredPermissions: ["invitation.list"],
+    });
+  });
+
+  /**
+   * Tenant isolation: the same data stored in another tenant (00000000-0000-4000-8000-0000000000b2)
+   * is never read for a caller of 00000000-0000-4000-8000-0000000000a1.
+   */
+  test("tenancy: another tenant's rows are not read", async () => {
+    const query = setup(GIVEN_1, "00000000-0000-4000-8000-0000000000b2");
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
+    const page = await query.execute({}, principal);
+    expect(page.items).toEqual([]);
+    expect(page.nextCursor).toBeNull();
   });
 
   /**
@@ -192,7 +239,11 @@ describe("search_invitations", () => {
    */
   test("pages of one item cover the whole result in order", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const whole = await query.execute({ limit: 100 }, principal);
     expect(whole.nextCursor).toBeNull();
     const pages = await fetchPages(query, { limit: 1 }, whole.items.length + 1, principal);
@@ -208,7 +259,11 @@ describe("search_invitations", () => {
    */
   test("a tampered cursor is rejected", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const first = await query.execute({ limit: 1 }, principal);
     const cursor = expectPresent(first.nextCursor, "nextCursor");
     const tampered = (cursor.startsWith("e") ? "f" : "e") + cursor.slice(1);
@@ -224,12 +279,37 @@ describe("search_invitations", () => {
    */
   test("a cursor reused with other parameters is rejected", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const first = await query.execute({ limit: 1 }, principal);
     const cursor = expectPresent(first.nextCursor, "nextCursor");
     await expectRejects(() => query.execute({ q: "zz", cursor }, principal), InvalidCursor);
     const next = await query.execute({ cursor, limit: 1 }, principal);
     expect(next.items).toHaveLength(1);
+  });
+
+  /**
+   * A cursor is bound to the tenant it was issued in: the same principal acting in another tenant
+   * gets InvalidCursor.
+   */
+  test("tenancy: a cursor is rejected in another tenant", async () => {
+    const query = setup(GIVEN_1);
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
+    const first = await query.execute({ limit: 1 }, principal);
+    const cursor = expectPresent(first.nextCursor, "nextCursor");
+    const elsewhere = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000b2",
+      roles: ["staff"],
+    });
+    await expectRejects(() => query.execute({ cursor }, elsewhere), InvalidCursor);
   });
 
   /**
@@ -239,10 +319,18 @@ describe("search_invitations", () => {
    */
   test("a cursor is bound to the principal it was issued to", async () => {
     const query = setup(GIVEN_1);
-    const principal = Principal.create({ id: "test-principal", roles: ["admin"] });
+    const principal = Principal.create({
+      id: "test-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     const first = await query.execute({ limit: 1 }, principal);
     const cursor = expectPresent(first.nextCursor, "nextCursor");
-    const other = Principal.create({ id: "other-principal", roles: ["admin"] });
+    const other = Principal.create({
+      id: "other-principal",
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
+      roles: ["staff"],
+    });
     await expectRejects(() => query.execute({ cursor }, other), InvalidCursor);
     const next = await query.execute({ cursor, limit: 1 }, principal);
     expect(next.items).toHaveLength(1);

@@ -27,7 +27,7 @@ from cleaning_platform.generated._persistence import (
 from cleaning_platform.generated._runtime import DomainModel
 from cleaning_platform.generated.cleaning_staff.domain.enums import InvitationStatus
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
-from cleaning_platform.generated.security import Principal, authorize
+from cleaning_platform.generated.security import Principal, authorize_in_tenant
 
 __all__ = [
     "SEARCH_INVITATIONS_SPEC",
@@ -88,6 +88,7 @@ SEARCH_INVITATIONS_SPEC: Final = QuerySpec(
     ),
     size=20,
     max_size=100,
+    tenant="tenant_id",
 )
 
 
@@ -104,9 +105,10 @@ class SearchInvitationsQuery:
 
     Query search_invitations (reads CleaningStaffInvitation).
 
-    Authorize: the role admin. `principal` is checked first, before anything is read:
-    Unauthenticated without one, NotAuthorized without a required role. Cursors are bound to the
-    principal.
+    Authorize: the permission invitation.list. `principal` is checked first, before anything is
+    read: Unauthenticated without one or without an active tenant, NotAuthorized without a required
+    role or permission. The rows are those of the caller's tenant only. Cursors are bound to the
+    principal and its tenant.
 
     Validates the input (ConstraintViolation), clamps `limit` to 100, checks the cursor
     (InvalidCursor: tampered, expired, or made for other parameters or another principal) and
@@ -122,7 +124,11 @@ class SearchInvitationsQuery:
         params: SearchInvitationsInput,
         principal: Principal | None,
     ) -> Page[SearchInvitationsItem]:
-        principal = authorize(principal, "search_invitations", ("admin",))
+        principal, tenant = authorize_in_tenant(
+            principal,
+            "search_invitations",
+            permissions=("invitation.list",),
+        )
         query = params
         return run_query(
             SEARCH_INVITATIONS_SPEC,
@@ -132,5 +138,5 @@ class SearchInvitationsQuery:
             cursor=query.cursor,
             limit=query.limit,
             read=self._reader.read,
-            scope=QueryScope(principal=str(principal.id), values={}),
+            scope=QueryScope(principal=str(principal.id), values={}, tenant=tenant),
         )

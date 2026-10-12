@@ -24,6 +24,7 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
     InvitationRevoked,
 )
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
 __all__ = ["CleaningStaffInvitation"]
 
@@ -32,10 +33,13 @@ class CleaningStaffInvitation(AggregateRoot):
     """スタッフ候補への招待
 
     Identity: id. Instances are immutable; operations return a Transition with the new state.
+    Tenant-scoped: `tenant_id` is the tenant it belongs to, set by its factory from the caller's
+    tenant and never changed.
     """
 
     identity_field: ClassVar[str] = "id"
 
+    tenant_id: TenantId
     id: UUID
     email: EmailAddress
     status: InvitationStatus
@@ -101,6 +105,7 @@ class CleaningStaffInvitation(AggregateRoot):
     @classmethod
     def issue(
         cls,
+        tenant_id: TenantId,
         id: UUID,
         email: EmailAddress,
         at: datetime,
@@ -110,8 +115,10 @@ class CleaningStaffInvitation(AggregateRoot):
 
         Factory: construct-time invariants are checked on the new instance.
         Emits: InvitationIssued.
+        `tenant_id` is the caller's tenant (the use case passes it; it never comes from the input).
         """
         aggregate = cls(
+            tenant_id=tenant_id,
             id=id,
             email=email,
             status=InvitationStatus.PENDING,
@@ -119,7 +126,14 @@ class CleaningStaffInvitation(AggregateRoot):
             expires_at=expires_at,
         )
         events: list[DomainEvent] = []
-        events.append(InvitationIssued(id=id, email=email, expires_at=expires_at))
+        events.append(
+            InvitationIssued(
+                tenant_id=aggregate.tenant_id,
+                id=id,
+                email=email,
+                expires_at=expires_at,
+            )
+        )
         return Transition(aggregate=aggregate, events=tuple(events))
 
     def accept(self, at: datetime) -> Transition[CleaningStaffInvitation]:
@@ -134,7 +148,7 @@ class CleaningStaffInvitation(AggregateRoot):
         aggregate = self._replace(status=InvitationStatus.ACCEPTED, accepted_at=at)
         aggregate._check_transition_invariants()
         events: list[DomainEvent] = []
-        events.append(InvitationAccepted(id=aggregate.id, at=at))
+        events.append(InvitationAccepted(tenant_id=aggregate.tenant_id, id=aggregate.id, at=at))
         return Transition(aggregate=aggregate, events=tuple(events))
 
     def revoke(self) -> Transition[CleaningStaffInvitation]:
@@ -149,5 +163,5 @@ class CleaningStaffInvitation(AggregateRoot):
         aggregate = self._replace(status=InvitationStatus.REVOKED)
         aggregate._check_transition_invariants()
         events: list[DomainEvent] = []
-        events.append(InvitationRevoked(id=aggregate.id))
+        events.append(InvitationRevoked(tenant_id=aggregate.tenant_id, id=aggregate.id))
         return Transition(aggregate=aggregate, events=tuple(events))

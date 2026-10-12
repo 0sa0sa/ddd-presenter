@@ -8,6 +8,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from cleaning_platform.generated._runtime import DomainEvent
+from cleaning_platform.generated.security import TenantContext, TenantId
 from cleaning_platform.generated.staffing.application.ports import (
     EventPublisher,
     IdGenerator,
@@ -26,7 +27,8 @@ class RegisterStaffUseCase:
 
     Actor: システム（ポリシー）
     Transaction: required
-    Authorize: internal (run in-process, e.g. by a policy; never served over HTTP)
+    Authorize: internal (run in-process, e.g. by a policy, in the tenant it is given; never served
+    over HTTP)
 
     Steps:
         1. create StaffMember via register(id=ids.new, invitation_id=invitation_id,
@@ -49,13 +51,16 @@ class RegisterStaffUseCase:
         self._event_publisher = event_publisher
         self._unit_of_work = unit_of_work
 
-    def execute(self, command: RegisterStaff) -> UUID:
+    def execute(self, command: RegisterStaff, context: TenantContext) -> UUID:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
+
+        `context` names the tenant it runs in (a policy passes its event's tenant); every repository
+        call is bound to it.
         """
         after_commit: list[DomainEvent] = []
         try:
-            result = self._run(command, after_commit)
+            result = self._run(command, context.tenant_id, after_commit)
             self._unit_of_work.commit()
         except BaseException:
             self._unit_of_work.rollback()
@@ -64,10 +69,13 @@ class RegisterStaffUseCase:
             self._event_publisher.publish(tuple(after_commit))
         return result
 
-    def _run(self, command: RegisterStaff, after_commit: list[DomainEvent]) -> UUID:
+    def _run(
+        self, command: RegisterStaff, tenant: TenantId, after_commit: list[DomainEvent]
+    ) -> UUID:
         emitted: list[DomainEvent] = []
         # 1. create StaffMember via register
         transition_1 = StaffMember.register(
+            tenant_id=tenant,
             id=self._ids.new_id(),
             invitation_id=command.invitation_id,
             joined_at=command.joined_at,
@@ -75,7 +83,7 @@ class RegisterStaffUseCase:
         staff = transition_1.aggregate
         emitted.extend(transition_1.events)
         # 2. save staff
-        self._staff_member_repository.save(staff)
+        self._staff_member_repository.save(tenant, staff)
         # 3. publish StaffRegistered after commit
         after_commit.extend(event for event in emitted if isinstance(event, StaffRegistered))
         # 4. return

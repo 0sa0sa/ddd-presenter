@@ -7,15 +7,17 @@
  */
 
 import {
-  PostgresStore,
+  PostgresTenantStore,
   type QueryRequest,
   type QueryResult,
   type QueryStatements,
-  readSql,
+  readSqlInTenant,
   type SqlClient,
+  type SqlTransactions,
   type TableMapping,
 } from "../../persistence.js";
 import type { Id } from "../../runtime.js";
+import type { TenantId } from "../../security.js";
 import type { CleaningStaffInvitationRepository } from "../application/ports.js";
 import {
   SEARCH_INVITATIONS_SPEC,
@@ -40,6 +42,7 @@ export const CLEANING_STAFF_INVITATION_TABLE: TableMapping<
 > = {
   aggregate: "CleaningStaffInvitation",
   select: `SELECT
+  tenant_id,
   id,
   email_value,
   status,
@@ -48,8 +51,9 @@ export const CLEANING_STAFF_INVITATION_TABLE: TableMapping<
   to_char(accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS accepted_at,
   version
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE id = $1::uuid`,
+WHERE tenant_id = $1::uuid AND id = $2::uuid`,
   insert: `INSERT INTO cleaning_staff.cleaning_staff_invitation (
+  tenant_id,
   id,
   email_value,
   status,
@@ -59,23 +63,26 @@ WHERE id = $1::uuid`,
   version
 ) VALUES (
   $1::uuid,
-  $2::text,
+  $2::uuid,
   $3::text,
-  $4::timestamptz,
+  $4::text,
   $5::timestamptz,
   $6::timestamptz,
+  $7::timestamptz,
   1
 )
 ON CONFLICT (id) DO NOTHING
 RETURNING version`,
   update: `UPDATE cleaning_staff.cleaning_staff_invitation SET
-  email_value = $2::text,
-  status = $3::text,
-  created_at = $4::timestamptz,
-  expires_at = $5::timestamptz,
-  accepted_at = $6::timestamptz,
+  email_value = $3::text,
+  status = $4::text,
+  created_at = $5::timestamptz,
+  expires_at = $6::timestamptz,
+  accepted_at = $7::timestamptz,
   version = version + 1
-WHERE id = $1::uuid AND version = $7::bigint
+WHERE tenant_id = $1::uuid
+  AND id = $2::uuid
+  AND version = $8::bigint
 RETURNING version`,
   identity: (aggregate) => aggregate.id,
   toValues: cleaningStaffInvitationToValues,
@@ -83,23 +90,31 @@ RETURNING version`,
 };
 
 /**
- * CleaningStaffInvitationRepository on PostgreSQL with optimistic locking: `save` inserts what it
- * did not load and updates what it loaded only if the row still has the loaded version (else
- * ConcurrencyConflict). Use one instance per unit of work (it remembers the versions it read).
+ * CleaningStaffInvitationRepository on PostgreSQL with optimistic locking, one tenant per call:
+ * every statement filters by the tenant (another tenant's CleaningStaffInvitation is not found;
+ * saving one for another tenant is TenantMismatch). `save` inserts what it did not load and updates
+ * what it loaded only if the row still has the loaded version (else ConcurrencyConflict). Use one
+ * instance per unit of work (it remembers the versions it read).
+ *
+ * Row level security: it sets `app.tenant_id` for the transaction before its statements, so
+ * `client` must be one connection inside a transaction (the unit of work's).
  */
 export class PostgresCleaningStaffInvitationRepository implements CleaningStaffInvitationRepository {
-  readonly #store: PostgresStore<CleaningStaffInvitation, Id<"CleaningStaffInvitation">>;
+  readonly #store: PostgresTenantStore<CleaningStaffInvitation, Id<"CleaningStaffInvitation">>;
 
   constructor(client: SqlClient) {
-    this.#store = new PostgresStore(client, CLEANING_STAFF_INVITATION_TABLE);
+    this.#store = new PostgresTenantStore(client, CLEANING_STAFF_INVITATION_TABLE);
   }
 
-  get(id: Id<"CleaningStaffInvitation">): Promise<CleaningStaffInvitation | null> {
-    return this.#store.get(id);
+  get(
+    tenant: TenantId,
+    id: Id<"CleaningStaffInvitation">,
+  ): Promise<CleaningStaffInvitation | null> {
+    return this.#store.get(tenant, id);
   }
 
-  save(aggregate: CleaningStaffInvitation): Promise<void> {
-    return this.#store.save(aggregate);
+  save(tenant: TenantId, aggregate: CleaningStaffInvitation): Promise<void> {
+    return this.#store.save(tenant, aggregate);
   }
 }
 
@@ -118,11 +133,12 @@ export const SEARCH_INVITATIONS_SQL: QueryStatements = {
   created_at::text AS _k0,
   id::text AS _k1
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+WHERE tenant_id = $1::uuid
+  AND ($2::text IS NULL OR status = $2::text)
+  AND ($3::timestamptz IS NULL OR created_at > $3::timestamptz)
 ORDER BY cleaning_staff_invitation.created_at DESC, cleaning_staff_invitation.id DESC
-LIMIT $3::integer`,
-    args: [{ param: "status" }, { param: "createdAfter" }, { limit: true }],
+LIMIT $4::integer`,
+    args: [{ tenant: true }, { param: "status" }, { param: "createdAfter" }, { limit: true }],
   },
   next: {
     text: `SELECT
@@ -134,18 +150,26 @@ LIMIT $3::integer`,
   created_at::text AS _k0,
   id::text AS _k1
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+WHERE tenant_id = $1::uuid
+  AND ($2::text IS NULL OR status = $2::text)
+  AND ($3::timestamptz IS NULL OR created_at > $3::timestamptz)
   AND (
     cleaning_staff_invitation.created_at,
     cleaning_staff_invitation.id
   ) < (
-    $3::timestamptz,
-    $4::uuid
+    $4::timestamptz,
+    $5::uuid
   )
 ORDER BY cleaning_staff_invitation.created_at DESC, cleaning_staff_invitation.id DESC
-LIMIT $5::integer`,
-    args: [{ param: "status" }, { param: "createdAfter" }, { key: 0 }, { key: 1 }, { limit: true }],
+LIMIT $6::integer`,
+    args: [
+      { tenant: true },
+      { param: "status" },
+      { param: "createdAfter" },
+      { key: 0 },
+      { key: 1 },
+      { limit: true },
+    ],
   },
   searchFirst: {
     text: `SELECT
@@ -158,17 +182,24 @@ LIMIT $5::integer`,
   created_at::text AS _k1,
   id::text AS _k2
 FROM cleaning_staff.cleaning_staff_invitation
-CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower($3::text)) AS _score) AS _s
-WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
-  AND lower(email_value) % lower($3::text)
+CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower($4::text)) AS _score) AS _s
+WHERE tenant_id = $1::uuid
+  AND ($2::text IS NULL OR status = $2::text)
+  AND ($3::timestamptz IS NULL OR created_at > $3::timestamptz)
+  AND lower(email_value) % lower($4::text)
   AND _s._score >= 0.3
 ORDER BY
   _s._score DESC,
   cleaning_staff_invitation.created_at DESC,
   cleaning_staff_invitation.id DESC
-LIMIT $4::integer`,
-    args: [{ param: "status" }, { param: "createdAfter" }, { search: true }, { limit: true }],
+LIMIT $5::integer`,
+    args: [
+      { tenant: true },
+      { param: "status" },
+      { param: "createdAfter" },
+      { search: true },
+      { limit: true },
+    ],
   },
   searchNext: {
     text: `SELECT
@@ -181,26 +212,28 @@ LIMIT $4::integer`,
   created_at::text AS _k1,
   id::text AS _k2
 FROM cleaning_staff.cleaning_staff_invitation
-CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower($3::text)) AS _score) AS _s
-WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
-  AND lower(email_value) % lower($3::text)
+CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower($4::text)) AS _score) AS _s
+WHERE tenant_id = $1::uuid
+  AND ($2::text IS NULL OR status = $2::text)
+  AND ($3::timestamptz IS NULL OR created_at > $3::timestamptz)
+  AND lower(email_value) % lower($4::text)
   AND _s._score >= 0.3
   AND (
     _s._score,
     cleaning_staff_invitation.created_at,
     cleaning_staff_invitation.id
   ) < (
-    $4::real,
-    $5::timestamptz,
-    $6::uuid
+    $5::real,
+    $6::timestamptz,
+    $7::uuid
   )
 ORDER BY
   _s._score DESC,
   cleaning_staff_invitation.created_at DESC,
   cleaning_staff_invitation.id DESC
-LIMIT $7::integer`,
+LIMIT $8::integer`,
     args: [
+      { tenant: true },
       { param: "status" },
       { param: "createdAfter" },
       { search: true },
@@ -212,19 +245,23 @@ LIMIT $7::integer`,
   },
 };
 
-/** SearchInvitationsReader on PostgreSQL. */
+/**
+ * SearchInvitationsReader on PostgreSQL: each page is read in its own transaction with
+ * `app.tenant_id` set for row level security (the statement filters by the tenant as well). `db`:
+ * PGlite as it is, or `poolTransactions(pool)` for node-postgres.
+ */
 export class PostgresSearchInvitationsReader implements SearchInvitationsReader {
-  readonly #client: SqlClient;
+  readonly #db: SqlTransactions;
 
-  constructor(client: SqlClient) {
-    this.#client = client;
+  constructor(db: SqlTransactions) {
+    this.#db = db;
   }
 
   read(
     request: QueryRequest<SearchInvitationsParams>,
   ): Promise<QueryResult<SearchInvitationsItem>> {
-    return readSql(
-      this.#client,
+    return readSqlInTenant(
+      this.#db,
       SEARCH_INVITATIONS_SPEC,
       SEARCH_INVITATIONS_SQL,
       request,

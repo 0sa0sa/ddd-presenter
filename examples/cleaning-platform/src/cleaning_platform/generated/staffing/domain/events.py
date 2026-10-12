@@ -11,14 +11,19 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from cleaning_platform.generated._runtime import DomainEvent, parse_with
+from cleaning_platform.generated.security import TenantId
 
 __all__ = ["AnyEvent", "StaffRegistered", "parse_event"]
 
 
 class StaffRegistered(DomainEvent):
-    """Emitted by StaffMember.register."""
+    """Emitted by StaffMember.register.
+
+    Carries the tenant (`tenant_id`) of the aggregate it comes from.
+    """
 
     event_type: Literal["Staffing.StaffRegistered"] = "Staffing.StaffRegistered"
+    tenant_id: TenantId
     id: UUID
     invitation_id: UUID
 

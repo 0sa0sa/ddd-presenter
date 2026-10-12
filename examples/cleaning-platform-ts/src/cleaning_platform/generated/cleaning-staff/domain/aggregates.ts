@@ -18,6 +18,7 @@ import {
   type Transition,
   type UUID,
 } from "../../runtime.js";
+import { type TenantId, TenantIdSchema } from "../../security.js";
 import { InvitationStatus, InvitationStatusSchema } from "./enums.js";
 import {
   InvalidInvitationWindow,
@@ -28,6 +29,7 @@ import { InvitationAccepted, InvitationIssued, InvitationRevoked } from "./event
 import { type EmailAddress, EmailAddressSchema } from "./value-objects.js";
 
 const CleaningStaffInvitationProps = z.strictObject({
+  tenantId: TenantIdSchema,
   id: idSchema("CleaningStaffInvitation"),
   email: EmailAddressSchema,
   status: InvitationStatusSchema,
@@ -42,8 +44,12 @@ export type CleaningStaffInvitationInput = z.input<typeof CleaningStaffInvitatio
  * スタッフ候補への招待
  *
  * Identity: id. Instances are immutable; operations return a Transition with the new state.
+ * Tenant-scoped: `tenantId` is the tenant it belongs to, set by its factory from the caller's
+ * tenant and never changed.
  */
 export class CleaningStaffInvitation extends AggregateRoot {
+  /** The tenant this aggregate belongs to (immutable). */
+  readonly tenantId: TenantId;
   readonly id: Id<"CleaningStaffInvitation">;
   readonly email: EmailAddress;
   readonly status: InvitationStatus;
@@ -53,6 +59,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
 
   private constructor(props: CleaningStaffInvitationProps) {
     super();
+    this.tenantId = props.tenantId;
     this.id = props.id;
     this.email = props.email;
     this.status = props.status;
@@ -80,6 +87,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
 
   #props(): CleaningStaffInvitationProps {
     return {
+      tenantId: this.tenantId,
       id: this.id,
       email: this.email,
       status: this.status,
@@ -90,7 +98,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
   }
 
   /** Candidate state: the changes applied to a copy (construct-time invariants run on it). */
-  #with(changes: Partial<CleaningStaffInvitationInput>): CleaningStaffInvitation {
+  #with(changes: Partial<Omit<CleaningStaffInvitationInput, "tenantId">>): CleaningStaffInvitation {
     return CleaningStaffInvitation.from({ ...this.#props(), ...changes });
   }
 
@@ -162,15 +170,18 @@ export class CleaningStaffInvitation extends AggregateRoot {
    *
    * Factory: construct-time invariants are checked on the new instance.
    * Emits: InvitationIssued.
+   * `tenantId` is the caller's tenant (the use case passes it; it never comes from the input).
    */
   static issue(args: {
+    readonly tenantId: TenantId;
     readonly id: UUID;
     readonly email: EmailAddress;
     readonly at: Instant;
     readonly expiresAt: Instant;
   }): Transition<CleaningStaffInvitation> {
-    const { id, email, at, expiresAt } = args;
+    const { tenantId, id, email, at, expiresAt } = args;
     const aggregate = CleaningStaffInvitation.from({
+      tenantId,
       id,
       email,
       status: InvitationStatus.pending,
@@ -178,7 +189,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
       expiresAt,
     });
     const events: DomainEvent[] = [];
-    events.push(InvitationIssued.create({ id, email, expiresAt }));
+    events.push(InvitationIssued.create({ tenantId: aggregate.tenantId, id, email, expiresAt }));
     return transition(aggregate, events);
   }
 
@@ -195,7 +206,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
     this.pendingUntilExpiry(at).assertHolds();
     const aggregate = this.#with({ status: InvitationStatus.accepted, acceptedAt: at });
     const events: DomainEvent[] = [];
-    events.push(InvitationAccepted.create({ id: aggregate.id, at }));
+    events.push(InvitationAccepted.create({ tenantId: aggregate.tenantId, id: aggregate.id, at }));
     return transition(aggregate, events);
   }
 
@@ -211,7 +222,7 @@ export class CleaningStaffInvitation extends AggregateRoot {
     this.isOpen().assertHolds();
     const aggregate = this.#with({ status: InvitationStatus.revoked });
     const events: DomainEvent[] = [];
-    events.push(InvitationRevoked.create({ id: aggregate.id }));
+    events.push(InvitationRevoked.create({ tenantId: aggregate.tenantId, id: aggregate.id }));
     return transition(aggregate, events);
   }
 }

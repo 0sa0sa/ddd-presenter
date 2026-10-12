@@ -11,8 +11,9 @@ from pydantic import AwareDatetime
 
 from cleaning_platform.generated._runtime import DomainModel
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
-__all__ = ["AcceptInvitation", "IssueInvitation", "RevokeInvitation"]
+__all__ = ["AcceptInvitation", "InspectInvitation", "IssueInvitation", "RevokeInvitation"]
 
 
 class IssueInvitation(DomainModel):
@@ -31,4 +32,14 @@ class AcceptInvitation(DomainModel):
 class RevokeInvitation(DomainModel):
     """Input of use case `revoke_invitation` (actor: 清掃会社の管理者)."""
 
+    invitation_id: UUID
+
+
+class InspectInvitation(DomainModel):
+    """Input of use case `inspect_invitation` (actor: 運用担当).
+
+    `tenant_id` is the tenant it acts in (cross-tenant: platform roles only).
+    """
+
+    tenant_id: TenantId
     invitation_id: UUID

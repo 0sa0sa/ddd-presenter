@@ -41,8 +41,8 @@ export const contract = {
         not_authorized: 403,
         aggregate_not_found: 404,
       },
-      auth: { kind: "principal", roles: ["admin"] },
-      rateLimit: { name: "read_staff_member", requests: 60, windowSeconds: 60, by: "principal" },
+      auth: { kind: "principal", roles: [], permissions: ["staff.read"], tenant: true },
+      rateLimit: { name: "read_staff_member", requests: 60, windowSeconds: 60, by: "tenant" },
     }),
   },
 } as const;

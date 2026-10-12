@@ -18,9 +18,11 @@ import {
   type UUID,
   uuidSchema,
 } from "../../runtime.js";
+import { type TenantId, TenantIdSchema } from "../../security.js";
 import { StaffRegistered } from "./events.js";
 
 const StaffMemberProps = z.strictObject({
+  tenantId: TenantIdSchema,
   id: idSchema("StaffMember"),
   invitationId: uuidSchema,
   joinedAt: InstantSchema,
@@ -32,14 +34,19 @@ export type StaffMemberInput = z.input<typeof StaffMemberProps>;
  * 登録済みのスタッフ
  *
  * Identity: id. Instances are immutable; operations return a Transition with the new state.
+ * Tenant-scoped: `tenantId` is the tenant it belongs to, set by its factory from the caller's
+ * tenant and never changed.
  */
 export class StaffMember extends AggregateRoot {
+  /** The tenant this aggregate belongs to (immutable). */
+  readonly tenantId: TenantId;
   readonly id: Id<"StaffMember">;
   readonly invitationId: UUID;
   readonly joinedAt: Instant;
 
   private constructor(props: StaffMemberProps) {
     super();
+    this.tenantId = props.tenantId;
     this.id = props.id;
     this.invitationId = props.invitationId;
     this.joinedAt = props.joinedAt;
@@ -61,16 +68,18 @@ export class StaffMember extends AggregateRoot {
    *
    * Factory: construct-time invariants are checked on the new instance.
    * Emits: StaffRegistered.
+   * `tenantId` is the caller's tenant (the use case passes it; it never comes from the input).
    */
   static register(args: {
+    readonly tenantId: TenantId;
     readonly id: UUID;
     readonly invitationId: UUID;
     readonly joinedAt: Instant;
   }): Transition<StaffMember> {
-    const { id, invitationId, joinedAt } = args;
-    const aggregate = StaffMember.from({ id, invitationId, joinedAt });
+    const { tenantId, id, invitationId, joinedAt } = args;
+    const aggregate = StaffMember.from({ tenantId, id, invitationId, joinedAt });
     const events: DomainEvent[] = [];
-    events.push(StaffRegistered.create({ id, invitationId }));
+    events.push(StaffRegistered.create({ tenantId: aggregate.tenantId, id, invitationId }));
     return transition(aggregate, events);
   }
 }

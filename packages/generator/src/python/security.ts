@@ -501,7 +501,16 @@ function rbacSecurity(model: ModelIR, c: Code, imp: ModuleImports): void {
     c.line("return principal");
   });
   if (tenancy) {
-    signature("authorize_in_tenant", "tuple[Principal, TenantId]");
+    imp.from("typing", "NamedTuple");
+    c.line().line();
+    c.line("class InTenant(NamedTuple):");
+    c.indent(() => {
+      c.docstring("A principal acting in its active tenant (what `authorize_in_tenant` returns).");
+      c.line();
+      c.line("principal: Principal");
+      c.line("tenant_id: TenantId");
+    });
+    signature("authorize_in_tenant", "InTenant");
     c.indent(() => {
       c.docstring(
         [
@@ -517,7 +526,7 @@ function rbacSecurity(model: ModelIR, c: Code, imp: ModuleImports): void {
       c.line(`if not _admits(principal, roles, permissions${platform.length ? ", tenant=True, platform=False" : ""}):`);
 
       c.indent(() => c.line("raise _denied(action, roles, permissions)"));
-      c.line("return principal, principal.tenant_id");
+      c.line("return InTenant(principal, principal.tenant_id)");
     });
     if (platform.length) {
       signature("authorize_across_tenants", "Principal");

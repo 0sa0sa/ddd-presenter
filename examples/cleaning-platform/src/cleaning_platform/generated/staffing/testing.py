@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from cleaning_platform.generated._runtime import DomainEvent
+from cleaning_platform.generated.security import TenantId, TenantMismatch
 from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 
 __all__ = [
@@ -52,7 +53,10 @@ class FakeUnitOfWork:
 
 
 class InMemoryStaffMemberRepository:
-    """In-memory StaffMemberRepository. Writes are staged until the unit of work commits."""
+    """In-memory StaffMemberRepository of tenant-scoped aggregates: `get` sees the given tenant's
+    only (another tenant's is None), `save` refuses another tenant's aggregate or an id another
+    tenant uses (TenantMismatch). Writes are staged until the unit of work commits.
+    """
 
     def __init__(self, unit_of_work: FakeUnitOfWork | None = None) -> None:
         self._committed: dict[UUID, StaffMember] = {}
@@ -62,19 +66,25 @@ class InMemoryStaffMemberRepository:
             unit_of_work.enlist(self)
 
     def seed(self, *aggregates: StaffMember) -> None:
+        """Stores aggregates (of any tenant: each keeps its own `tenant_id`)."""
         for aggregate in aggregates:
             self._committed[aggregate.id] = aggregate
 
-    def get(self, id: UUID) -> StaffMember | None:
-        return self._pending.get(id, self._committed.get(id))
+    def get(self, tenant: TenantId, id: UUID) -> StaffMember | None:
+        aggregate = self._pending.get(id, self._committed.get(id))
+        return aggregate if aggregate is not None and aggregate.tenant_id == tenant else None
 
-    def save(self, aggregate: StaffMember) -> None:
+    def save(self, tenant: TenantId, aggregate: StaffMember) -> None:
+        existing = self._pending.get(aggregate.id, self._committed.get(aggregate.id))
+        if aggregate.tenant_id != tenant or (existing is not None and existing.tenant_id != tenant):
+            raise TenantMismatch
         if self._unit_of_work is None:
             self._committed[aggregate.id] = aggregate
         else:
             self._pending[aggregate.id] = aggregate
 
     def all(self) -> list[StaffMember]:
+        """Every committed aggregate, of every tenant (in-memory readers filter by tenant)."""
         return list(self._committed.values())
 
     def _commit(self) -> None:

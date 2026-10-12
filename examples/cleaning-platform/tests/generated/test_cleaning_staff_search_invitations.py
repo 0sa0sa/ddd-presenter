@@ -33,12 +33,13 @@ from cleaning_platform.generated.cleaning_staff.testing import (
     InMemoryCleaningStaffInvitationRepository,
     InMemorySearchInvitationsReader,
 )
-from cleaning_platform.generated.security import NotAuthorized, Principal, Unauthenticated
+from cleaning_platform.generated.security import NotAuthorized, Principal, TenantId, Unauthenticated
 
 CURSORS = HmacCursorCodec(["generated-tests-cursor-secret-0123456789"])
 
 GIVEN_1: tuple[CleaningStaffInvitation, ...] = (
     CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000001"),
         email=EmailAddress(value="staff@example.com"),
         status=InvitationStatus.PENDING,
@@ -46,6 +47,7 @@ GIVEN_1: tuple[CleaningStaffInvitation, ...] = (
         expires_at=datetime.fromisoformat("2026-01-08T10:00:00+00:00"),
     ),
     CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000002"),
         email=EmailAddress(value="stuff.manager@example.com"),
         status=InvitationStatus.ACCEPTED,
@@ -54,6 +56,7 @@ GIVEN_1: tuple[CleaningStaffInvitation, ...] = (
         accepted_at=datetime.fromisoformat("2026-01-03T10:00:00+00:00"),
     ),
     CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000003"),
         email=EmailAddress(value="alice@example.org"),
         status=InvitationStatus.PENDING,
@@ -105,7 +108,11 @@ def test_newest_first_across_pages() -> None:
     Then: items ["00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000002",
     "00000000-0000-0000-0000-000000000001"]; next_cursor absent
     """
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(limit=2), 2, principal)
     items = [item for page in pages for item in page.items]
     assert [item.id for item in items] == [
@@ -124,7 +131,11 @@ def test_pending_only() -> None:
     Then: items ["00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000001"];
     next_cursor absent
     """
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     pages = _fetch_pages(
         _setup(GIVEN_1),
         SearchInvitationsInput(status=InvitationStatus.PENDING),
@@ -146,7 +157,11 @@ def test_search_by_email() -> None:
     When: {"q": "staff"}, 1 page(s)
     Then: items [{"email": {"value": "staff@example.com"}, "status": "pending"}]; next_cursor absent
     """
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     pages = _fetch_pages(_setup(GIVEN_1), SearchInvitationsInput(q="staff"), 1, principal)
     items = [item for page in pages for item in page.items]
     assert len(items) == 1
@@ -159,16 +174,39 @@ def test_limit_is_clamped_to_the_maximum_page_size() -> None:
     """`limit` above the maximum page size (100) is clamped, not rejected; below 1 it is a
     ConstraintViolation.
     """
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     page = _setup(GIVEN_1).execute(SearchInvitationsInput(limit=101), principal)
     assert len(page.items) <= 100
     with pytest.raises(ConstraintViolation):
         SearchInvitationsInput(limit=0)
 
 
+def test_tenancy_another_tenants_rows_are_not_read() -> None:
+    """Tenant isolation: the same data stored in another tenant
+    (00000000-0000-4000-8000-0000000000b2) is never read for a caller of
+    00000000-0000-4000-8000-0000000000a1.
+    """
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
+    elsewhere = tuple(
+        a.model_copy(update={"tenant_id": TenantId(UUID("00000000-0000-4000-8000-0000000000b2"))})
+        for a in GIVEN_1
+    )
+    page = _setup(elsewhere).execute(SearchInvitationsInput(), principal)
+    assert page.items == ()
+    assert page.next_cursor is None
+
+
 def test_authorization_is_refused_before_anything_is_read() -> None:
-    """search_invitations checks the caller first: without a principal Unauthenticated, without
-    admin NotAuthorized.
+    """search_invitations checks the caller first: without a principal Unauthenticated, without an
+    active tenant Unauthenticated, without invitation.list NotAuthorized.
 
     Nothing is read before: the reader fails the test when called.
     """
@@ -177,12 +215,20 @@ def test_authorization_is_refused_before_anything_is_read() -> None:
     with pytest.raises(Unauthenticated) as anonymous:
         query.execute(params, None)
     assert anonymous.value.details == {"action": "search_invitations"}
-    lacking = Principal(id="test-principal", roles=("candidate",))
+    tenantless = Principal(id="test-principal", roles=("staff",))
+    with pytest.raises(Unauthenticated) as no_tenant:
+        query.execute(params, tenantless)
+    assert no_tenant.value.details == {"action": "search_invitations", "error": "missing_tenant"}
+    lacking = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("candidate",),
+    )
     with pytest.raises(NotAuthorized) as refused:
         query.execute(params, lacking)
     assert refused.value.details == {
         "action": "search_invitations",
-        "required_roles": ["admin"],
+        "required_permissions": ["invitation.list"],
     }
 
 
@@ -191,7 +237,11 @@ def test_pages_of_one_item_cover_the_whole_result_in_order() -> None:
     single-page result: same items, same order, nothing twice, nothing missing.
     """
     query = _setup(GIVEN_1)
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     whole = query.execute(SearchInvitationsInput(limit=100), principal)
     assert whole.next_cursor is None
     pages = _fetch_pages(query, SearchInvitationsInput(limit=1), len(whole.items) + 1, principal)
@@ -207,7 +257,11 @@ def test_a_tampered_cursor_is_rejected() -> None:
     HMAC-SHA256).
     """
     query = _setup(GIVEN_1)
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
     assert cursor is not None
     tampered = ("f" if cursor.startswith("e") else "e") + cursor[1:]
@@ -222,7 +276,11 @@ def test_a_cursor_reused_with_other_parameters_is_rejected() -> None:
     is rejected instead of returning a wrong page.
     """
     query = _setup(GIVEN_1)
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
     assert cursor is not None
     with pytest.raises(InvalidCursor):
@@ -230,15 +288,44 @@ def test_a_cursor_reused_with_other_parameters_is_rejected() -> None:
     assert len(query.execute(SearchInvitationsInput(cursor=cursor, limit=1), principal).items) == 1
 
 
+def test_tenancy_a_cursor_is_rejected_in_another_tenant() -> None:
+    """A cursor is bound to the tenant it was issued in: the same principal acting in another tenant
+    gets InvalidCursor.
+    """
+    query = _setup(GIVEN_1)
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
+    cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
+    assert cursor is not None
+    elsewhere = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000b2")),
+        roles=("staff",),
+    )
+    with pytest.raises(InvalidCursor):
+        query.execute(SearchInvitationsInput(cursor=cursor), elsewhere)
+
+
 def test_a_cursor_is_bound_to_the_principal_it_was_issued_to() -> None:
     """Another caller (same roles and claims, another id) gets InvalidCursor: a leaked cursor cannot
     page through someone else's result.
     """
     query = _setup(GIVEN_1)
-    principal = Principal(id="test-principal", roles=("admin",))
+    principal = Principal(
+        id="test-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     cursor = query.execute(SearchInvitationsInput(limit=1), principal).next_cursor
     assert cursor is not None
-    other = Principal(id="other-principal", roles=("admin",))
+    other = Principal(
+        id="other-principal",
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
+        roles=("staff",),
+    )
     with pytest.raises(InvalidCursor):
         query.execute(SearchInvitationsInput(cursor=cursor), other)
     assert len(query.execute(SearchInvitationsInput(cursor=cursor, limit=1), principal).items) == 1

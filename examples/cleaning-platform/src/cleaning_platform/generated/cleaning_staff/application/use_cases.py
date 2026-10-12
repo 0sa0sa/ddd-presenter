@@ -19,9 +19,11 @@ from cleaning_platform.generated.cleaning_staff.application.ports import (
 from cleaning_platform.generated.cleaning_staff.domain.aggregates import CleaningStaffInvitation
 from cleaning_platform.generated.cleaning_staff.domain.commands import (
     AcceptInvitation,
+    InspectInvitation,
     IssueInvitation,
     RevokeInvitation,
 )
+from cleaning_platform.generated.cleaning_staff.domain.enums import InvitationStatus
 from cleaning_platform.generated.cleaning_staff.domain.errors import (
     EmailBlocked,
     InvitationNotFound,
@@ -31,9 +33,22 @@ from cleaning_platform.generated.cleaning_staff.domain.events import (
     InvitationIssued,
     InvitationRevoked,
 )
-from cleaning_platform.generated.security import Principal, allow_if, authorize
+from cleaning_platform.generated.security import (
+    CrossTenantAccess,
+    CrossTenantAudit,
+    Principal,
+    TenantId,
+    allow_if,
+    authorize_across_tenants,
+    authorize_in_tenant,
+)
 
-__all__ = ["AcceptInvitationUseCase", "IssueInvitationUseCase", "RevokeInvitationUseCase"]
+__all__ = [
+    "AcceptInvitationUseCase",
+    "InspectInvitationUseCase",
+    "IssueInvitationUseCase",
+    "RevokeInvitationUseCase",
+]
 
 
 class IssueInvitationUseCase:
@@ -41,7 +56,9 @@ class IssueInvitationUseCase:
 
     Actor: 清掃会社の管理者
     Transaction: required
-    Authorize: the role admin
+    Authorize: the permission invitation.issue
+    Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+    it.
 
     Steps:
         1. if is_blocked_email(email):
@@ -74,13 +91,18 @@ class IssueInvitationUseCase:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
 
-        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-        role (before anything is loaded) or when allow_if does not hold.
+        `principal` is checked first: Unauthenticated without one or without an active tenant,
+        NotAuthorized without a required role or permission in that tenant (before anything is
+        loaded).
         """
-        principal = authorize(principal, "issue_invitation", ("admin",))
+        principal, tenant = authorize_in_tenant(
+            principal,
+            "issue_invitation",
+            permissions=("invitation.issue",),
+        )
         after_commit: list[DomainEvent] = []
         try:
-            result = self._run(command, after_commit)
+            result = self._run(command, tenant, after_commit)
             self._unit_of_work.commit()
         except BaseException:
             self._unit_of_work.rollback()
@@ -89,7 +111,9 @@ class IssueInvitationUseCase:
             self._event_publisher.publish(tuple(after_commit))
         return result
 
-    def _run(self, command: IssueInvitation, after_commit: list[DomainEvent]) -> UUID:
+    def _run(
+        self, command: IssueInvitation, tenant: TenantId, after_commit: list[DomainEvent]
+    ) -> UUID:
         emitted: list[DomainEvent] = []
         # 1. if is_blocked_email(email)
         if self._extensions.is_blocked_email(command.email):
@@ -97,6 +121,7 @@ class IssueInvitationUseCase:
             raise EmailBlocked()
         # 3. create CleaningStaffInvitation via issue
         transition_3 = CleaningStaffInvitation.issue(
+            tenant_id=tenant,
             id=self._ids.new_id(),
             email=command.email,
             at=self._clock.now(),
@@ -105,7 +130,7 @@ class IssueInvitationUseCase:
         invitation = transition_3.aggregate
         emitted.extend(transition_3.events)
         # 4. save invitation
-        self._cleaning_staff_invitation_repository.save(invitation)
+        self._cleaning_staff_invitation_repository.save(tenant, invitation)
         # 5. publish InvitationIssued after commit
         after_commit.extend(event for event in emitted if isinstance(event, InvitationIssued))
         # 6. return
@@ -117,9 +142,11 @@ class AcceptInvitationUseCase:
 
     Actor: スタッフ候補
     Transaction: required
-    Authorize: the role candidate
+    Authorize: the permission invitation.accept
         allow_if principal.email != null and principal.email == invitation.email.value (after
         loading invitation)
+    Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+    it.
 
     Steps:
         1. load CleaningStaffInvitation by invitation_id as invitation (not found:
@@ -146,13 +173,18 @@ class AcceptInvitationUseCase:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
 
-        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-        role (before anything is loaded) or when allow_if does not hold.
+        `principal` is checked first: Unauthenticated without one or without an active tenant,
+        NotAuthorized without a required role or permission in that tenant (before anything is
+        loaded) or when allow_if does not hold.
         """
-        principal = authorize(principal, "accept_invitation", ("candidate",))
+        principal, tenant = authorize_in_tenant(
+            principal,
+            "accept_invitation",
+            permissions=("invitation.accept",),
+        )
         after_commit: list[DomainEvent] = []
         try:
-            self._run(command, principal, after_commit)
+            self._run(command, principal, tenant, after_commit)
             self._unit_of_work.commit()
         except BaseException:
             self._unit_of_work.rollback()
@@ -161,11 +193,15 @@ class AcceptInvitationUseCase:
             self._event_publisher.publish(tuple(after_commit))
 
     def _run(
-        self, command: AcceptInvitation, principal: Principal, after_commit: list[DomainEvent]
+        self,
+        command: AcceptInvitation,
+        principal: Principal,
+        tenant: TenantId,
+        after_commit: list[DomainEvent],
     ) -> None:
         emitted: list[DomainEvent] = []
         # 1. load CleaningStaffInvitation
-        invitation = self._cleaning_staff_invitation_repository.get(command.invitation_id)
+        invitation = self._cleaning_staff_invitation_repository.get(tenant, command.invitation_id)
         if invitation is None:
             raise InvitationNotFound(id=command.invitation_id)
         # authorize: allow_if
@@ -178,7 +214,7 @@ class AcceptInvitationUseCase:
         invitation = transition_2.aggregate
         emitted.extend(transition_2.events)
         # 3. save invitation
-        self._cleaning_staff_invitation_repository.save(invitation)
+        self._cleaning_staff_invitation_repository.save(tenant, invitation)
         # 4. publish InvitationAccepted after commit
         after_commit.extend(event for event in emitted if isinstance(event, InvitationAccepted))
 
@@ -188,7 +224,9 @@ class RevokeInvitationUseCase:
 
     Actor: 清掃会社の管理者
     Transaction: required
-    Authorize: the role admin
+    Authorize: the permission invitation.revoke
+    Tenant: the caller's active tenant (its token's tenant claim); every repository call is bound to
+    it.
 
     Steps:
         1. load CleaningStaffInvitation by invitation_id as invitation (not found:
@@ -217,13 +255,18 @@ class RevokeInvitationUseCase:
         """Runs the steps in one transaction. Events marked publish_after_commit are published only
         after a successful commit.
 
-        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
-        role (before anything is loaded) or when allow_if does not hold.
+        `principal` is checked first: Unauthenticated without one or without an active tenant,
+        NotAuthorized without a required role or permission in that tenant (before anything is
+        loaded).
         """
-        principal = authorize(principal, "revoke_invitation", ("admin",))
+        principal, tenant = authorize_in_tenant(
+            principal,
+            "revoke_invitation",
+            permissions=("invitation.revoke",),
+        )
         after_commit: list[DomainEvent] = []
         try:
-            result = self._run(command, after_commit)
+            result = self._run(command, tenant, after_commit)
             self._unit_of_work.commit()
         except BaseException:
             self._unit_of_work.rollback()
@@ -232,10 +275,12 @@ class RevokeInvitationUseCase:
             self._event_publisher.publish(tuple(after_commit))
         return result
 
-    def _run(self, command: RevokeInvitation, after_commit: list[DomainEvent]) -> bool:
+    def _run(
+        self, command: RevokeInvitation, tenant: TenantId, after_commit: list[DomainEvent]
+    ) -> bool:
         emitted: list[DomainEvent] = []
         # 1. load CleaningStaffInvitation
-        invitation = self._cleaning_staff_invitation_repository.get(command.invitation_id)
+        invitation = self._cleaning_staff_invitation_repository.get(tenant, command.invitation_id)
         if invitation is None:
             raise InvitationNotFound(id=command.invitation_id)
         # 2. if invitation.is_open
@@ -245,10 +290,68 @@ class RevokeInvitationUseCase:
             invitation = transition_3.aggregate
             emitted.extend(transition_3.events)
             # 4. save invitation
-            self._cleaning_staff_invitation_repository.save(invitation)
+            self._cleaning_staff_invitation_repository.save(tenant, invitation)
             # 5. publish InvitationRevoked after commit
             after_commit.extend(event for event in emitted if isinstance(event, InvitationRevoked))
             # 6. return
             return True
         # 7. return
         return False
+
+
+class InspectInvitationUseCase:
+    """Use case inspect_invitation.
+
+    Actor: 運用担当
+    Transaction: none
+    Authorize: the permission invitation.read
+    Tenant: command.tenant_id (cross-tenant: platform roles only; every access is recorded by the
+    CrossTenantAudit port first).
+
+    Steps:
+        1. load CleaningStaffInvitation by invitation_id as invitation (not found:
+           InvitationNotFound)
+        2. return invitation.status
+    """
+
+    def __init__(
+        self,
+        *,
+        cleaning_staff_invitation_repository: CleaningStaffInvitationRepository,
+        audit: CrossTenantAudit,
+    ) -> None:
+        self._cleaning_staff_invitation_repository = cleaning_staff_invitation_repository
+        self._audit = audit
+
+    def execute(self, command: InspectInvitation, principal: Principal | None) -> InvitationStatus:
+        """Runs the steps without a transaction boundary.
+
+        `principal` is checked first: Unauthenticated without one, NotAuthorized without a required
+        platform role or permission (before anything is loaded). Then the access to
+        command.tenant_id is recorded.
+        """
+        principal = authorize_across_tenants(
+            principal,
+            "inspect_invitation",
+            permissions=("invitation.read",),
+        )
+        # Every cross-tenant access is recorded before anything of the tenant is read.
+        self._audit.record(
+            CrossTenantAccess(
+                action="inspect_invitation",
+                principal=principal,
+                tenant_id=command.tenant_id,
+            )
+        )
+        after_commit: list[DomainEvent] = []
+        return self._run(command, command.tenant_id, after_commit)
+
+    def _run(
+        self, command: InspectInvitation, tenant: TenantId, after_commit: list[DomainEvent]
+    ) -> InvitationStatus:
+        # 1. load CleaningStaffInvitation
+        invitation = self._cleaning_staff_invitation_repository.get(tenant, command.invitation_id)
+        if invitation is None:
+            raise InvitationNotFound(id=command.invitation_id)
+        # 2. return
+        return invitation.status

@@ -17,6 +17,7 @@ import type { ApiClient } from "../../api/client.js";
 import type { SearchInvitationsInput } from "../application/queries.js";
 import type {
   AcceptInvitationInput,
+  InspectInvitationInput,
   IssueInvitationInput,
   RevokeInvitationInput,
 } from "../domain/commands.js";
@@ -153,6 +154,13 @@ export function createCleaningStaffMutations(api: ApiClient) {
           }),
           context.client.invalidateQueries({ queryKey: queries.cleaningStaffInvitation.lists() }),
         ]),
+    }),
+    /** Use case inspect_invitation (`POST /api/cleaning-staff/inspect-invitation`). */
+    inspectInvitation: mutationOptions({
+      mutationKey: [{ scope: "cleaning-staff", useCase: "inspect-invitation" }],
+      mutationFn: (input: InspectInvitationInput) =>
+        api.cleaningStaff.useCases.inspectInvitation(input),
+      // Saves no aggregate: nothing to invalidate.
     }),
   };
 }

@@ -12,7 +12,12 @@ import { queryEndpoint } from "../../api/query-runtime.js";
 import { readEndpoint, useCaseEndpoint } from "../../api/runtime.js";
 import { idSchema, InstantSchema, uuidSchema } from "../../runtime.js";
 import { SearchInvitationsInputSchema } from "../application/queries.js";
-import { AcceptInvitation, IssueInvitation, RevokeInvitation } from "../domain/commands.js";
+import {
+  AcceptInvitation,
+  InspectInvitation,
+  IssueInvitation,
+  RevokeInvitation,
+} from "../domain/commands.js";
 import { InvitationStatusSchema } from "../domain/enums.js";
 import { EmailAddressSchema } from "../domain/value-objects.js";
 
@@ -72,8 +77,8 @@ export const contract = {
         invalid_invitation_window: 422,
         concurrency_conflict: 409,
       },
-      auth: { kind: "principal", roles: ["admin"] },
-      rateLimit: { name: "issue_invitation", requests: 10, windowSeconds: 60, by: "principal" },
+      auth: { kind: "principal", roles: [], permissions: ["invitation.issue"], tenant: true },
+      rateLimit: { name: "issue_invitation", requests: 10, windowSeconds: 60, by: "tenant" },
     }),
     /** 招待を受諾する (actor: スタッフ候補). */
     acceptInvitation: useCaseEndpoint({
@@ -91,7 +96,7 @@ export const contract = {
         invalid_invitation_window: 422,
         concurrency_conflict: 409,
       },
-      auth: { kind: "principal", roles: ["candidate"] },
+      auth: { kind: "principal", roles: [], permissions: ["invitation.accept"], tenant: true },
       rateLimit: { name: "accept_invitation", requests: 5, windowSeconds: 60, by: "principal" },
     }),
     /** Use case revoke_invitation (actor: 清掃会社の管理者). */
@@ -110,8 +115,24 @@ export const contract = {
         invalid_invitation_window: 422,
         concurrency_conflict: 409,
       },
-      auth: { kind: "principal", roles: ["admin"] },
-      rateLimit: { name: "revoke_invitation", requests: 60, windowSeconds: 60, by: "principal" },
+      auth: { kind: "principal", roles: [], permissions: ["invitation.revoke"], tenant: true },
+      rateLimit: { name: "revoke_invitation", requests: 60, windowSeconds: 60, by: "tenant" },
+    }),
+    /** Use case inspect_invitation (actor: 運用担当). */
+    inspectInvitation: useCaseEndpoint({
+      name: "inspect_invitation",
+      method: "POST",
+      path: "/api/cleaning-staff/inspect-invitation",
+      input: InspectInvitation.schema,
+      output: InvitationStatusSchema,
+      errors: {
+        constraint_violation: 400,
+        unauthenticated: 401,
+        not_authorized: 403,
+        invitation_not_found: 404,
+      },
+      auth: { kind: "principal", roles: [], permissions: ["invitation.read"] },
+      rateLimit: { name: "inspect_invitation", requests: 60, windowSeconds: 60, by: "principal" },
     }),
   },
   aggregates: {
@@ -129,12 +150,17 @@ export const contract = {
         not_authorized: 403,
         aggregate_not_found: 404,
       },
-      auth: { kind: "principal", roles: ["admin", "candidate"] },
+      auth: {
+        kind: "principal",
+        roles: [],
+        permissions: ["invitation.read", "invitation.accept"],
+        tenant: true,
+      },
       rateLimit: {
         name: "read_cleaning_staff_invitation",
         requests: 60,
         windowSeconds: 60,
-        by: "principal",
+        by: "tenant",
       },
     }),
   },
@@ -163,8 +189,8 @@ export const contract = {
         unauthenticated: 401,
         not_authorized: 403,
       },
-      auth: { kind: "principal", roles: ["admin"] },
-      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "principal" },
+      auth: { kind: "principal", roles: [], permissions: ["invitation.list"], tenant: true },
+      rateLimit: { name: "search_invitations", requests: 60, windowSeconds: 60, by: "tenant" },
     }),
   },
 } as const;

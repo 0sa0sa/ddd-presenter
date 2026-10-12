@@ -16,7 +16,7 @@ import {
   runQuery,
 } from "../../persistence.js";
 import { type Awaitable, idSchema, type Instant, InstantSchema, parseWith } from "../../runtime.js";
-import { authorize, type Principal } from "../../security.js";
+import { authorizeInTenant, type Principal } from "../../security.js";
 import { type InvitationStatus, InvitationStatusSchema } from "../domain/enums.js";
 import { EmailAddressSchema } from "../domain/value-objects.js";
 
@@ -84,6 +84,7 @@ export const SEARCH_INVITATIONS_SPEC: QuerySpec = {
   ],
   size: 20,
   maxSize: 100,
+  tenant: "tenant_id",
 };
 
 /**
@@ -101,9 +102,10 @@ export interface SearchInvitationsReader {
  *
  * Query search_invitations (reads CleaningStaffInvitation).
  *
- * Authorize: the role admin. `principal` is checked first, before the input and before anything is
- * read: Unauthenticated without one, NotAuthorized without a required role. Cursors are bound to
- * the principal.
+ * Authorize: the permission invitation.list. `principal` is checked first, before the input and
+ * before anything is read: Unauthenticated without one or without an active tenant, NotAuthorized
+ * without a required role or permission. The rows are those of the caller's tenant only. Cursors
+ * are bound to the principal and its tenant.
  *
  * Validates the input (ConstraintViolation), clamps `limit` to 100, checks the cursor
  * (InvalidCursor: tampered, expired, or made for other parameters or another principal) and returns
@@ -122,14 +124,14 @@ export class SearchInvitationsQuery {
     input: SearchInvitationsInput,
     principal: Principal | null,
   ): Promise<SearchInvitationsPage> {
-    authorize(principal, "search_invitations", ["admin"]);
+    authorizeInTenant(principal, "search_invitations", { permissions: ["invitation.list"] });
     const { q, cursor, limit, ...params } = parseWith(
       SearchInvitationsInputSchema,
       input,
       "SearchInvitationsInput",
     );
     const page = { search: q, cursor, limit };
-    const scope = { principal: principal.id, values: {} };
+    const scope = { principal: principal.id, values: {}, tenant: principal.tenantId };
     return await runQuery(
       SEARCH_INVITATIONS_SPEC,
       this.#cursors,

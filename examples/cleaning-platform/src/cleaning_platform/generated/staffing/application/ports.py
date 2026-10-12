@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from cleaning_platform.generated._runtime import DomainEvent
+from cleaning_platform.generated.security import TenantId
 from cleaning_platform.generated.staffing.domain.aggregates import StaffMember
 
 __all__ = [
@@ -24,11 +25,17 @@ __all__ = [
 
 
 class StaffMemberRepository(Protocol):
-    """Loads and stores StaffMember aggregates. Implemented by an adapter outside the domain."""
+    """Loads and stores StaffMember aggregates of one tenant at a time. Implemented by an adapter
+    outside the domain.
 
-    def get(self, id: UUID) -> StaffMember | None: ...
+    Every call names the tenant (the use case passes the caller's): `get` returns None for an
+    aggregate of another tenant (the same as a missing one, so nothing leaks), and `save` refuses an
+    aggregate whose `tenant_id` is not `tenant` (TenantMismatch).
+    """
 
-    def save(self, aggregate: StaffMember) -> None: ...
+    def get(self, tenant: TenantId, id: UUID) -> StaffMember | None: ...
+
+    def save(self, tenant: TenantId, aggregate: StaffMember) -> None: ...
 
 
 class Clock(Protocol):

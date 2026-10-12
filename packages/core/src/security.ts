@@ -29,7 +29,7 @@ export const PRINCIPAL_BUILTIN_MEMBERS = ["id", "roles"] as const;
 /** Names the generated security modules define next to the model's types (reserved once `security` is declared). */
 export const SECURITY_TYPE_NAMES = ["Principal", "PrincipalInput", "Role", "NotAuthorized", "Unauthenticated", "RateLimit", "RateLimiter"] as const;
 /** Names the generated security module adds with permissions (map-form roles) or tenancy. */
-export const RBAC_TYPE_NAMES = ["Permission", "PlatformRole", "Requirement", "TenantId", "TenantContext", "TenantMismatch", "CrossTenantAudit", "CrossTenantAccess"] as const;
+export const RBAC_TYPE_NAMES = ["Permission", "PlatformRole", "Requirement", "TenantId", "TenantPrincipal", "InTenant", "TenantContext", "TenantMismatch", "CrossTenantAudit", "CrossTenantAccess"] as const;
 /** Claim names the generated Principal class / schema uses for itself. */
 const RESERVED_CLAIMS = new Set(["id", "roles", "has_role", "parse", "create"]);
 /** Principal members added by tenancy and permissions. */

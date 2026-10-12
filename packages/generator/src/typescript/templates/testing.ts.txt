@@ -91,9 +91,10 @@ export class InMemoryRepository<A extends AggregateRoot, K> implements Transacti
 
 //#if tenancy
 /**
- * In-memory repository of a tenant-scoped aggregate (the semantics of the PostgreSQL adapter): `get`
- * sees the given tenant's aggregates only (another tenant's is null, like a missing one) and `save`
- * refuses an aggregate of another tenant, or an id another tenant already uses (TenantMismatch).
+ * In-memory repository of a tenant-scoped aggregate (the semantics of the PostgreSQL adapter):
+ * `get` sees the given tenant's aggregates only (another tenant's is null, like a missing one) and
+ * `save` refuses an aggregate of another tenant, or an id another tenant already uses
+ * (TenantMismatch).
  */
 export class InMemoryTenantRepository<
   A extends AggregateRoot & { readonly tenantId: TenantId },

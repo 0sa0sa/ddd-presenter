@@ -4,16 +4,19 @@
 /** In-memory test doubles for the ports of the Staffing context. */
 
 import type { Id } from "../runtime.js";
-import { type FakeUnitOfWork, InMemoryRepository } from "../testing.js";
+import { type FakeUnitOfWork, InMemoryTenantRepository } from "../testing.js";
 import type { StaffMemberRepository } from "./application/ports.js";
 import type { StaffMember } from "./domain/aggregates.js";
 
 // Shared test doubles (unit of work, clock, ids, event publisher, assertions).
 export * from "../testing.js";
 
-/** In-memory StaffMemberRepository. Writes are staged until the unit of work commits. */
+/**
+ * In-memory StaffMemberRepository of tenant-scoped aggregates (another tenant's are not found,
+ * saving for another tenant fails). Writes are staged until the unit of work commits.
+ */
 export class InMemoryStaffMemberRepository
-  extends InMemoryRepository<StaffMember, Id<"StaffMember">>
+  extends InMemoryTenantRepository<StaffMember, Id<"StaffMember">>
   implements StaffMemberRepository
 {
   constructor(unitOfWork?: FakeUnitOfWork) {

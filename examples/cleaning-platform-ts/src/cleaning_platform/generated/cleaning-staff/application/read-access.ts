@@ -4,28 +4,32 @@
 /** Read access of the CleaningStaff aggregates: authorization around loading by identity. */
 
 import type { Id } from "../../runtime.js";
-import { allowIf, authorize, hasRole, type Principal } from "../../security.js";
+import { allowIf, authorizeInTenant, hasPermission, type Principal } from "../../security.js";
 import type { CleaningStaffInvitation } from "../domain/aggregates.js";
 import type { CleaningStaffInvitationRepository } from "./ports.js";
 
 /**
  * Loads CleaningStaffInvitation for `principal` (`authorize` of CleaningStaffInvitation): one of
- * the roles admin, candidate, and `has_role(principal, admin) or (principal.email != null and
- * principal.email == email.value)` must hold for the loaded aggregate.
+ * the permissions invitation.read, invitation.accept, and `has_permission(principal,
+ * invitation.read) or (principal.email != null and principal.email == email.value)` must hold for
+ * the loaded aggregate.
  *
- * The roles are checked before loading. Returns null when it does not exist; throws Unauthenticated
- * or NotAuthorized.
+ * The roles are checked before loading, in the caller's active tenant; the aggregate is loaded from
+ * that tenant only (another tenant's is null, like a missing one). Returns null when it does not
+ * exist; throws Unauthenticated or NotAuthorized.
  */
 export async function readCleaningStaffInvitation(
   repository: Pick<CleaningStaffInvitationRepository, "get">,
   id: Id<"CleaningStaffInvitation">,
   principal: Principal | null,
 ): Promise<CleaningStaffInvitation | null> {
-  authorize(principal, "read CleaningStaffInvitation", ["admin", "candidate"]);
-  const aggregate = await repository.get(id);
+  authorizeInTenant(principal, "read CleaningStaffInvitation", {
+    permissions: ["invitation.read", "invitation.accept"],
+  });
+  const aggregate = await repository.get(principal.tenantId, id);
   if (aggregate !== null) {
     allowIf(
-      hasRole(principal, "admin") ||
+      hasPermission(principal, "invitation.read") ||
         (principal.email !== null && principal.email === aggregate.email.value),
       "read CleaningStaffInvitation",
     );

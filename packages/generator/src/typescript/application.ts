@@ -1,6 +1,7 @@
 import { formatPath, leadingLoads, requiresPrincipal, usesPermissions, walkExpr, type StepIR, type TExpr, type Type, type UseCaseIR } from "@ddd/core";
 
 import { Code, relativeSpecifier, TsImports, tsString, unparen } from "./code.ts";
+import { PRINT_WIDTH, strWidth } from "./format.ts";
 import { entry, file, type TsFile } from "./domain.ts";
 import { emitAs, emitExpr, type ExprContext } from "./expr.ts";
 import type { TsLayout } from "./layout.ts";
@@ -40,8 +41,14 @@ export function portsFile(L: TsLayout): TsFile {
         ].join("\n"),
       );
       c.block(`export interface ${ag.name}Repository`, () => {
-        c.line(`get(tenant: TenantId, ${ident(ag.identity)}: ${idType}): Awaitable<${ag.name} | null>;`);
-        c.line(`save(tenant: TenantId, aggregate: ${ag.name}): Awaitable<void>;`);
+        // Prettier: the parameters one per line when the signature does not fit.
+        const member = (name: string, params: string[], result: string) => {
+          const one = `${name}(${params.join(", ")}): ${result};`;
+          if (strWidth(`  ${one}`) <= PRINT_WIDTH) c.line(one);
+          else c.open(`${name}(`, () => params.forEach((p) => c.line(`${p},`)), `): ${result};`);
+        };
+        member("get", ["tenant: TenantId", `${ident(ag.identity)}: ${idType}`], `Awaitable<${ag.name} | null>`);
+        member("save", ["tenant: TenantId", `aggregate: ${ag.name}`], "Awaitable<void>");
       });
       continue;
     }

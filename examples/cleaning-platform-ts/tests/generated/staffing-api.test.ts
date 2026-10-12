@@ -32,10 +32,15 @@ import {
  * any test of TanStack Query.
  */
 /**
- * A principal holding every role: the requests of these tests authenticate as it unless a test says
- * otherwise.
+ * A principal holding every role in the test tenant (00000000-0000-4000-8000-0000000000a1) and
+ * every platform role: the requests of these tests authenticate as it unless a test says otherwise.
  */
-const everyone = Principal.create({ id: "test-principal", roles: ["admin", "candidate"] });
+const everyone = Principal.create({
+  id: "test-principal",
+  tenantId: "00000000-0000-4000-8000-0000000000a1",
+  roles: ["admin", "staff", "candidate"],
+  platformRoles: ["operator"],
+});
 
 /** What the client sends (`getToken`) and the test authenticator accepts. */
 const AUTHORIZATION = { authorization: "Bearer test-token" };
@@ -98,9 +103,8 @@ describe("Staffing API (server handler + TanStack Query client)", () => {
 
   /**
    * `GET /api/staffing/staff-member/00000000-0000-4000-8000-000000000001` allows 60 request(s) per
-   * 60 s (by principal): then 429 with Retry-After and the IETF RateLimit headers, until a token
-   * has refilled. The endpoint is not wired, so allowed requests answer 404 after taking their
-   * token.
+   * 60 s (by tenant): then 429 with Retry-After and the IETF RateLimit headers, until a token has
+   * refilled. The endpoint is not wired, so allowed requests answer 404 after taking their token.
    */
   test("rate limit: read_staff_member answers 429 when used up, then refills", async () => {
     let now = Date.parse("2026-01-01T00:00:00Z");

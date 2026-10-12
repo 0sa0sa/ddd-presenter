@@ -17,6 +17,7 @@ from cleaning_platform.generated.cleaning_staff.domain.errors import (
     InvitationAlreadyClosed,
 )
 from cleaning_platform.generated.cleaning_staff.domain.value_objects import EmailAddress
+from cleaning_platform.generated.security import TenantId
 
 
 def test_invitation_window_must_be_positive() -> None:
@@ -27,6 +28,7 @@ def test_invitation_window_must_be_positive() -> None:
     """
     with pytest.raises(InvalidInvitationWindow):
         CleaningStaffInvitation(
+            tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
             id=UUID("00000000-0000-0000-0000-000000000001"),
             email=EmailAddress(value="staff@example.com"),
             status=InvitationStatus.PENDING,
@@ -42,6 +44,7 @@ def test_email_is_normalized() -> None:
     Then: state {"email": {"value": "staff@example.com"}}
     """
     result = CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000001"),
         email=EmailAddress(value="  Staff@Example.COM "),
         status=InvitationStatus.PENDING,
@@ -59,6 +62,7 @@ def test_revoked_invitation_cannot_be_revoked_again() -> None:
     Then: raises InvitationAlreadyClosed; emits nothing
     """
     aggregate = CleaningStaffInvitation(
+        tenant_id=TenantId(UUID("00000000-0000-4000-8000-0000000000a1")),
         id=UUID("00000000-0000-0000-0000-000000000001"),
         email=EmailAddress(value="staff@example.com"),
         status=InvitationStatus.REVOKED,

@@ -39,7 +39,7 @@ class RateLimit:
     name: str
     requests: int
     window_seconds: int
-    by: Literal["principal", "ip", "global"]
+    by: Literal["principal", "ip", "global", "tenant"]
 
 
 @dataclass(frozen=True)

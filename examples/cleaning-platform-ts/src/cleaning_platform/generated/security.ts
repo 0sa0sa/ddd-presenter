@@ -2,34 +2,129 @@
 // Regenerate with `ddd generate`; put custom code in the extensions directory.
 
 /**
- * Authorization shared by every context: roles, the principal, the authorization errors and checks
- * (zod only).
+ * Authorization shared by every context: roles, permissions (inheritance resolved at generation
+ * time), the tenant id, the principal, the authorization errors and checks (zod only).
  */
 
 import { z } from "zod";
 
-import { DomainError, type ErrorDetails, parseWith } from "./runtime.js";
+import {
+  type Awaitable,
+  DomainError,
+  type ErrorDetails,
+  parseWith,
+  uuidSchema,
+} from "./runtime.js";
 
-/** Roles declared in the model (`security.roles`). */
-export const ROLES = ["admin", "candidate"] as const;
+/**
+ * Roles declared in the model (`security.roles`). A role holds only in the caller's active tenant.
+ */
+export const ROLES = ["admin", "staff", "candidate"] as const;
 export const RoleSchema = z.enum(ROLES);
 export type Role = z.output<typeof RoleSchema>;
+
+/**
+ * Platform roles (`security.platform_roles`): global, cross-tenant roles read from claim
+ * `platform_roles` only, never from a tenant's roles.
+ */
+export const PLATFORM_ROLES = ["operator"] as const;
+export const PlatformRoleSchema = z.enum(PLATFORM_ROLES);
+export type PlatformRole = z.output<typeof PlatformRoleSchema>;
+
+/** Every permission a role grants (`permissions` of the roles), sorted. */
+export const PERMISSIONS = [
+  "invitation.accept",
+  "invitation.issue",
+  "invitation.list",
+  "invitation.read",
+  "invitation.revoke",
+  "staff.read",
+] as const;
+export type Permission = (typeof PERMISSIONS)[number];
+
+/** A frozen list (the role maps below cannot be changed at run time). */
+function frozen<T extends string>(...items: T[]): ReadonlyArray<T> {
+  return Object.freeze(items);
+}
+
+/**
+ * Role → itself and every role it inherits (NIST RBAC1 hierarchy), resolved at generation time:
+ * holding a role satisfies `authorize.roles` naming any of these.
+ */
+export const ROLE_INCLUDES: Readonly<Record<Role, ReadonlyArray<Role>>> = Object.freeze({
+  admin: frozen("admin", "staff"),
+  staff: frozen("staff"),
+  candidate: frozen("candidate"),
+});
+
+/**
+ * Role → the permissions it grants, its inherited roles' included (resolved at generation time).
+ */
+export const ROLE_PERMISSIONS: Readonly<Record<Role, ReadonlyArray<Permission>>> = Object.freeze({
+  admin: frozen(
+    "invitation.issue",
+    "invitation.list",
+    "invitation.read",
+    "invitation.revoke",
+    "staff.read",
+  ),
+  staff: frozen("invitation.issue", "invitation.list", "invitation.read"),
+  candidate: frozen("invitation.accept"),
+});
+
+/** Platform role → itself and every platform role it inherits. */
+export const PLATFORM_ROLE_INCLUDES: Readonly<Record<PlatformRole, ReadonlyArray<PlatformRole>>> =
+  Object.freeze({
+    operator: frozen("operator"),
+  });
+
+/** Platform role → the permissions it grants across tenants (inherited ones included). */
+export const PLATFORM_ROLE_PERMISSIONS: Readonly<Record<PlatformRole, ReadonlyArray<Permission>>> =
+  Object.freeze({
+    operator: frozen("invitation.read"),
+  });
+
+/**
+ * The id of a tenant (`security.tenancy`): the caller's active tenant comes from claim `org_id` of
+ * the verified token only.
+ */
+export const TenantIdSchema = uuidSchema.brand<"TenantId">();
+export type TenantId = z.output<typeof TenantIdSchema>;
+
+/**
+ * A tenant id from a trusted source (configuration, an event, a test). Throws ConstraintViolation
+ * when invalid.
+ */
+export function tenantId(value: string): TenantId {
+  return parseWith(TenantIdSchema, value, "TenantId");
+}
+
+/**
+ * The tenant an internal use case runs in (a policy passes its event's tenant; a job passes the
+ * tenant it works for). Internal use cases get a tenant, never a principal.
+ */
+export interface TenantContext {
+  readonly tenantId: TenantId;
+}
 
 const PrincipalFields = z
   .strictObject({
     id: z.string().min(1),
+    tenantId: TenantIdSchema.nullable().default(null),
     roles: z.array(RoleSchema).readonly(),
+    platformRoles: z.array(PlatformRoleSchema).readonly().default([]),
     email: z.string().nullable().default(null),
   })
   .readonly();
 
 /**
- * The authenticated caller: an id, the roles it holds and the declared claims
- * (`security.principal`).
+ * The authenticated caller: an id, the active tenant (`tenantId`, from claim `org_id` only; null
+ * when the token names none), the roles it holds in that tenant, its platform (cross-tenant) roles
+ * and the declared claims.
  *
- * Use cases that declare `authorize` with roles or a rule take it as `execute(command, principal)`;
- * the HTTP layer builds it from the bearer token. Create one in tests with `Principal.create({ id,
- * roles })`.
+ * Use cases that declare `authorize` with roles, permissions or a rule take it as `execute(command,
+ * principal)`; the HTTP layer builds it from the bearer token. Create one in tests with
+ * `Principal.create({ id, tenantId, roles })`.
  */
 export type Principal = z.output<typeof PrincipalFields>;
 export type PrincipalInput = z.input<typeof PrincipalFields>;
@@ -50,38 +145,80 @@ export const AUTHENTICATION = {
   audience: "cleaning-platform" as string | undefined,
   algorithms: ["RS256"],
   rolesClaim: "roles",
+  tenantClaim: "org_id",
+  platformRolesClaim: "platform_roles",
   clockTolerance: 30,
 } as const;
 
+/** A list claim: a JSON array, or one space-separated string (OAuth scope style). */
+function listClaim(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value as unknown[];
+  return typeof value === "string" ? value.split(" ") : [];
+}
+
 /**
- * The principal a verified token stands for: `sub` is the id, `roles` the roles (a list, or one
- * space-separated string; roles the model does not declare are dropped), `email` email.
+ * The principal a verified token stands for: `sub` is the id, `org_id` the active tenant, `roles`
+ * the roles (a list, or one space-separated string; roles the model does not declare are dropped;
+ * without an active tenant the token holds no role), `platform_roles` the platform roles, `email`
+ * email.
  *
- * Null when the claims do not fit the Principal schema (e.g. a required claim is missing).
+ * Null when the claims do not fit the Principal schema (e.g. a required claim is missing, or the
+ * tenant is not a valid tenant id). The tenant comes from the verified token only, never from the
+ * request.
  */
 export function principalFromClaims(claims: Readonly<Record<string, unknown>>): Principal | null {
-  const roles = claims["roles"];
-  const listed: unknown[] = Array.isArray(roles)
-    ? roles
-    : typeof roles === "string"
-      ? roles.split(" ")
-      : [];
+  const tenantId = claims["org_id"] ?? null;
   const result = PrincipalFields.safeParse({
     id: claims["sub"],
-    roles: listed.filter((role) => RoleSchema.safeParse(role).success),
+    tenantId,
+    // Tenant roles hold in the active tenant only: a token naming no tenant holds none.
+    roles:
+      tenantId === null
+        ? []
+        : listClaim(claims["roles"]).filter((role) => RoleSchema.safeParse(role).success),
+    platformRoles: listClaim(claims["platform_roles"]).filter(
+      (role) => PlatformRoleSchema.safeParse(role).success,
+    ),
     email: claims["email"] ?? null,
   });
   return result.success ? result.data : null;
 }
 
-/** Whether the principal holds `role` (`has_role(principal, role)` in rules). */
-export function hasRole(principal: Principal, role: Role): boolean {
-  return principal.roles.includes(role);
+/**
+ * Whether the principal holds `role`, itself or through a role inheriting it (`has_role(principal,
+ * role)` in rules). Tenant roles count in the active tenant, platform roles anywhere.
+ */
+export function hasRole(principal: Principal, role: Role | PlatformRole): boolean {
+  if (isPlatformRole(role)) {
+    return principal.platformRoles.some((held) => PLATFORM_ROLE_INCLUDES[held].includes(role));
+  }
+  return principal.roles.some((held) => ROLE_INCLUDES[held].includes(role));
+}
+
+function isPlatformRole(role: string): role is PlatformRole {
+  return PlatformRoleSchema.safeParse(role).success;
+}
+
+/**
+ * Whether a role the principal holds in its active tenant grants `permission`
+ * (`has_permission(principal, …)` in rules of tenant-scoped operations).
+ */
+export function hasPermission(principal: Principal, permission: Permission): boolean {
+  return principal.roles.some((role) => ROLE_PERMISSIONS[role].includes(permission));
+}
+
+/**
+ * Whether a platform role of the principal grants `permission` (rules of cross-tenant operations).
+ */
+export function hasPlatformPermission(principal: Principal, permission: Permission): boolean {
+  return principal.platformRoles.some((role) =>
+    PLATFORM_ROLE_PERMISSIONS[role].includes(permission),
+  );
 }
 
 /**
  * The principal may not do this (HTTP 403). `details` names the action and the unmet requirement
- * (`requiredRoles` or `rule`), never the data that was checked.
+ * (`requiredRoles` / `requiredPermissions` or `rule`), never the data that was checked.
  */
 export class NotAuthorized extends DomainError {
   static override readonly code = "not_authorized";
@@ -98,6 +235,8 @@ export class NotAuthorized extends DomainError {
 
 /**
  * No authenticated principal (HTTP 401): the caller must sign in (or present a valid token) first.
+ * `details.error` is `"missing_tenant"` when the token names no active tenant for a tenant-scoped
+ * operation.
  */
 export class Unauthenticated extends DomainError {
   static override readonly code = "unauthenticated";
@@ -112,25 +251,144 @@ export class Unauthenticated extends DomainError {
   }
 }
 
+/**
+ * An aggregate of one tenant was about to be stored for another (a repository's `save` refuses it).
+ * It means a programming error, not a caller's mistake, so it is not mapped to an HTTP status
+ * (500).
+ */
+export class TenantMismatch extends DomainError {
+  static override readonly code = "tenant_mismatch";
+  override readonly code = "tenant_mismatch";
+
+  constructor(
+    details: ErrorDetails = {},
+    message = "The data belongs to another tenant",
+    options?: ErrorOptions,
+  ) {
+    super(details, message, options);
+  }
+}
+
 /** The errors of authorization, for an error registry next to a context's `ALL_ERRORS`. */
 export const SECURITY_ERRORS = [NotAuthorized, Unauthenticated] as const;
 
 /**
- * The first check of every use case that needs a principal, before anything is loaded (so a caller
- * without the role learns nothing about the data): there is a principal, and it holds one of
- * `roles` (any principal when `roles` is empty).
+ * What an `authorize` block admits: any of the roles (or a role inheriting one) or any of the
+ * permissions; nothing listed admits every principal.
+ */
+export interface Requirement {
+  readonly roles?: ReadonlyArray<Role | PlatformRole>;
+  readonly permissions?: ReadonlyArray<Permission>;
+}
+
+/** Whether the principal meets `required` with its tenant roles and / or its platform roles. */
+function admits(
+  principal: Principal,
+  required: Requirement,
+  by: { readonly tenant: boolean; readonly platform: boolean },
+): boolean {
+  const roles = required.roles ?? [];
+  const permissions = required.permissions ?? [];
+  if (roles.length === 0 && permissions.length === 0) return true;
+  if (by.tenant) {
+    const held = principal.roles;
+    if (
+      roles.some((role) =>
+        held.some((r) => (ROLE_INCLUDES[r] as ReadonlyArray<string>).includes(role)),
+      )
+    )
+      return true;
+    if (permissions.some((p) => hasPermission(principal, p))) return true;
+  }
+  if (by.platform) {
+    const held = principal.platformRoles;
+    if (
+      roles.some((role) =>
+        held.some((r) => (PLATFORM_ROLE_INCLUDES[r] as ReadonlyArray<string>).includes(role)),
+      )
+    )
+      return true;
+    if (permissions.some((p) => hasPlatformPermission(principal, p))) return true;
+  }
+  return false;
+}
+
+function denied(action: string, required: Requirement): NotAuthorized {
+  return new NotAuthorized({
+    action,
+    ...(required.roles?.length ? { requiredRoles: [...required.roles] } : {}),
+    ...(required.permissions?.length ? { requiredPermissions: [...required.permissions] } : {}),
+  });
+}
+
+/**
+ * The first check of a use case, query or read that needs a principal but no tenant (shared data):
+ * there is a principal, and it meets `required` with its roles or its platform roles.
  *
  * Throws Unauthenticated or NotAuthorized; afterwards `principal` is known to be present.
  */
 export function authorize(
   principal: Principal | null,
   action: string,
-  roles: ReadonlyArray<Role>,
+  required: Requirement,
 ): asserts principal is Principal {
   if (principal === null) throw new Unauthenticated({ action });
-  if (roles.length > 0 && !roles.some((role) => principal.roles.includes(role))) {
-    throw new NotAuthorized({ action, requiredRoles: [...roles] });
-  }
+  if (!admits(principal, required, { tenant: true, platform: true }))
+    throw denied(action, required);
+}
+
+/** A principal acting in its active tenant (after `authorizeInTenant`). */
+export type TenantPrincipal = Principal & { readonly tenantId: TenantId };
+
+/**
+ * The first check of a tenant-scoped use case, query or read, before anything is loaded: there is a
+ * principal (else Unauthenticated), its token names an active tenant (else Unauthenticated with
+ * `error: "missing_tenant"`), and its roles in that tenant meet `required` (else NotAuthorized).
+ * Platform roles do not count here: they act across tenants only through `authorizeAcrossTenants`.
+ *
+ * Afterwards `principal.tenantId` is the tenant every repository and reader call is bound to.
+ */
+export function authorizeInTenant(
+  principal: Principal | null,
+  action: string,
+  required: Requirement,
+): asserts principal is TenantPrincipal {
+  if (principal === null) throw new Unauthenticated({ action });
+  if (principal.tenantId === null) throw new Unauthenticated({ action, error: "missing_tenant" });
+  if (!admits(principal, required, { tenant: true, platform: false }))
+    throw denied(action, required);
+}
+
+/**
+ * The first check of a cross-tenant use case (`cross_tenant: true`): only platform roles meet
+ * `required`; the caller's own tenant and tenant roles do not matter. The target tenant comes from
+ * the command, and the use case records the access through `CrossTenantAudit` before it loads
+ * anything.
+ */
+export function authorizeAcrossTenants(
+  principal: Principal | null,
+  action: string,
+  required: Requirement,
+): asserts principal is Principal {
+  if (principal === null) throw new Unauthenticated({ action });
+  if (!admits(principal, required, { tenant: false, platform: true }))
+    throw denied(action, required);
+}
+
+/** One access of a platform principal to a tenant's data (a cross-tenant use case). */
+export interface CrossTenantAccess {
+  readonly action: string;
+  readonly principal: Principal;
+  readonly tenantId: TenantId;
+}
+
+/**
+ * Port: records every cross-tenant access before the use case touches the tenant's data (an audit
+ * log, a SIEM). If it throws, the use case fails without loading anything. Implement it next to
+ * your logging; tests use `RecordingCrossTenantAudit`.
+ */
+export interface CrossTenantAudit {
+  record(access: CrossTenantAccess): Awaitable<void>;
 }
 
 /**

@@ -6,6 +6,7 @@
 import { describe, expect, test } from "vitest";
 
 import { id } from "../../src/cleaning_platform/generated/runtime.js";
+import { tenantId } from "../../src/cleaning_platform/generated/security.js";
 import { RegisterStaffUseCase } from "../../src/cleaning_platform/generated/staffing/application/use-cases.js";
 import {
   StaffMember,
@@ -55,11 +56,15 @@ describe("register_staff", () => {
       invitationId: "00000000-0000-0000-0000-000000000001",
       joinedAt: "2026-01-02T10:00:00+00:00",
     });
-    const result = await useCase.execute(command);
+    const context = { tenantId: tenantId("00000000-0000-4000-8000-0000000000a1") };
+    const result = await useCase.execute(command, context);
     expect(String(result)).toBe("00000000-0000-0000-0000-0000000000bb");
     expect(unitOfWork.committed).toBe(true);
     const stored0 = expectPresent(
-      staffMemberRepository.get(id("StaffMember", "00000000-0000-0000-0000-0000000000bb")),
+      staffMemberRepository.get(
+        tenantId("00000000-0000-4000-8000-0000000000a1"),
+        id("StaffMember", "00000000-0000-0000-0000-0000000000bb"),
+      ),
       "stored StaffMember",
     );
     expect(String(stored0.invitationId)).toBe("00000000-0000-0000-0000-000000000001");

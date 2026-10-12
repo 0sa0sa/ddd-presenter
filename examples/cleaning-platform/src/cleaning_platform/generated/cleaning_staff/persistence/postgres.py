@@ -11,14 +11,15 @@ from typing import Final
 from uuid import UUID
 
 from cleaning_platform.generated._persistence import (
-    PostgresStore,
+    PostgresTenantStore,
     QueryRequest,
     QueryResult,
     QueryStatements,
     SqlConnection,
     SqlStatement,
+    SqlTransactions,
     TableMapping,
-    read_sql,
+    read_sql_in_tenant,
 )
 from cleaning_platform.generated.cleaning_staff.application.queries import (
     SEARCH_INVITATIONS_SPEC,
@@ -30,6 +31,7 @@ from cleaning_platform.generated.cleaning_staff.persistence.rows import (
     cleaning_staff_invitation_to_values,
     search_invitations_item_from_row,
 )
+from cleaning_platform.generated.security import TenantId
 
 __all__ = [
     "CLEANING_STAFF_INVITATION_TABLE",
@@ -43,6 +45,7 @@ __all__ = [
 CLEANING_STAFF_INVITATION_TABLE: Final[TableMapping[CleaningStaffInvitation, UUID]] = TableMapping(
     aggregate="CleaningStaffInvitation",
     select="""SELECT
+  tenant_id,
   id,
   email_value,
   status,
@@ -51,8 +54,9 @@ CLEANING_STAFF_INVITATION_TABLE: Final[TableMapping[CleaningStaffInvitation, UUI
   to_char(accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS accepted_at,
   version
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE id = %(p1)s::uuid""",
+WHERE tenant_id = %(p1)s::uuid AND id = %(p2)s::uuid""",
     insert="""INSERT INTO cleaning_staff.cleaning_staff_invitation (
+  tenant_id,
   id,
   email_value,
   status,
@@ -62,23 +66,26 @@ WHERE id = %(p1)s::uuid""",
   version
 ) VALUES (
   %(p1)s::uuid,
-  %(p2)s::text,
+  %(p2)s::uuid,
   %(p3)s::text,
-  %(p4)s::timestamptz,
+  %(p4)s::text,
   %(p5)s::timestamptz,
   %(p6)s::timestamptz,
+  %(p7)s::timestamptz,
   1
 )
 ON CONFLICT (id) DO NOTHING
 RETURNING version""",
     update="""UPDATE cleaning_staff.cleaning_staff_invitation SET
-  email_value = %(p2)s::text,
-  status = %(p3)s::text,
-  created_at = %(p4)s::timestamptz,
-  expires_at = %(p5)s::timestamptz,
-  accepted_at = %(p6)s::timestamptz,
+  email_value = %(p3)s::text,
+  status = %(p4)s::text,
+  created_at = %(p5)s::timestamptz,
+  expires_at = %(p6)s::timestamptz,
+  accepted_at = %(p7)s::timestamptz,
   version = version + 1
-WHERE id = %(p1)s::uuid AND version = %(p7)s::bigint
+WHERE tenant_id = %(p1)s::uuid
+  AND id = %(p2)s::uuid
+  AND version = %(p8)s::bigint
 RETURNING version""",
     identity=lambda aggregate: aggregate.id,
     to_values=cleaning_staff_invitation_to_values,
@@ -87,19 +94,23 @@ RETURNING version""",
 
 
 class PostgresCleaningStaffInvitationRepository:
-    """CleaningStaffInvitationRepository on PostgreSQL with optimistic locking: `save` inserts what
-    it did not load and updates what it loaded only if the row still has the loaded version (else
-    ConcurrencyConflict). Use one instance per unit of work (it remembers the versions it read).
+    """CleaningStaffInvitationRepository on PostgreSQL with optimistic locking, one tenant per call:
+    every statement filters by the tenant (another tenant's CleaningStaffInvitation is not found;
+    saving one for another tenant is TenantMismatch). Use one instance per unit of work (it
+    remembers the versions it read).
+
+    Row level security: it sets `app.tenant_id` for the transaction before its statements, so the
+    connection must be inside a transaction (the unit of work's).
     """
 
     def __init__(self, connection: SqlConnection) -> None:
-        self._store = PostgresStore(connection, CLEANING_STAFF_INVITATION_TABLE)
+        self._store = PostgresTenantStore(connection, CLEANING_STAFF_INVITATION_TABLE)
 
-    def get(self, id: UUID) -> CleaningStaffInvitation | None:
-        return self._store.get(id)
+    def get(self, tenant: TenantId, id: UUID) -> CleaningStaffInvitation | None:
+        return self._store.get(tenant, id)
 
-    def save(self, aggregate: CleaningStaffInvitation) -> None:
-        self._store.save(aggregate)
+    def save(self, tenant: TenantId, aggregate: CleaningStaffInvitation) -> None:
+        self._store.save(tenant, aggregate)
 
 
 # Statements of search_invitations: keyset pagination (no OFFSET), first and next page, with and
@@ -115,11 +126,13 @@ SEARCH_INVITATIONS_SQL: Final = QueryStatements(
   created_at::text AS _k0,
   id::text AS _k1
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE (%(p1)s::text IS NULL OR status = %(p1)s::text)
-  AND (%(p2)s::timestamptz IS NULL OR created_at > %(p2)s::timestamptz)
+WHERE tenant_id = %(p1)s::uuid
+  AND (%(p2)s::text IS NULL OR status = %(p2)s::text)
+  AND (%(p3)s::timestamptz IS NULL OR created_at > %(p3)s::timestamptz)
 ORDER BY cleaning_staff_invitation.created_at DESC, cleaning_staff_invitation.id DESC
-LIMIT %(p3)s::integer""",
+LIMIT %(p4)s::integer""",
         args=(
+            ("tenant", None),
             ("param", "status"),
             ("param", "created_after"),
             ("limit", None),
@@ -135,18 +148,20 @@ LIMIT %(p3)s::integer""",
   created_at::text AS _k0,
   id::text AS _k1
 FROM cleaning_staff.cleaning_staff_invitation
-WHERE (%(p1)s::text IS NULL OR status = %(p1)s::text)
-  AND (%(p2)s::timestamptz IS NULL OR created_at > %(p2)s::timestamptz)
+WHERE tenant_id = %(p1)s::uuid
+  AND (%(p2)s::text IS NULL OR status = %(p2)s::text)
+  AND (%(p3)s::timestamptz IS NULL OR created_at > %(p3)s::timestamptz)
   AND (
     cleaning_staff_invitation.created_at,
     cleaning_staff_invitation.id
   ) < (
-    %(p3)s::timestamptz,
-    %(p4)s::uuid
+    %(p4)s::timestamptz,
+    %(p5)s::uuid
   )
 ORDER BY cleaning_staff_invitation.created_at DESC, cleaning_staff_invitation.id DESC
-LIMIT %(p5)s::integer""",
+LIMIT %(p6)s::integer""",
         args=(
+            ("tenant", None),
             ("param", "status"),
             ("param", "created_after"),
             ("key", 0),
@@ -165,17 +180,19 @@ LIMIT %(p5)s::integer""",
   created_at::text AS _k1,
   id::text AS _k2
 FROM cleaning_staff.cleaning_staff_invitation
-CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower(%(p3)s::text)) AS _score) AS _s
-WHERE (%(p1)s::text IS NULL OR status = %(p1)s::text)
-  AND (%(p2)s::timestamptz IS NULL OR created_at > %(p2)s::timestamptz)
-  AND lower(email_value) %% lower(%(p3)s::text)
+CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower(%(p4)s::text)) AS _score) AS _s
+WHERE tenant_id = %(p1)s::uuid
+  AND (%(p2)s::text IS NULL OR status = %(p2)s::text)
+  AND (%(p3)s::timestamptz IS NULL OR created_at > %(p3)s::timestamptz)
+  AND lower(email_value) %% lower(%(p4)s::text)
   AND _s._score >= 0.3
 ORDER BY
   _s._score DESC,
   cleaning_staff_invitation.created_at DESC,
   cleaning_staff_invitation.id DESC
-LIMIT %(p4)s::integer""",
+LIMIT %(p5)s::integer""",
         args=(
+            ("tenant", None),
             ("param", "status"),
             ("param", "created_after"),
             ("search", None),
@@ -193,26 +210,28 @@ LIMIT %(p4)s::integer""",
   created_at::text AS _k1,
   id::text AS _k2
 FROM cleaning_staff.cleaning_staff_invitation
-CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower(%(p3)s::text)) AS _score) AS _s
-WHERE (%(p1)s::text IS NULL OR status = %(p1)s::text)
-  AND (%(p2)s::timestamptz IS NULL OR created_at > %(p2)s::timestamptz)
-  AND lower(email_value) %% lower(%(p3)s::text)
+CROSS JOIN LATERAL (SELECT similarity(lower(email_value), lower(%(p4)s::text)) AS _score) AS _s
+WHERE tenant_id = %(p1)s::uuid
+  AND (%(p2)s::text IS NULL OR status = %(p2)s::text)
+  AND (%(p3)s::timestamptz IS NULL OR created_at > %(p3)s::timestamptz)
+  AND lower(email_value) %% lower(%(p4)s::text)
   AND _s._score >= 0.3
   AND (
     _s._score,
     cleaning_staff_invitation.created_at,
     cleaning_staff_invitation.id
   ) < (
-    %(p4)s::real,
-    %(p5)s::timestamptz,
-    %(p6)s::uuid
+    %(p5)s::real,
+    %(p6)s::timestamptz,
+    %(p7)s::uuid
   )
 ORDER BY
   _s._score DESC,
   cleaning_staff_invitation.created_at DESC,
   cleaning_staff_invitation.id DESC
-LIMIT %(p7)s::integer""",
+LIMIT %(p8)s::integer""",
         args=(
+            ("tenant", None),
             ("param", "status"),
             ("param", "created_after"),
             ("search", None),
@@ -226,13 +245,16 @@ LIMIT %(p7)s::integer""",
 
 
 class PostgresSearchInvitationsReader:
-    """SearchInvitationsReader on PostgreSQL."""
+    """SearchInvitationsReader on PostgreSQL: each page is read in a transaction
+    (`connection.transaction()`) with `app.tenant_id` set for row level security; the statement
+    filters by the tenant as well.
+    """
 
-    def __init__(self, connection: SqlConnection) -> None:
+    def __init__(self, connection: SqlTransactions) -> None:
         self._connection = connection
 
     def read(self, request: QueryRequest) -> QueryResult[SearchInvitationsItem]:
-        return read_sql(
+        return read_sql_in_tenant(
             self._connection,
             SEARCH_INVITATIONS_SPEC,
             SEARCH_INVITATIONS_SQL,

@@ -15,6 +15,7 @@ import {
   DomainError,
   type ErrorDetails,
 } from "./runtime.js";
+import { TenantMismatch } from "./security.js";
 
 // ---------------------------------------------------------------------------
 // SQL client and errors
@@ -158,6 +159,8 @@ export interface QuerySpec {
   readonly keys: ReadonlyArray<KeySpec>;
   readonly size: number;
   readonly maxSize: number;
+  /** Tenant column of a tenant-scoped table: rows of the request's tenant only (always applies). */
+  readonly tenant?: string;
 }
 
 /** A value of an order key in a cursor. */
@@ -174,6 +177,8 @@ export interface QueryRequest<P> {
   readonly limit: number;
   /** Values of the principal the rows are scoped to (`principal:` filters), by member name. */
   readonly scope?: Readonly<Record<string, unknown>>;
+  /** The tenant a tenant-scoped query reads (the caller's active tenant). */
+  readonly tenant?: string;
 }
 
 /** What a reader returns: one page of items and, when more follow, the last item's keys. */
@@ -202,6 +207,8 @@ export function activeKeys(spec: QuerySpec, search: string | null): ReadonlyArra
 export interface QueryScope {
   readonly principal: string;
   readonly values: Readonly<Record<string, unknown>>;
+  /** The caller's active tenant (tenant-scoped queries): its rows only; cursors are bound to it. */
+  readonly tenant?: string;
 }
 
 /**
@@ -225,6 +232,7 @@ export function queryFingerprint(
       .map((name) => [name, String(sqlParam(values[name]))]);
   const parts: unknown[] = [spec.name, order, search, canonicalValues(params)];
   if (scope !== undefined) parts.push(scope.principal, canonicalValues(scope.values));
+  if (scope?.tenant !== undefined) parts.push(scope.tenant);
   const canonical = JSON.stringify(parts);
   return createHash("sha256").update(canonical).digest("base64url").slice(0, 22);
 }
@@ -263,7 +271,9 @@ export async function runQuery<P extends Readonly<Record<string, unknown>>, T>(
   const request: QueryRequest<P> =
     scope === undefined
       ? { params, search, after, limit }
-      : { params, search, after, limit, scope: scope.values };
+      : scope.tenant === undefined
+        ? { params, search, after, limit, scope: scope.values }
+        : { params, search, after, limit, scope: scope.values, tenant: scope.tenant };
   const result = await read(request);
   const nextCursor = result.last === null ? null : codec.encode(result.last, fingerprint);
   return { items: result.items, nextCursor };
@@ -513,6 +523,13 @@ export function readRows<P extends Readonly<Record<string, unknown>>, T>(
   const candidates: { row: SqlRow; key: CursorKey[] }[] = [];
   const scope = request.scope ?? {};
   for (const row of rows) {
+    // A tenant-scoped query sees its tenant's rows only (without a tenant, none).
+    if (
+      spec.tenant !== undefined &&
+      (request.tenant === undefined || row[spec.tenant] !== request.tenant)
+    ) {
+      continue;
+    }
     if (!spec.filters.every((filter) => matches(filter, row, request.params, scope))) continue;
     let relevance = 0;
     if (spec.search !== null && request.search !== null) {
@@ -544,6 +561,7 @@ export type SqlArg =
   | { readonly param: string }
   | { readonly value: string | number | boolean }
   | { readonly principal: string }
+  | { readonly tenant: true }
   | { readonly search: true }
   | { readonly key: number }
   | { readonly limit: true };
@@ -583,6 +601,7 @@ export async function readSql<P extends Readonly<Record<string, unknown>>, T>(
     if ("param" in arg) return sqlParam(request.params[arg.param]);
     if ("value" in arg) return arg.value;
     if ("principal" in arg) return sqlParam(request.scope?.[arg.principal]);
+    if ("tenant" in arg) return request.tenant ?? null;
     if ("search" in arg) return request.search;
     if ("key" in arg) return after?.[arg.key] ?? null;
     return request.limit + 1;
@@ -651,4 +670,131 @@ export class PostgresStore<A, K> {
     }
     this.#versions.set(id, Number(sqlInteger(row.version)));
   }
+}
+
+/**
+ * PostgresStore for a tenant-scoped table: every call names the tenant and every statement filters
+ * by it (the primary control). `get` returns null for another tenant's row (like a missing one);
+ * `save` refuses an aggregate of another tenant (TenantMismatch) before it reaches the database.
+ * Before its statements it sets `app.tenant_id` for row level security (defense in depth) and, the
+ * first time, checks that the setting holds: the client must be a connection inside a transaction.
+ */
+export class PostgresTenantStore<A extends { readonly tenantId: string }, K> {
+  readonly #client: SqlClient;
+  readonly #mapping: TableMapping<A, K>;
+  readonly #versions = new Map<K, number>();
+  #checked = false;
+
+  constructor(client: SqlClient, mapping: TableMapping<A, K>) {
+    this.#client = client;
+    this.#mapping = mapping;
+  }
+
+  async get(tenant: string, id: K): Promise<A | null> {
+    await this.#bind(tenant);
+    const { rows } = await this.#client.query(this.#mapping.select, [tenant, id]);
+    const row = rows[0];
+    if (row === undefined) return null;
+    const aggregate = this.#mapping.fromRow(row);
+    this.#versions.set(this.#mapping.identity(aggregate), Number(sqlInteger(row.version)));
+    return aggregate;
+  }
+
+  async save(tenant: string, aggregate: A): Promise<void> {
+    if (aggregate.tenantId !== tenant) throw new TenantMismatch();
+    await this.#bind(tenant);
+    const id = this.#mapping.identity(aggregate);
+    const expected = this.#versions.get(id);
+    const values = this.#mapping.toValues(aggregate);
+    const { rows } =
+      expected === undefined
+        ? await this.#client.query(this.#mapping.insert, values)
+        : await this.#client.query(this.#mapping.update, [...values, expected]);
+    const row = rows[0];
+    if (row === undefined) {
+      throw new ConcurrencyConflict({ aggregate: this.#mapping.aggregate, id });
+    }
+    this.#versions.set(id, Number(sqlInteger(row.version)));
+  }
+
+  /** Sets the tenant for row level security; the first time, checks that a transaction keeps it. */
+  async #bind(tenant: string): Promise<void> {
+    await setTenant(this.#client, tenant);
+    if (this.#checked) return;
+    const { rows } = await this.#client.query(CURRENT_TENANT, []);
+    if (rows[0]?.tenant !== tenant) {
+      throw new Error(
+        "app.tenant_id does not hold between statements: run tenant-scoped repositories on one connection inside a transaction",
+      );
+    }
+    this.#checked = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Row level security: the tenant of the current transaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Sets `app.tenant_id` for the current transaction (`set_config(…, true)`: SET LOCAL semantics, it
+ * ends with the transaction, so a pooled connection never carries it to the next request).
+ */
+export const SET_TENANT = "SELECT set_config('app.tenant_id', $1::text, true)";
+const CURRENT_TENANT = "SELECT current_setting('app.tenant_id', true) AS tenant";
+
+export async function setTenant(client: SqlClient, tenant: string): Promise<void> {
+  await client.query(SET_TENANT, [tenant]);
+}
+
+/**
+ * Runs a function in one transaction on one connection: PGlite's `transaction` as it is, or
+ * `poolTransactions(pool)` for a node-postgres `Pool`.
+ */
+export interface SqlTransactions {
+  transaction<T>(run: (client: SqlClient) => Promise<T>): Promise<T>;
+}
+
+/** A pool handing out connections (node-postgres `Pool`: `connect()` gives a client to release). */
+export interface SqlPool {
+  connect(): Promise<SqlClient & { release(): void }>;
+}
+
+/** SqlTransactions over a pool: BEGIN … COMMIT on one pooled connection (ROLLBACK on error). */
+export function poolTransactions(pool: SqlPool): SqlTransactions {
+  return {
+    async transaction<T>(run: (client: SqlClient) => Promise<T>): Promise<T> {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN", []);
+        const result = await run(client);
+        await client.query("COMMIT", []);
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK", []);
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
+
+/**
+ * readSql in its own transaction with the request's tenant set for row level security (the
+ * statement filters by the tenant as well). A tenant-scoped reader without a tenant is a bug.
+ */
+export async function readSqlInTenant<P extends Readonly<Record<string, unknown>>, T>(
+  db: SqlTransactions,
+  spec: QuerySpec,
+  statements: QueryStatements,
+  request: QueryRequest<P>,
+  toItem: (row: SqlRow) => T,
+): Promise<QueryResult<T>> {
+  const tenant = request.tenant;
+  if (tenant === undefined)
+    throw new Error(`Query ${spec.name} reads tenant-scoped rows and needs a tenant`);
+  return db.transaction(async (client) => {
+    await setTenant(client, tenant);
+    return readSql(client, spec, statements, request, toItem);
+  });
 }

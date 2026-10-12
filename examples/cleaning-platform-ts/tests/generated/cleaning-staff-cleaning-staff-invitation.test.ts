@@ -27,6 +27,7 @@ describe("CleaningStaffInvitation", () => {
     expectThrows(
       () =>
         CleaningStaffInvitation.from({
+          tenantId: "00000000-0000-4000-8000-0000000000a1",
           id: "00000000-0000-0000-0000-000000000001",
           email: { value: "staff@example.com" },
           status: "pending",
@@ -45,6 +46,7 @@ describe("CleaningStaffInvitation", () => {
    */
   test("email_is_normalized", () => {
     const result = CleaningStaffInvitation.from({
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "  Staff@Example.COM " },
       status: "pending",
@@ -63,6 +65,7 @@ describe("CleaningStaffInvitation", () => {
    */
   test("revoked_invitation_cannot_be_revoked_again", () => {
     const aggregate = CleaningStaffInvitation.from({
+      tenantId: "00000000-0000-4000-8000-0000000000a1",
       id: "00000000-0000-0000-0000-000000000001",
       email: { value: "staff@example.com" },
       status: "revoked",

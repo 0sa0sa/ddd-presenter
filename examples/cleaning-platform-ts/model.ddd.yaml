@@ -12,8 +12,20 @@ generation:
 
 # 認証・認可・レート制限（docs/09 §20）。宣言すると、すべての Use case と Aggregate に authorize が必要（既定は拒否）
 security:
-  # 清掃会社の管理者 / スタッフ候補
-  roles: [admin, candidate]
+  # マルチテナント（docs/09 §22）: テナント（清掃会社）は検証したトークンの org_id だけから決まる。
+  # Aggregate は既定でテナントごとに分離される（tenant_id 列・PostgreSQL の行レベルセキュリティ）
+  tenancy:
+    claim: org_id
+    type: UUID
+    isolation: row
+  # ロールと権限（アクティブなテナントの中だけで効く）。admin は staff を継承する（NIST RBAC1）
+  roles:
+    admin: { inherits: [staff], permissions: [invitation.revoke, staff.read] }
+    staff: { permissions: [invitation.issue, invitation.read, invitation.list] }
+    candidate: { permissions: [invitation.accept] }
+  # テナントをまたぐ運用・サポートのロール。cross_tenant の Use case でだけ効く
+  platform_roles:
+    operator: { permissions: [invitation.read] }
   principal:
     # principal.id は JWT の sub。claims は allow_if で principal.<name> として読める
     id: String
@@ -25,9 +37,9 @@ security:
     issuer: https://auth.example.com/
     audience: cleaning-platform
     algorithms: [RS256]
-  # rate_limit を書かないエンドポイントの制限
+  # rate_limit を書かないエンドポイントの制限（テナントごと: 1 社の大量アクセスが他社を巻き込まない）
   rate_limits:
-    default: { requests: 60, per: minute, by: principal }
+    default: { requests: 60, per: minute, by: tenant }
 
 contexts:
   - name: CleaningStaff
@@ -81,10 +93,10 @@ contexts:
       - name: CleaningStaffInvitation
         description: スタッフ候補への招待
         identity: id
-        # 識別子で読める相手: 管理者、または招待されたメールアドレスの候補者
+        # 識別子で読める相手: invitation.read を持つ人（staff と admin）、または招待されたメールアドレスの候補者
         authorize:
-          roles: [admin, candidate]
-          allow_if: has_role(principal, admin) or (principal.email != null and principal.email == email.value)
+          permissions: [invitation.read, invitation.accept]
+          allow_if: has_permission(principal, invitation.read) or (principal.email != null and principal.email == email.value)
         fields:
           - { name: id, type: UUID }
           - { name: email, type: EmailAddress }
@@ -194,8 +206,8 @@ contexts:
         description: スタッフ候補へ招待を発行する
         command: IssueInvitation
         transaction: required
-        authorize: { roles: [admin] }
-        rate_limit: { requests: 10, per: minute, by: principal }
+        authorize: { permissions: [invitation.issue] }
+        rate_limit: { requests: 10, per: minute, by: tenant }
         input:
           - { name: email, type: EmailAddress }
           - { name: valid_until, type: DateTime }
@@ -259,9 +271,9 @@ contexts:
         description: 招待を受諾する
         command: AcceptInvitation
         transaction: required
-        # ロールは読み込む前に、allow_if は招待を読み込んだ後・受諾する前に確かめる
+        # 権限は読み込む前に、allow_if は招待を読み込んだ後・受諾する前に確かめる
         authorize:
-          roles: [candidate]
+          permissions: [invitation.accept]
           allow_if: principal.email != null and principal.email == invitation.email.value
         rate_limit: { requests: 5, per: minute, by: principal }
         input:
@@ -358,7 +370,7 @@ contexts:
         actor: 清掃会社の管理者
         command: RevokeInvitation
         transaction: required
-        authorize: { roles: [admin] }
+        authorize: { permissions: [invitation.revoke] }
         input:
           - { name: invitation_id, type: UUID }
         steps:
@@ -412,14 +424,44 @@ contexts:
               returns: false
               emits: []
 
+      # 運用担当（プラットフォームのロール）が、入力で指定したテナントの招待の状態を調べる。
+      # cross_tenant はプラットフォームのロールだけが実行でき、アクセスは CrossTenantAudit に記録される
+      - name: inspect_invitation
+        actor: 運用担当
+        command: InspectInvitation
+        transaction: none
+        authorize: { permissions: [invitation.read], cross_tenant: true }
+        input:
+          - { name: invitation_id, type: UUID }
+        steps:
+          - load: { aggregate: CleaningStaffInvitation, by: invitation_id, as: invitation, not_found: InvitationNotFound }
+          - return: invitation.status
+        scenarios:
+          - name: operator_inspects_another_tenant
+            given:
+              principal: { id: operator-1, platform_roles: [operator], tenant: null }
+              aggregates:
+                - type: CleaningStaffInvitation
+                  fields:
+                    id: "00000000-0000-0000-0000-000000000001"
+                    email: { value: "staff@example.com" }
+                    status: pending
+                    created_at: "2026-01-01T10:00:00+00:00"
+                    expires_at: "2026-01-08T10:00:00+00:00"
+            when:
+              input: { tenant_id: "00000000-0000-4000-8000-0000000000a1", invitation_id: "00000000-0000-0000-0000-000000000001" }
+            then:
+              returns: pending
+
     # 読み取り（一覧・検索・ページング）。宣言すると PostgreSQL のスキーマ（sql/cleaning_staff.sql）・
     # リポジトリ・リーダーも生成する（docs/10 §10）
     queries:
       - name: search_invitations
         description: 招待をメールアドレスで探す（似ている順）。状態と作成日時で絞り込める
         from: CleaningStaffInvitation
-        # 招待の一覧は管理者だけ（クエリも authorize が必須。ロールは読む前に確かめる）
-        authorize: { roles: [admin] }
+        # 招待の一覧は invitation.list を持つ人だけ（クエリも authorize が必須。権限は読む前に確かめる）。
+        # 行は呼び出し元のテナントのものだけ（SQL の tenant_id の条件はいつも付く）
+        authorize: { permissions: [invitation.list] }
         params:
           - { name: status, type: InvitationStatus }
           - { name: created_after, type: DateTime }
@@ -486,7 +528,7 @@ contexts:
       - name: StaffMember
         description: 登録済みのスタッフ
         identity: id
-        authorize: { roles: [admin] }
+        authorize: { permissions: [staff.read] }
         fields:
           - { name: id, type: UUID }
           - { name: invitation_id, type: UUID }
@@ -512,8 +554,9 @@ contexts:
         description: 招待を受諾した人をスタッフとして登録する
         command: RegisterStaff
         transaction: required
-        # ポリシーだけが実行する（HTTP には出さない）
+        # ポリシーだけが実行する（HTTP には出さない）。招待が受諾されたテナントの中で動く
         authorize: internal
+
         input:
           - { name: invitation_id, type: UUID }
           - { name: joined_at, type: DateTime }
