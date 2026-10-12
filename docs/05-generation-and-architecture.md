@@ -49,6 +49,7 @@ src/<package_name>/
     application/
       use_cases.py
       ports.py
+    ARCHITECTURE.md        # C4 風の3レベルの図（Mermaid、§10）
     model_manifest.json
   extensions/
     domain/
@@ -644,3 +645,27 @@ tests/generated/test_<context>_<query>.py, test_<context>_persistence.py
 - `security` のあるモデルのクエリには `authorize` が要る（2026-10-06、docs/09 §21）。`public` 以外のクエリの `execute` に principal の引数が増え（`ddd diff` が破壊的変更として示す）、`persistence.ts` / `_persistence.py` の `runQuery` / `run_query` と指紋に省略可能な `scope` が加わる（`security` のないモデルの生成物は変わらない）。
 - `queries:` を足すと、そのコンテキストに `sql/<context>.sql` と永続化のファイルが増える。TypeScript の API を使っていれば `api/runtime.ts` の `send` が export され、`api/query-runtime.ts` が増え、保存する Use case のエラーの一覧に `concurrency_conflict: 409` が加わる。
 - 依存は増えない（TypeScript は `node:crypto`、Python は標準ライブラリ）。PostgreSQL のドライバ（`pg` / PGlite / psycopg）はアプリが選んで入れる。
+
+## 10. アーキテクチャ文書（ARCHITECTURE.md, 2026-10-12）
+
+`ddd generate` は、生成するコードの構成を C4 モデルの考え方で3つのレベルに分けた文書を、両方のターゲットで生成する。設計と出典は docs/09 §23、Web の使い方は docs/11 §9。
+
+- **場所:** `<src_dir>/<package>/generated/ARCHITECTURE.md`（各コンテキストの `README.md` と同じ生成ディレクトリ）。所有は generated で、マニフェストに hash が入る（手で編集すると `ddd diff --check` が検出する。モデルを直して再生成する）。
+- **中身:** 冒頭に生成物であることの注記、プロジェクトの説明とターゲット。続いて「1. System context」「2. Containers」「3.n Components of <Context>」（モデルの順にコンテキストごと）。各節は Mermaid の `flowchart TB`（C4 の配色の `classDef`、グループは `subgraph`）と、要素の表（Element / Kind / Technology / Description / Badges）、関係の表（From / To / Relationship / Technology）。
+- **決定的:** 日付や乱数を含まない。要素と関係はモデルの順。Mermaid のノード ID は要素の安定 ID（`ctx:Billing`、`ctr:http-api`、`cmp:Billing/uc:issue_invoice` など）から `[A-Za-z0-9_]` だけで作り（`n_` で始める。ASCII 以外を含む ID と衝突には短い hash を足す）、ラベルは引用符で囲んで `"` `<` `>` `#` を Mermaid の実体参照（`#quot;` など）にする。
+- **何を描くか（生成器と同じ条件）:**
+
+| レベル | 要素 | 条件 |
+|---|---|---|
+| L1 | 利用者（Use case の `actor`。internal の Use case だけを実行する利用者は「internal (policies)」）、プラットフォームロール、コンテキスト（サブドメイン・`tenant`・`PostgreSQL` のバッジ）、外部システム（拡張ポイント） | いつも |
+| L1 | コンテキストの関係（パターンとイベント契約）。`separate_ways` は破線 | `relationships` |
+| L2 | Web クライアント（TanStack Query）と HTTP API（base path・`JWT`・既定のレート制限・`tenant`） | `target: typescript` かつ `typescript.api` |
+| L2 | Security（ロール・権限・認可・レート制限・テナント・JWT の認証器） | `security` |
+| L2 | コンテキストごとのアプリケーションとドメイン | いつも |
+| L2 | イベント配信（`subscriptions()`） | ポリシーがある |
+| L2 | PostgreSQL（`RLS on` / `RLS off`・`trigram`・`tenant_id`） | `queries:` のあるコンテキストがある |
+| L2 | ID プロバイダ（JWKS） | `authentication.scheme: bearer_jwt` で、Python か TypeScript の HTTP API |
+| L3 | 集約・Use case（authorize・レート制限・cross-tenant・冪等キー）・クエリ（検索の方式・ページ・authorize）・ポリシー、ポート（リポジトリ・リーダー・Extensions・Clock・IdGenerator・EventPublisher・UnitOfWork・IdempotencyStore・CrossTenantAudit・腐敗防止層の Translator）、生成されるアダプタ（HTTP ルート・インメモリ・PostgreSQL・顧客の拡張） | 生成されるものだけ |
+
+- `ddd generate --target` で `generation.target` と違うターゲットを選ぶと、文書もそのターゲットを描く。
+- 文書を足しただけで、ほかの生成物は1バイトも変わらない（例のプロジェクトでは `ARCHITECTURE.md` とマニフェストの1行だけが増えた）。生成器のテストが、L2 のコンテナと実際に生成されるファイル（`api/server.ts`、`security.*`、`authentication.*`、`sql/*.sql`、`policies.*`）が一致することを全フィクスチャ・両ターゲットで確かめる。

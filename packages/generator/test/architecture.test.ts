@@ -1,5 +1,5 @@
 /**
- * ARCHITECTURE.md (docs/05 §11): generated in both targets next to the context READMEs, hashed in the manifest, equal to
+ * ARCHITECTURE.md (docs/05 §10): generated in both targets next to the context READMEs, hashed in the manifest, equal to
  * the committed examples, and its containers match what the generator really emits (so core and generator never drift).
  */
 import { describe, expect, test } from "bun:test";

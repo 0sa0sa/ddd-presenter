@@ -260,6 +260,8 @@ bun run build:web && bun run start   # http://localhost:4870
 
 AI の予測・提案を使うには、サーバーのマシンで Claude Code（`claude`）か Codex CLI（`codex`）にログインしておくか、`ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで使う AI を選んで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
 
+プロジェクトの「アーキテクチャ」タブでは、モデルから導いたアーキテクチャをシステム全体・コンテナ・コンテキストの中身の3レベルで見られる（ダブルクリックで中に入る）。図の上でコンテキストを足す・つなぐ、外部システムを足す、生成ターゲットや HTTP API・RLS・レート制限を切り替える、といった操作がモデルへの編集になり（モデルを不正にする操作は適用されない）、各レベルを SVG・PNG・draw.io・Mermaid で書き出せる（docs/11 §9）。
+
 ログインはユーザー名とパスワード。サーバーは既定で `127.0.0.1` だけで待ち受け、パスワードを持つアカウントがまだない間は、ユーザー名だけで入れる「開発用の簡易ログイン」も使える（最初のパスワード付きアカウントができると自動で無効になる）。アカウントを作ると個人ワークスペースができる。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
 
 ### セキュアに動かす
@@ -314,6 +316,7 @@ src/<package>/
     _persistence.py                # カーソル（HMAC）・キーセット・pg_trgm の類似度・楽観ロック（queries: があるときだけ）
     <context>/testing.py           # In-memory の Repository / Clock / Publisher / UnitOfWork（と In-memory のリーダー）
     <context>/README.md            # ルール・適用箇所・テストの対応表
+    ARCHITECTURE.md                # システム全体・コンテナ・コンテキストの中身の Mermaid 図と表（C4 風、docs/05 §10）
     model_manifest.json            # モデルhash・生成器版・各ファイルのsha256
   extensions/<context>/extensions.py   # 初回のみ作成。以後はあなたのコード
   extensions/<context>/translators.py  # anticorruption_layer の翻訳層。初回のみ作成
@@ -339,6 +342,7 @@ src/<package>/
     <context>/persistence/{rows,postgres}.ts
     persistence.ts
     <context>/testing.ts, index.ts, README.md
+    ARCHITECTURE.md                    # Python と同じ形式（TypeScript の HTTP API・Web クライアントも描く）
     model_manifest.json
   extensions/<context>/extensions.ts   # 初回のみ作成。以後はあなたのコード
   extensions/<context>/translators.ts  # anticorruption_layer の翻訳層。初回のみ作成
@@ -398,7 +402,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案 |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し） |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語
