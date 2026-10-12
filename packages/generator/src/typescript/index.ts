@@ -1,4 +1,4 @@
-import type { Analysis, ModelIR } from "@ddd/core";
+import { architectureMarkdown, deriveArchitecture, type Analysis, type ModelIR } from "@ddd/core";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "../output.ts";
 import { GENERATOR_NAME, GENERATOR_VERSION } from "../python/support.ts";
 import { apiContexts, apiQueriesFile, clientFile, contextContractFile, contractFile, queriesFile, serverFile } from "./api.ts";
@@ -88,6 +88,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
   const template = (doc: string, source: string) => `${header(model)}\n\n${docLines(doc, "").join("\n")}\n\n${source.trimEnd()}\n`;
 
   gen(P.file(P.runtime), template("Base classes, value schemas and helpers shared by the generated domain code (zod + decimal.js only).", RUNTIME_TS));
+  // Architecture (C4-style levels as Mermaid) of what this run generates (docs/05 §10).
+  gen(`${P.generated}/ARCHITECTURE.md`, architectureMarkdown(deriveArchitecture(model, analysis, { target: "typescript" })));
   gen(P.file(P.adapters), template("Reference adapters for the clock and id ports (usable in every context).", ADAPTERS_TS));
   const tenancy = { tenancy: !!model.security?.tenancy, platform: !!model.security?.platformRoles.length };
   gen(P.file(P.testing), template("In-memory test doubles and assertion helpers shared by every context.", templateSections(TESTING_TS, tenancy)));

@@ -1,4 +1,4 @@
-import type { Analysis, GenerationTarget } from "@ddd/core";
+import { architectureMarkdown, deriveArchitecture, type Analysis, type GenerationTarget } from "@ddd/core";
 import { portsFile, resolveReturn, useCasesFile } from "./python/application.ts";
 import { contextReadme } from "./python/docs.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, paramTypes, rulesFile, valueObjectsFile } from "./python/domain.ts";
@@ -40,6 +40,8 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
   scaffold(`${src}/${pkg}/py.typed`, "");
   gen(`${src}/${pkg}/generated/__init__.py`,initPy(`Code generated from model "${model.project}". Do not edit; regenerate instead.`));
   gen(`${src}/${pkg}/generated/_runtime.py`, `${header(model)}\n\n"""Base classes shared by the generated domain code (Pydantic v2 + stdlib only)."""\n\n${RUNTIME_PY}`);
+  // Architecture (C4-style levels as Mermaid) of what this run generates (docs/05 §10).
+  gen(`${src}/${pkg}/generated/ARCHITECTURE.md`, architectureMarkdown(deriveArchitecture(model, analysis, { target: "python" })));
   gen(`${src}/${pkg}/generated/adapters.py`, `${header(model)}\n\n"""Reference adapters for the clock and id ports (structurally typed; usable in every context)."""\n\n${ADAPTERS_PY}`);
   if (model.security) {
     const contexts = [...analysis.contexts.values()];

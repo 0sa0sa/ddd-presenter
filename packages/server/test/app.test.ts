@@ -280,6 +280,65 @@ describe("layout", () => {
   });
 });
 
+describe("architecture layout", () => {
+  const url = (p: string) => `/api/projects/${p}/architecture-layout`;
+
+  test("positions per level with optimistic concurrency, sanitized, apart from the model", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    expect((await s.json("GET", url(project))).body).toEqual({ levels: {} });
+    const first = await s.json("PUT", url(project), { level: "containers", base_version: 0, positions: { "ctr:http-api": { x: 10.6, y: -20 }, bad: { x: "no" }, worse: null } });
+    expect(first.status).toBe(200);
+    expect(first.body).toEqual({ version: 1, positions: { "ctr:http-api": { x: 11, y: -20 } } });
+    // Another level has its own version: no conflict with the containers level.
+    expect((await s.json("PUT", url(project), { level: "context:CleaningStaff", base_version: 0, positions: { "cmp:CleaningStaff/agg:X": { x: 1, y: 2 } } })).body.version).toBe(1);
+    // A stale base version is a conflict that returns the current positions.
+    const stale = await s.json("PUT", url(project), { level: "containers", base_version: 0, positions: {} });
+    expect(stale.status).toBe(409);
+    expect(stale.body.current_version).toBe(1);
+    expect(stale.body.positions).toEqual({ "ctr:http-api": { x: 11, y: -20 } });
+    // Saving the same positions again keeps the version.
+    expect((await s.json("PUT", url(project), { level: "containers", base_version: 1, positions: { "ctr:http-api": { x: 11, y: -20 } } })).body.version).toBe(1);
+    expect((await s.json("PUT", url(project), { level: "containers", base_version: 1, positions: { "ctr:http-api": { x: 50, y: 60 } } })).body.version).toBe(2);
+    const all = await s.json("GET", url(project));
+    expect(all.body.levels).toEqual({
+      containers: { version: 2, positions: { "ctr:http-api": { x: 50, y: 60 } } },
+      "context:CleaningStaff": { version: 1, positions: { "cmp:CleaningStaff/agg:X": { x: 1, y: 2 } } },
+    });
+    expect((await s.json("GET", `/api/projects/${project}/model`)).body.version).toBe(1);
+  });
+
+  test("bad levels and missing fields are rejected; size limits", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    for (const level of ["", "Context:X", "context:", "context:1x", "context:a-b", "context:" + "a".repeat(101), 5, "../system"]) {
+      expect((await s.call("PUT", url(project), { level, base_version: 0, positions: {} })).status).toBe(400);
+    }
+    expect((await s.call("PUT", url(project), { level: "system", positions: {} })).status).toBe(400);
+    expect((await s.call("PUT", url(project), { level: "system", base_version: 0 })).status).toBe(400);
+    expect((await s.call("PUT", url(project), { level: "system", base_version: 0, positions: [] })).status).toBe(400);
+    const many = Object.fromEntries(Array.from({ length: 5001 }, (_, i) => [`e${i}`, { x: i, y: i }]));
+    expect((await s.call("PUT", url(project), { level: "system", base_version: 0, positions: many })).status).toBe(413);
+    const huge = { level: "system", base_version: 0, positions: { a: { x: 1, y: 1, pad: "x".repeat(1_100_000) } } };
+    expect((await s.call("PUT", url(project), huge)).status).toBe(413);
+  });
+
+  test("another tenant gets 404, a viewer reads but cannot write (403)", async () => {
+    const owner = await login("owner");
+    const viewer = await login("viewer");
+    const bob = await login("bob");
+    const ws = await workspaceOf(owner);
+    expect((await owner.json("POST", `/api/workspaces/${ws}/members`, { username: "viewer", role: "viewer" })).status).toBe(201);
+    const project = await newProject(owner, ws);
+    await owner.json("PUT", url(project), { level: "system", base_version: 0, positions: { "ctx:A": { x: 1, y: 1 } } });
+    expect((await viewer.json("GET", url(project))).body.levels.system.version).toBe(1);
+    expect((await viewer.call("PUT", url(project), { level: "system", base_version: 1, positions: {} })).status).toBe(403);
+    expect((await bob.call("GET", url(project))).status).toBe(404);
+    expect((await bob.call("PUT", url(project), { level: "system", base_version: 1, positions: {} })).status).toBe(404);
+    expect((await app.request(url(project))).status).toBe(401);
+  });
+});
+
 describe("health", () => {
   test("is public and identifies the service", async () => {
     const res = await app.request("/api/health");

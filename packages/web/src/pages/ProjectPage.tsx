@@ -2,6 +2,7 @@ import { applyEdits, parseModel, ruleUsage, unifiedDiff, validateModelText, type
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, describeError, type Me, type Role } from "../api.ts";
 import { href, navigate } from "../App.tsx";
+import { ArchitectureView } from "../components/ArchitectureView.tsx";
 import { DiagramView } from "../components/DiagramView.tsx";
 import { DiffView } from "../components/DiffView.tsx";
 import { HistoryView } from "../components/HistoryView.tsx";
@@ -26,6 +27,7 @@ const TABS = [
   { id: "discovery", label: "ディスカバリー" },
   { id: "model", label: "モデル (YAML)" },
   { id: "diagram", label: "図" },
+  { id: "architecture", label: "アーキテクチャ" },
   { id: "rules", label: "ルール" },
   { id: "scenarios", label: "シナリオ" },
   { id: "preview", label: "生成プレビュー" },
@@ -52,6 +54,12 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [status, setStatus] = useState<string>();
   const [loadError, setLoadError] = useState<string>();
   const [conflict, setConflict] = useState<Conflict>();
+  /** A generated file to show when the preview opens (from the architecture tab's links). */
+  const [previewFocus, setPreviewFocus] = useState<string>();
+  // The file link applies to one visit of the preview only.
+  useEffect(() => {
+    if (tabParam !== "preview") setPreviewFocus(undefined);
+  }, [tabParam]);
   const lastGoodModel = useRef<ModelIR>(undefined);
   const [coach, setCoach] = useState(() => tutorialStore.get().projectId === id);
   const [ai, setAi] = useState<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>();
@@ -283,7 +291,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           YAMLをエクスポート
         </a>
       </TopBar>
-      <div className={`workbench${tab === "preview" || tab === "history" ? " no-inspector" : ""}${tab === "discovery" ? " is-board" : ""}`}>
+      <div className={`workbench${tab === "preview" || tab === "history" ? " no-inspector" : ""}${tab === "discovery" || tab === "architecture" ? " is-board" : ""}`}>
         <Outline nodes={outline} selected={selectedId} onSelect={(n) => {
           setSelectedId(n.id);
           if (tab === "model") gotoPath(n.path);
@@ -329,7 +337,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
               </div>
             </div>
           )}
-          <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "preview" || tab === "discovery" ? " fill" : ""}`} role="tabpanel">
+          <div className={`tab-body${tab === "model" || tab === "diagram" || tab === "architecture" || tab === "preview" || tab === "discovery" ? " fill" : ""}`} role="tabpanel">
             {tab === "discovery" && (
               <div className="board-page">
               <BoardTabs
@@ -421,9 +429,29 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             {tab === "diagram" && model && (
               <DiagramView model={model} analysis={result.analysis} diagnostics={diagnostics} positions={positions} canEdit={canEdit} selectedId={selectedId} onSelect={setSelectedId} onMove={onMove} />
             )}
+            {tab === "architecture" && model && (
+              <ArchitectureView
+                projectId={id}
+                model={model}
+                analysis={result.analysis}
+                text={text}
+                canEdit={canEdit}
+                savedVersion={saved.version}
+                onApply={(yaml, msg) => {
+                  setText(yaml);
+                  setStatus(msg);
+                }}
+                onGoto={gotoPath}
+                onOpenFile={(path) => {
+                  setPreviewFocus(path);
+                  navigate({ page: "project", id, tab: "preview" });
+                }}
+                onStatus={setStatus}
+              />
+            )}
             {tab === "rules" && <RulesView rules={rules} onGoto={gotoPath} onSelect={setSelectedId} />}
             {tab === "scenarios" && model && <ScenariosView model={model} onGoto={gotoPath} />}
-            {tab === "preview" && <PreviewView projectId={id} version={saved.version} dirty={dirty} />}
+            {tab === "preview" && <PreviewView projectId={id} version={saved.version} dirty={dirty} focusPath={previewFocus} />}
             {tab === "history" && (
               <HistoryView
                 projectId={id}
@@ -436,7 +464,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 }}
               />
             )}
-            {(tab === "rules" || tab === "scenarios" || tab === "diagram") && !result.analysis && (
+            {(tab === "rules" || tab === "scenarios" || tab === "diagram" || tab === "architecture") && !result.analysis && (
               <p className="error-banner" style={{ margin: 16 }}>
                 モデルにエラーがあるため、最後に正しく読めた状態を表示しています。
               </p>
@@ -464,7 +492,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             )}
           </footer>
         </section>
-        {tab !== "preview" && tab !== "history" && tab !== "discovery" && (
+        {tab !== "preview" && tab !== "history" && tab !== "discovery" && tab !== "architecture" && (
           <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} onPropose={(context, aggregate, kind) => setPropose({ context, aggregate, kind })} />
         )}
       </div>

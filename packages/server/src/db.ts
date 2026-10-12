@@ -99,6 +99,17 @@ const MIGRATIONS: string[] = [
      SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id
      WHERE m.workspace_id = workspaces.id AND m.role = 'owner' ORDER BY u.created_at LIMIT 1
    ) WHERE ai_enabled = 1;`,
+  // Positions of the architecture diagram (アーキテクチャ tab), one row per project and level (system, containers,
+  // context:<Name>), each with its own version so editors arranging different levels never conflict.
+  `CREATE TABLE architecture_layouts (
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     level TEXT NOT NULL,
+     version INTEGER NOT NULL,
+     json TEXT NOT NULL,
+     updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+     updated_at TEXT NOT NULL,
+     PRIMARY KEY (project_id, level)
+   );`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

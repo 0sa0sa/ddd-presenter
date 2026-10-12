@@ -217,6 +217,9 @@ export const api = {
   preview: (id: string, version?: number) => request<Preview>("GET", `/api/projects/${id}/preview${version ? `?version=${version}` : ""}`),
   layout: (id: string) => request<{ positions: Record<string, { x: number; y: number }> }>("GET", `/api/projects/${id}/layout`),
   saveLayout: (id: string, positions: Record<string, { x: number; y: number }>) => request("PUT", `/api/projects/${id}/layout`, { positions }),
+  architectureLayout: (id: string) => request<{ levels: Record<string, { version: number; positions: Record<string, { x: number; y: number }> }> }>("GET", `/api/projects/${id}/architecture-layout`),
+  saveArchitectureLayout: (id: string, level: string, positions: Record<string, { x: number; y: number }>, baseVersion: number) =>
+    request<{ version: number; positions: Record<string, { x: number; y: number }> }>("PUT", `/api/projects/${id}/architecture-layout`, { level, positions, base_version: baseVersion }),
   board: (id: string, boardId = "main") =>
     request<{ id: string; name: string; version: number; board: Board; updated_at: string | null; updated_by: string | null; role: Role }>("GET", `/api/projects/${id}/boards/${boardId}`),
   saveBoard: (id: string, board: Board, baseVersion: number, boardId = "main") =>

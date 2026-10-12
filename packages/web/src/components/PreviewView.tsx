@@ -12,7 +12,7 @@ const ACTION_LABEL: Record<string, string> = {
   conflict: "衝突",
 };
 
-export function PreviewView({ projectId, version, dirty }: { projectId: string; version: number; dirty: boolean }) {
+export function PreviewView({ projectId, version, dirty, focusPath }: { projectId: string; version: number; dirty: boolean; focusPath?: string }) {
   const [preview, setPreview] = useState<Preview>();
   const [error, setError] = useState<{ message: string; offline: boolean; diagnostics: Diagnostic[] }>();
   const [attempt, setAttempt] = useState(0);
@@ -30,9 +30,11 @@ export function PreviewView({ projectId, version, dirty }: { projectId: string; 
         if (cancelled) return;
         setLoading(false);
         setPreview(p);
-        const first = p.plan.find((e) => e.action === "update" || e.action === "stale") ?? p.plan.find((e) => /(^|\/)aggregates\.(py|ts)$/.test(e.path));
+        const focused = focusPath ? p.plan.find((e) => e.path === focusPath) : undefined;
+        if (focused) setShowUnchanged(true);
+        const first = focused ?? p.plan.find((e) => e.action === "update" || e.action === "stale") ?? p.plan.find((e) => /(^|\/)aggregates\.(py|ts)$/.test(e.path));
         setSelected(first?.path);
-        setMode(first?.diff ? "diff" : "file");
+        setMode(first?.diff && !focused ? "diff" : "file");
       },
       (e) => {
         if (cancelled) return;
@@ -50,7 +52,7 @@ export function PreviewView({ projectId, version, dirty }: { projectId: string; 
     return () => {
       cancelled = true;
     };
-  }, [projectId, version, attempt]);
+  }, [projectId, version, attempt, focusPath]);
 
   if (error) {
     return (

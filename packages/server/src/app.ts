@@ -829,6 +829,62 @@ export function createApp(db: Database, options: AppOptions = {}) {
     return c.json({ ok: true });
   });
 
+  // -- architecture diagram layout (per level; optimistic concurrency like boards) -----
+
+  /** `system`, `containers` or `context:<ContextName>` (the levels of the architecture model, docs/09 §23). */
+  const ARCH_LEVEL = /^(system|containers|context:[A-Za-z_][A-Za-z0-9_]{0,99})$/;
+  const MAX_ARCH_LEVELS = 200;
+  const cleanPositions = (positions: unknown): Record<string, { x: number; y: number }> => {
+    if (!positions || typeof positions !== "object" || Array.isArray(positions)) fail(400, "positions is required");
+    const keys = Object.keys(positions as object);
+    if (keys.length > MAX_LAYOUT_KEYS) fail(413, `A layout can hold up to ${MAX_LAYOUT_KEYS} positions`);
+    const clean: Record<string, { x: number; y: number }> = {};
+    const coord = (n: unknown) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 10_000_000;
+    for (const k of keys) {
+      const v = (positions as Record<string, { x?: unknown; y?: unknown } | null>)[k];
+      // Only { x, y } numbers are kept; anything else in the value is dropped.
+      if (k.length <= 300 && v && typeof v === "object" && coord(v.x) && coord(v.y)) clean[k] = { x: Math.round(v.x as number), y: Math.round(v.y as number) };
+    }
+    return clean;
+  };
+
+  app.get("/api/projects/:projectId/architecture-layout", (c) => {
+    const { project } = loadProject(c);
+    const rows = db.query("SELECT level, version, json FROM architecture_layouts WHERE project_id = ? ORDER BY level").all(project.id) as { level: string; version: number; json: string }[];
+    const levels: Record<string, { version: number; positions: Record<string, { x: number; y: number }> }> = {};
+    for (const r of rows) levels[r.level] = { version: r.version, positions: JSON.parse(r.json) };
+    return c.json({ levels });
+  });
+
+  app.put("/api/projects/:projectId/architecture-layout", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const b = await body<{ level?: unknown; positions?: unknown; base_version?: unknown }>(c, BODY_LAYOUT);
+    if (typeof b.level !== "string" || !ARCH_LEVEL.test(b.level)) fail(400, "level must be system, containers or context:<ContextName>");
+    if (typeof b.base_version !== "number" || !Number.isInteger(b.base_version) || b.base_version < 0) fail(400, "base_version is required");
+    const level = b.level as string;
+    const clean = cleanPositions(b.positions);
+    const json = JSON.stringify(clean);
+    let version = 0;
+    db.transaction(() => {
+      const row = db.query("SELECT version, json FROM architecture_layouts WHERE project_id = ? AND level = ?").get(project.id, level) as { version: number; json: string } | null;
+      const current = row?.version ?? 0;
+      if (current !== b.base_version) fail(409, "The layout was changed by someone else", { current_version: current, positions: row ? JSON.parse(row.json) : {} });
+      if (row && row.json === json) {
+        version = current;
+        return;
+      }
+      if (!row) {
+        const count = (db.query("SELECT COUNT(*) AS n FROM architecture_layouts WHERE project_id = ?").get(project.id) as { n: number }).n;
+        if (count >= MAX_ARCH_LEVELS) fail(413, `A project can hold layouts of up to ${MAX_ARCH_LEVELS} levels`);
+      }
+      version = current + 1;
+      db.query(
+        "INSERT INTO architecture_layouts (project_id, level, version, json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, level) DO UPDATE SET version = excluded.version, json = excluded.json, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+      ).run(project.id, level, version, json, c.get("user").id, now());
+    })();
+    return c.json({ version, positions: clean });
+  });
+
   // -- AI assistance ---------------------------------------------------------------
 
   /** The workspace's assistant when AI is on and still allowed (turned on by a current AI admin, or the workspace is listed). */

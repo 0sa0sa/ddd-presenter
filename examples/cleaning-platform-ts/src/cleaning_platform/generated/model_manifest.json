@@ -50,6 +50,10 @@
       "sha256": "b2e604e47c3b9bc1254cb2d823b35d3b426c4cd2d560ca53321918396705b7e3"
     },
     {
+      "path": "src/cleaning_platform/generated/ARCHITECTURE.md",
+      "sha256": "8aa094c5bf80f741c391bb26528237508b14a0383dd37408d3bbf04f9ccb5ce0"
+    },
+    {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/contract.ts",
       "sha256": "d972c6c84748aec716b8b48fabb770a9c7028054c8fc12dfad1ef854c41e9ff6"
     },
