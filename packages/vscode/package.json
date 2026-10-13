@@ -1,7 +1,7 @@
 {
   "name": "ddd-presenter",
   "displayName": "DDD Presenter",
-  "description": "Completion, hover, go-to-definition, rename and diagnostics for DDD Presenter models (*.ddd.yaml)",
+  "description": "Completion, hover, go-to-definition and diagnostics for DDD Presenter models (*.ddd.yaml, or ddd.yaml with .proto / .domain / .flow sources)",
   "version": "0.1.0",
   "publisher": "ddd-presenter",
   "license": "UNLICENSED",
@@ -9,16 +9,52 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Programming Languages", "Linters"],
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
   "main": "./dist/extension.cjs",
-  "activationEvents": ["onLanguage:ddd-yaml"],
+  "activationEvents": [
+    "onLanguage:ddd-yaml",
+    "onLanguage:ddd-domain",
+    "onLanguage:ddd-flow",
+    "workspaceContains:**/ddd.yaml"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "ddd-yaml",
-        "aliases": ["DDD Presenter model", "ddd-yaml"],
-        "extensions": [".ddd.yaml", ".ddd.yml"],
+        "aliases": [
+          "DDD Presenter model",
+          "ddd-yaml"
+        ],
+        "extensions": [
+          ".ddd.yaml",
+          ".ddd.yml"
+        ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "ddd-domain",
+        "aliases": [
+          "DDD Presenter rules",
+          "ddd-domain"
+        ],
+        "extensions": [
+          ".domain"
+        ],
+        "configuration": "./language-configuration-behavior.json"
+      },
+      {
+        "id": "ddd-flow",
+        "aliases": [
+          "DDD Presenter flows",
+          "ddd-flow"
+        ],
+        "extensions": [
+          ".flow"
+        ],
+        "configuration": "./language-configuration-behavior.json"
       }
     ],
     "grammars": [
@@ -26,6 +62,16 @@
         "language": "ddd-yaml",
         "scopeName": "source.ddd-yaml",
         "path": "./syntaxes/ddd-yaml.tmLanguage.json"
+      },
+      {
+        "language": "ddd-domain",
+        "scopeName": "source.ddd-behavior",
+        "path": "./syntaxes/ddd-behavior.tmLanguage.json"
+      },
+      {
+        "language": "ddd-flow",
+        "scopeName": "source.ddd-behavior",
+        "path": "./syntaxes/ddd-behavior.tmLanguage.json"
       }
     ],
     "configurationDefaults": {
@@ -37,6 +83,14 @@
           "other": true,
           "comments": false
         }
+      },
+      "[ddd-domain]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
+      },
+      "[ddd-flow]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
       }
     }
   },

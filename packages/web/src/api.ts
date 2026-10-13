@@ -1,4 +1,4 @@
-import type { Board, BoardGhost, Diagnostic, Proposal, RuleUsage } from "@ddd/core";
+import type { Board, BoardGhost, Diagnostic, FacilitatorTurn, Proposal, RuleUsage } from "@ddd/core";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -197,6 +197,8 @@ export const api = {
     request<{ proposal: Proposal | null; diagnostics?: Diagnostic[]; message?: string }>("POST", `/api/projects/${id}/assist/propose`, body),
   boardAssist: (id: string, board: Board, llm: boolean, instruction?: string) =>
     request<{ ghosts: BoardGhost[]; ai: boolean }>("POST", `/api/projects/${id}/assist/board`, { board, llm, instruction }),
+  facilitate: (id: string, body: { board: Board; history: { role: "user" | "assistant"; text: string; author?: string }[]; message?: string }, signal?: AbortSignal) =>
+    request<{ turn: FacilitatorTurn | null; message?: string }>("POST", `/api/projects/${id}/assist/facilitate`, body, fetch, signal),
   members: (ws: string) => request<{ members: Member[] }>("GET", `/api/workspaces/${ws}/members`),
   addMember: (ws: string, username: string, role: Role) => request("POST", `/api/workspaces/${ws}/members`, { username, role }),
   setRole: (ws: string, userId: string, role: Role) => request("PATCH", `/api/workspaces/${ws}/members/${userId}`, { role }),

@@ -1,5 +1,5 @@
 /** Immutable board operations used by the canvas (framework-free, unit-tested). */
-import { itemsInFrame, STICKY_KINDS, type Board, type BoardConnector, type BoardGhost, type BoardLane, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
+import { itemsInFrame, retargetGhosts, STICKY_KINDS, type Board, type BoardConnector, type BoardGhost, type BoardLane, type BoardFrame, type BoardItem, type StickyKind } from "@ddd/core";
 
 let counter = 0;
 export function newId(prefix: string): string {
@@ -177,6 +177,28 @@ export function visibleGhosts(ghosts: BoardGhost[], board: Board, selected: stri
   const related = local.filter((g) => g.connect && (anchors.has(g.connect.from) || anchors.has(g.connect.to)));
   const pick = related.length ? related : selected.length ? [] : local.filter((g) => g.kind === "aggregate");
   return [...pick.slice(0, limit), ...llm];
+}
+
+/** Turns ghosts into stickies in order; a ghost connected to an earlier one connects to its sticky. */
+export function acceptGhosts(board: Board, ghosts: readonly BoardGhost[]): { board: Board; ids: string[] } {
+  let next = board;
+  let rest = [...ghosts];
+  const ids: string[] = [];
+  while (rest.length) {
+    const [g, ...others] = rest as [BoardGhost, ...BoardGhost[]];
+    const ends = g.connect ? [g.connect.from, g.connect.to].filter((id) => id !== g.id) : [];
+    const r = ends.every((id) => next.items.some((i) => i.id === id)) ? acceptGhost(next, g) : acceptGhost(next, { ...g, connect: undefined });
+    next = r.board;
+    ids.push(r.id);
+    rest = retargetGhosts(others, g.id, r.id);
+  }
+  return { board: next, ids };
+}
+
+/** A sticky of the same kind and text is already on the board (ignoring spaces and punctuation). */
+export function onBoard(board: Board, ghost: Pick<BoardGhost, "kind" | "text">): boolean {
+  const norm = (s: string) => s.replace(/[\s　、。・,.!?！？「」『』()（）]/g, "").toLowerCase();
+  return board.items.some((i) => i.kind === ghost.kind && norm(i.text) === norm(ghost.text));
 }
 
 /** Turns a ghost into a real sticky (and its connector). */

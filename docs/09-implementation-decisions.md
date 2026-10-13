@@ -662,3 +662,116 @@ security:
 - 外部システムは拡張ポイントとしてだけ表す（拡張ポイントの説明を外部システムの説明として使う）。メッセージブローカーや実際のデプロイ（コンテナ・クラウドのサービス）は、生成しないので描かない。
 - 図の上でできる操作は、コンテキストの追加、関係の追加・編集・削除、サブドメイン、生成ターゲット、HTTP API、セキュリティの足場、`tenancy.rls`、既定のレート制限、外部システム（拡張ポイント）の追加。
 - 生成されるファイルへのリンクは、保存済みの版から生成したもの（未保存の変更は反映されない）。
+
+## 24. 複数ファイル形式: `.proto` / `.domain` / `.flow`（2026-10-13）
+
+YAML の DSL は、手で書く部分が読みにくい。主な原因は次のとおり。
+
+- 手順（`steps`）が入れ子の YAML になる。
+- 規則がキーの値の文字列に埋もれる。
+- フィールドが `{ name, type }` の羅列になる。
+- シナリオが本体に混ざる。
+
+API は ConnectRPC を使う想定で、契約は `.proto` で管理したい。そこで、YAML と同じモデルを層ごとのファイルにも書けるようにした。書き方は docs/10 §12 にある。
+
+### 決定
+
+| 決めたこと | 内容 | 理由 |
+|---|---|---|
+| 分け方 | `.proto`（データの形と契約）、`.domain`（集約の規則）、`.flow`（Use case の手順・クエリ・ポリシー）、`.scenarios.yaml`、`ddd.yaml`（設定とコンテキストの一覧） | 層（契約・ドメイン層・アプリケーション層・テスト）と生成されるコードの置き場所を1対1にするため。集約の規則は「流れ」ではないので `.flow` から外した |
+| 比べた案 | A: proto に似た独自構文の1ファイル（`.proto` は生成物）。B: 本物の `.proto` と別のファイル（採用） | 利用者の選択。B は契約が buf と ConnectRPC でそのまま使える本物の `.proto` になる。A の利点（短さ）は、振る舞いを `.domain` / `.flow` に出すことでほぼ得られる |
+| 手順の構文 | 波かっこのブロック。インデント・文章風・日本語のキーワードは採らない | 比較ページで見比べた利用者の判断。ブロックの範囲が明確で、貼り付けや整形で崩れにくい |
+| `save` / `publish` | 今までどおり明示する | 自動にすると「保存されない変更」「発生していないイベントの公開」の検査の意味が変わる |
+| シナリオ | YAML のまま別ファイルに置く | テストデータは YAML の方が書きやすい。本体の行数も大きく減る |
+| 同じ内部表現 | 新しい形式は YAML と同じ形のデータに組み立て、YAML と同じ読み込み（`readModelData`）に渡す。ソースマップでモデルのパスをファイル・行・列に戻す | 検証・生成・言語サービスを2つ持たない。どちらで書いても同じ診断・同じコードになることを、サンプル 11 モデルのテストで確かめている（内部表現、診断、Python / TypeScript の生成物） |
+| 規則と式 | 文字列のまま既存の Rule 式の検査器に渡す。CEL（protovalidate の式）にはしない | 同じ意味を保証するため。`and` / `or` と小文字の enum 値も YAML と同じ |
+| buf | `ddd migrate --split` の出力は `buf build` と `buf lint`（STANDARD）を通る（buf 1.47.2 で、サンプル 11 モデルすべてを確認するテストがある。buf がない環境では飛ばす）。`.proto` はパッケージのディレクトリ（`cleaning_staff/v1/`）に置き、オプションの定義 `ddd/` は lint から外す | 契約が本物の `.proto` であることを、道具で確かめられる形にするため |
+| `.proto` の読み込み | 自前のパーサーで、モデルが使う proto3 の範囲だけを読む。`oneof` `map` `stream` などは分かりやすいエラーにする。`option (ddd.v1.context)` のない `.proto` は読まない（ハッシュにも数えない） | buf / protoc はこの環境になく、Web（ブラウザ）でも読みたい。オプションの定義（`ddd/v1/options.proto`）と `buf.yaml` を一緒に書き出すので、buf でも読める |
+| 名前の対応 | rpc 名のスネークケースが flow / query の名前。enum の値は接頭辞を外して小文字にしたもの。0 番の値は読まない。戻せない名前はオプション（`(ddd.v1.use_case).name`、`(ddd.v1.value)`）で明示 | protobuf と buf lint の慣習（`ORDER_STATUS_OPEN`、`_UNSPECIFIED = 0`）に合わせつつ、モデルの名前を失わない |
+| 説明 | 宣言のすぐ上のコメント（空行なし）が説明。説明を書く場所は1か所 | protobuf の慣習と同じ。説明が2か所にあると食い違う |
+| flow の引数 | `flow place_order(order_id, at)` と request のフィールド名を並べ、`.proto` と照合する（型は `.proto` だけ） | `.flow` を読むだけで入力が分かるようにしつつ、型の定義を1か所に保つ |
+| `create` か `let` か | `let x = Name.member(...)` は `Name` が集約なら `create`、それ以外は `let` | 書き方を増やさずに、YAML の手順と1対1にするため |
+| オプションの検査 | 知らない `ddd.v1` オプションと、入れ子を含むオプションの知らないフィールドはエラー（YAML の `unknown-key` と同じ） | 綴りの誤りが黙って無視されると、`authorize { permisions: [...] }` が「認証済みなら誰でも」に変わるなど、権限が広がる |
+| 構文の誤りがあるとき | ファイルをまたぐ照合（rpc と flow の対応、シナリオの持ち主など）を出さない | 読めなかったファイルにある宣言を「ない」と報告すると、誤りが連鎖して本当の原因が埋もれる |
+| 生成物の `model_sha256` | すべてのソースをパスの順につないだものの値 | どのファイルを変えても「別のモデルから生成した」と分かるようにするため。YAML から移ると、生成物はマニフェストだけ1回更新される |
+| Web エディタ | 保存するのは YAML のまま。「複数ファイル形式…」のダイアログでファイルごとに編集でき（入力のたびに検証）、YAML に変換してモデルに反映する。ZIP の書き出し・読み込みもできる | Web の操作（ボードの反映、アーキテクチャ図、同期パネル、Inspector）はすべて YAML の構造的な編集（`applyEdits`）なので、保存の形式は1つに保つ |
+| 名前の一括変更（LSP） | エラー・enum・値オブジェクト・集約・エンティティ・イベントと、ガード・ファクトリ・操作・Extension point を、すべてのファイルで字句（識別子のトークン、`.proto` の型名の文字列、YAML の参照するキー）単位で書き換える。結果を検証し、新しいエラーが出るなら変更しない。フィールドと enum の値は対象外 | フィールド名や enum の値は別の要素と同じ名前になりやすく、字句の置き換えでは取り違える |
+
+### 意図して採用しなかったもの
+
+| 案 | 理由 |
+|---|---|
+| すべてを `.proto` のオプションで書く | 不変条件や手順がオプションの中の文字列になり、YAML より読みにくい（比較ページで確認した） |
+| 手順を Python / TypeScript で直接書く | 1つのモデルから両方の言語を生成できなくなり、シナリオからのテスト生成や静的な検査もできなくなる |
+| 読み込み側で `.proto` の response を読む | 戻り値の型は手順の `return` から決まる。response は契約の記述として書き出すだけにした |
+
+### 制限
+
+- `.proto` の契約は、TypeScript target の `connect: true` で Connect プロトコルとして出す（§25）。HTTP API（REST）の JSON は今までどおりで、protobuf JSON とは別の形（enum の値、`Integer` が数）のまま。
+- response のメッセージは読まないので、`return` と食い違っても検査しない。
+- LSP: 補完は名前とキーワードだけ（式の型に応じた補完はない）。フィールドと enum の値は一括変更できない。開いていないファイルがディスクで変わったときは、どれかのファイルを開くか編集するまで再検証しない。
+- Web で複数ファイル形式を編集して反映すると、`.proto` / `.domain` / `.flow` の説明でないコメントは失われる（保存は YAML のため）。
+- YAML のコメントは、設定とシナリオでは同じ場所に残る。`.proto` / `.domain` / `.flow` では、近くの宣言の上に、説明と区別された `//` コメントとして残る。
+- `ddd migrate --split` はフィールド番号を 1 から振る。その後の番号の互換性は `buf breaking` で検査する前提。
+
+## 25. Connect プロトコル（`generation.typescript.api.connect`, 2026-10-13）
+
+§24 の `.proto` の契約を、生成するサーバーで実際に出せるようにした。設定と動きは docs/10 §1.2 にある。
+
+### 決定
+
+| 決めたこと | 内容 | 理由 |
+|---|---|---|
+| 実装の形 | Connect プロトコル（unary、JSON の codec）を、生成した HTTP API のハンドラの前段として実装する。rpc ごとに、その Use case / クエリの REST のエンドポイントへ要求を変換し、応答とエラーを変換して返す | 認証・認可・レート制限・入力の検証・エラーの対応を一か所（HTTP API）に保つ。Connect 用に同じ処理を二重に生成しない |
+| ライブラリ | 生成するサーバー側は依存なし（`@connectrpc/connect` も `@bufbuild/protobuf` も使わない） | 生成物の依存を増やさない。Connect の unary は JSON の POST と決まった形のエラーで、変換表があれば足りる。プロトコルに合っていることは、公式のクライアントで確かめる（下記） |
+| 名前 | パッケージ `<context>.v1`、サービス `<Context>Service`、rpc は Use case のコマンド名・クエリ名の PascalCase、enum の値は接頭辞つきの大文字。`.proto` の書き出しと Connect の生成で同じ関数（core の `proto-names.ts`）を使う | 契約と、それを出すサーバーで名前が食い違わないようにするため |
+| JSON の形 | protobuf JSON（protoc の JSON 名、enum は名前、int64 は文字列、Timestamp は RFC 3339、省略された proto3 のフィールドは既定値）。HTTP API の JSON（camelCase、enum は小文字の値、Integer は数）との変換表を生成する | protobuf JSON の規則どおりにすると、公式のクライアント（protobuf-es）がそのまま読める |
+| エラー | REST の状態を Connect のコードに対応させる（400 → invalid_argument、409 / 422 → failed_precondition、楽観ロック → aborted、未配線・未知の手続き → unimplemented）。ドメインのエラーコードは `ddd-error-code` ヘッダー | Connect のエラーの details は protobuf の Any が必要で、契約にエラーの型を足すと大きくなる。ヘッダーなら Connect のクライアントで `error.metadata` から読める |
+| クロステナントの Use case | request に `tenant_id` を置く（モデルのフィールドではない。`.proto` の読み込みでは入力に数えない） | HTTP API のコマンドも `tenantId` を受け取るので、同じ情報を rpc でも渡せるようにする |
+| バイナリの codec | `application/proto`（protobuf の wire format）も受けて返す。field 番号は `.proto` を書く規則（宣言順に 1 から）と同じ計画（generator の `connect-plan.ts`）から出し、Timestamp は `seconds` / `nanos` のメッセージにする | Connect の既定の codec の一つで、公式のクライアントの `useBinaryFormat: true` で使われる。依存を増やさないよう、変換は生成するランタイムに書いた |
+| 型付きのクライアント | `createConnectClient` は `createApiClient` に、Connect で送る `fetch` を渡したもの | 型・検証・ドメインのエラーのクラス・TanStack Query のファクトリを二重に生成しない。サーバーは元の HTTP の状態と error の details をヘッダー（`ddd-http-status`・`ddd-error-details`）で返し、クライアントはそれで REST と同じ応答を作り直す |
+| Python | `generation.python.connect` で、同じ計画から WSGI アプリ（`generated/connect.py`）を生成する。REST の層を経由せず、Use case とクエリを直接呼ぶ | Python target には HTTP の層がない。WSGI なら依存なしで、どのフレームワークにも載る。認証は既存の `BearerJwtAuthenticator`、レート制限は既存の `RATE_LIMITS` を使う |
+| 両言語で同じ形 | 手続き・メッセージ・field 番号・型は、TypeScript と Python の生成器が共有する計画（`connect-plan.ts`）から出す | 同じ契約を両言語が同じ形で出すことを、構造で保証する |
+
+### 確かめたこと
+
+- 生成器のテストで、4 つのモデル（クエリ、エンティティと Decimal、String / Integer の識別子、セキュリティ）を Connect つきで生成し、`tsc --strict`・生成テスト・Prettier・typescript-eslint（strict-type-checked）に通す。Python でも 4 つのモデルを Connect つきで生成し、pytest・mypy `--strict`・ruff（check と format）に通す。
+- Python の WSGI アプリを `wsgiref` で実際に起動し、公式の Connect クライアント（TypeScript）から実際の HTTP で呼ぶテストがある（generator の `python-connect.test.ts`）。JSON とバイナリ、POST と GET、エラーのコードと `ddd-error-code` を確かめる。
+- Python のサンプル `examples/cleaning-platform` も `generation.python.connect` を有効にした。顧客所有のテスト `tests/custom/test_connect_app.py` が、Use case とクエリを JSON・バイナリ・GET で呼ぶ。
+- サンプル `examples/cleaning-platform-ts` は `connect: true` にした。顧客所有のテスト `tests/custom/connect-interop.test.ts` で次のことを確かめている。
+  - 公式の Connect クライアント（`@connectrpc/connect-web`、JSON の codec）が、生成した `generated/proto/` を `buf build` で読んだ記述子で、生成したハンドラを呼ぶ。
+  - Use case（値オブジェクトと Timestamp）、クエリ（enum と int64、POST と GET、JSON とバイナリ）、エラー（unauthenticated・invalid_argument・failed_precondition と `ddd-error-code`・unimplemented）が正しく往復する。
+  - 生成した型付きのクライアント（`createConnectClient`）が、JSON とバイナリで Use case・クエリを呼び、ドメインのエラーをそのクラスで受け取り、集約の読み込みは HTTP API に送る。
+- `generated/proto/` は `buf build` / `buf lint` を通る（buf があるときのテスト）。
+
+### 制限
+
+- rpc は unary だけ（モデルにストリーミングの rpc がないため）。Connect の gRPC / gRPC-Web プロトコルは出さない（Connect プロトコルだけ）。
+- 集約を識別子で読むエンドポイント（`GET …/:id`）は契約に rpc がないので、Connect では出さない（型付きのクライアントは HTTP API に送る）。
+- Python の WSGI アプリは同期（WSGI）。ASGI 版はない。
+
+## 26. AI 進行役（ディスカバリーボードのチャット, 2026-10-14）
+
+EventStorming のワークショップを、AI がチャットで進行する（docs/11 §4「AI 進行役」）。
+
+### 決定
+
+| 決めたこと | 内容 | 理由 |
+|---|---|---|
+| 何を根拠に進行するか | 毎回、いまの段階（`WORKSHOP_PHASES` の目的・問いかけ・使う付箋）、その段階の自動のチェックの結果（済んだか・該当する付箋）、ボードのヒント（`analyzeBoard`）、ボードの内容を渡す（core の `facilitatorBrief`） | 自由な雑談ではなく、「進行」タブと同じ段階とチェックに沿って、足りない所を尋ねる進行役にするため。段階とチェックは決定的に計算でき、AI に判断させる必要がない |
+| AI ができること | 返答の文、付箋の案（最大8枚）、次の段階の提案、話題の付箋、返答の候補（最大4つ）を構造化した JSON で返す。ボードは変えない | 「候補は提案であり、決めるのはチーム」（§1）と同じ。付箋の追加と段階の切り替えは、人がボタンを押したときだけ |
+| 付箋の案の検証と配置 | サーバーが core の `placeSuggestions` で、未知の種類・未知の付箋への配置・空の文を落とし、隣の付箋（または同じ返答の前の案）の横に、空いている場所を探して置く。`near_item_id` が空なら時系列の右端に置く。ボードの「AI に付箋を提案してもらう」（docs/11 §3）も同じ関数を使う | 空のボードから始められるようにし、「アクター → コマンド → イベント」の連なりを一度に提案できるようにする。案を受け入れると、続く案の矢印が新しい付箋につながる（`retargetGhosts`） |
+| 会話の保存先 | ブラウザの localStorage に、ボードごとに最新80件。毎回の要求で会話を送る | ボードの JSON に入れると、保存の上限・同時編集のマージ・正規化に会話が混ざる。共有に必要な段階とタイマーはすでにボードにある。チームで使うときは進行役の画面を共有する |
+| モデルと速さ | 提案と同じモデル（予測用の速いモデルではない）、effort は low | 問いかけの質には大きなモデルが要る。対話なので、深く考えさせて待たせるより短く返すことを優先する |
+| 上限 | 1回の会話は80件・1件6000字・新しいメッセージ2000字まで。AI のレート制限・待ち行列は他の AI 呼び出しと共通 | 1回の要求の大きさと費用を抑える |
+
+### 確かめたこと
+
+- サーバーのテストで、AI がオフなら 403、上限を超えると 413、未知の付箋への配置・未知の種類・いまと同じ段階・未知の段階が落ちることを確かめる。進行役に段階・チェック・会話・新しいメッセージが渡ることも確かめる。
+- プロンプトのテストで、会話が user / assistant の交互になること（同じ側の連続はまとめ、最初が進行役なら開始の行を足す）、ボードと段階が最後のメッセージに入ることを確かめる。
+- core のテストで配置（空のボード・連なり・場所の重なり）を、web のテストで連なった案をまとめて追加したときの矢印を確かめる。
+
+### 制限
+
+- 会話はほかの人の画面に出ない（ブラウザごと）。
+- 進行役は付箋の位置を細かく整えない（時系列の並べ替えは人が行う）。

@@ -141,7 +141,7 @@ describe("dev login (local first run)", () => {
   });
 
   test("auto is off for requests relayed by a reverse proxy, and the loopback AI default does not apply to them", async () => {
-    const app = createApp(openDatabase(":memory:"), { devLogin: "auto", loopback: true, assistant: { model: "m", inline: async () => "", propose: async () => undefined, board: async () => [] } });
+    const app = createApp(openDatabase(":memory:"), { devLogin: "auto", loopback: true, assistant: { model: "m", inline: async () => "", propose: async () => undefined, board: async () => [], facilitate: async () => undefined } });
     const proxied = { "x-forwarded-for": "203.0.113.9" };
     expect((await post(app, "/api/login", { username: "eve" }, proxied)).status).toBe(400);
     expect(((await (await app.request("/api/auth/config", { headers: proxied })).json()) as any).dev_login).toBe(false);
@@ -328,6 +328,11 @@ describe("AI gate, rate limits and queue", () => {
       this.calls++;
       if (this.error) throw this.error;
       return "";
+    }
+    async facilitate() {
+      this.calls++;
+      if (this.error) throw this.error;
+      return undefined;
     }
     async propose() {
       this.calls++;

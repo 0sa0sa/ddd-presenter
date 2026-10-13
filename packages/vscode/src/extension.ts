@@ -11,7 +11,16 @@ export function activate(context: ExtensionContext): void {
     debug: { module, transport: TransportKind.ipc, options: { execArgv: ["--nolazy", "--inspect=6009"] } },
   };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "ddd-yaml" }, { scheme: "untitled", language: "ddd-yaml" }],
+    documentSelector: [
+      { scheme: "file", language: "ddd-yaml" },
+      { scheme: "untitled", language: "ddd-yaml" },
+      // Multi-file models (docs/10 §12): the server validates them when a ddd.yaml is above them.
+      { scheme: "file", language: "ddd-domain" },
+      { scheme: "file", language: "ddd-flow" },
+      { scheme: "file", pattern: "**/*.proto" },
+      { scheme: "file", pattern: "**/ddd.yaml" },
+      { scheme: "file", pattern: "**/*.scenarios.yaml" },
+    ],
   };
   client = new LanguageClient("dddPresenter", "DDD Presenter", serverOptions, clientOptions);
   void client.start();

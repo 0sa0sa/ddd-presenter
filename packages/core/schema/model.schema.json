@@ -72,8 +72,28 @@
                   "enum": [
                     "tanstack-query"
                   ]
+                },
+                "connect": {
+                  "description": "Also serve the use cases and queries over the Connect protocol (unary, JSON), the rpcs of the model's .proto contract (default false).",
+                  "type": "boolean"
                 }
               }
+            }
+          }
+        },
+        "python": {
+          "description": "Settings of the Python target.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connect": {
+              "description": "Serve the use cases and queries over the Connect protocol as a WSGI application (generated/connect.py; default false).",
+              "type": "boolean"
+            },
+            "base_path": {
+              "description": "Path prefix of the Connect procedures (default /api; \"\" for none).",
+              "type": "string",
+              "pattern": "^(/[A-Za-z0-9._~-]+)*$"
             }
           }
         }

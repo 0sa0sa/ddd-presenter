@@ -164,6 +164,11 @@ export interface ApiSettings {
   basePath: string;
   /** Client library the generated client code targets. */
   client: ApiClientKind;
+  /**
+   * Also serve the use cases and queries over the Connect protocol (unary, JSON; `connect: true`): the rpcs of the
+   * model's .proto contract, in protobuf JSON (docs/09 §25).
+   */
+  connect?: boolean;
 }
 
 export interface GenerationSettings {
@@ -174,6 +179,8 @@ export interface GenerationSettings {
   target: GenerationTarget;
   /** Settings of the TypeScript target (`generation.typescript`). */
   typescript: { testRunner: TestRunner; api?: ApiSettings };
+  /** Settings of the Python target (`generation.python`): the Connect protocol as a WSGI app (docs/09 §25). */
+  python?: { connect: boolean; basePath: string };
 }
 
 interface Located {

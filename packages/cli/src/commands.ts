@@ -1,7 +1,25 @@
-import { coverageDiagnostics, formatDiagnostic, parseModel, ruleUsage, SCHEMA_VERSION, sortDiagnostics, toSnake, validateModelText, type Diagnostic, type GenerationTarget } from "@ddd/core";
+import {
+  coverageDiagnostics,
+  formatDiagnostic,
+  isModelSource,
+  MANIFEST_FILE,
+  modelSourceText,
+  parseModel,
+  ruleUsage,
+  SCHEMA_VERSION,
+  sortDiagnostics,
+  sourceKind,
+  splitModelText,
+  toSnake,
+  validateModelFiles,
+  validateModelText,
+  type Diagnostic,
+  type GenerationTarget,
+  type Path,
+} from "@ddd/core";
 import { computePlan, generate, GENERATOR_VERSION, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
-import { existsSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { atomicApply, readText, safeJoin, type WriteOp } from "./fsops.ts";
 import { SAMPLE_MODEL, SAMPLE_MODEL_TS } from "./sample.ts";
 
@@ -23,20 +41,92 @@ const paint = (io: Io, code: string, s: string) => (io.color ? `\x1b[${code}m${s
 
 export const EXIT = { ok: 0, failed: 1, usage: 2 } as const;
 
-function loadModel(io: Io, opts: CommonOpts) {
-  const path = resolve(opts.model);
-  const text = readText(path);
-  if (text === undefined) {
-    io.err(`Model file not found: ${opts.model}\nCreate one with "ddd init" or pass a path: ddd validate path/to/model.ddd.yaml`);
-    return undefined;
-  }
-  const result = validateModelText(text);
-  return { path, text, result, root: resolve(opts.out ?? dirname(path)) };
+/** Directories never searched for model sources (dependencies, virtual environments, caches, build output). */
+const SKIP_DIRS = new Set(["node_modules", "__pycache__", "dist", "build", "venv", "generated"]);
+const MAX_SOURCES = 2000;
+
+/** The model sources under a multi-file model's root (ddd.yaml, .domain, .flow, .scenarios.yaml, and the .proto files that declare a context), keyed by relative path. */
+export function collectSources(root: string): { files: Record<string, string>; error?: string } {
+  const files: Record<string, string> = {};
+  let count = 0;
+  let error: string | undefined;
+  const walk = (dir: string, depth: number) => {
+    if (depth > 8 || error) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs, depth + 1);
+      else if (entry.isFile() && sourceKind(entry.name)) {
+        const rel = relative(root, abs).split("\\").join("/");
+        // Only the root ddd.yaml is the project's; a nested one belongs to another project.
+        if (sourceKind(rel) === "manifest" && rel !== MANIFEST_FILE) continue;
+        const text = readText(abs) ?? "";
+        // Other .proto files (vendored, other services, buf dependencies) are not the model's.
+        if (!isModelSource(rel, text)) continue;
+        if (++count > MAX_SOURCES) {
+          error = `More than ${MAX_SOURCES} model sources under ${root}; is the model root (the directory with ${MANIFEST_FILE}) the right one?`;
+          return;
+        }
+        files[rel] = text;
+      }
+    }
+  };
+  walk(root, 0);
+  return { files, ...(error ? { error } : {}) };
 }
 
-function printDiagnostics(io: Io, diagnostics: Diagnostic[], file: string): void {
+/** Where the model is: a YAML file, or the root of a multi-file model (a directory with ddd.yaml, or ddd.yaml itself). */
+export function resolveModel(model: string): { kind: "yaml"; path: string } | { kind: "split"; root: string; path: string } | undefined {
+  const abs = resolve(model);
+  const isDir = (p: string) => existsSync(p) && statSync(p).isDirectory();
+  if (isDir(abs)) {
+    if (existsSync(join(abs, MANIFEST_FILE))) return { kind: "split", root: abs, path: join(abs, MANIFEST_FILE) };
+    if (existsSync(join(abs, "model.ddd.yaml"))) return { kind: "yaml", path: join(abs, "model.ddd.yaml") };
+    return undefined;
+  }
+  if (basename(abs) === MANIFEST_FILE) return existsSync(abs) ? { kind: "split", root: dirname(abs), path: abs } : undefined;
+  if (existsSync(abs)) return { kind: "yaml", path: abs };
+  // The default ./model.ddd.yaml is missing: a multi-file model in the current directory is the model then.
+  if (model === "model.ddd.yaml" && existsSync(resolve(MANIFEST_FILE))) return { kind: "split", root: resolve("."), path: resolve(MANIFEST_FILE) };
+  return undefined;
+}
+
+function loadModel(io: Io, opts: CommonOpts) {
+  const where = resolveModel(opts.model);
+  if (!where) {
+    io.err(`Model not found: ${opts.model}\nCreate one with "ddd init" or pass a path: ddd validate path/to/model.ddd.yaml (or a directory with ${MANIFEST_FILE})`);
+    return undefined;
+  }
+  if (where.kind === "split") {
+    const { files, error } = collectSources(where.root);
+    if (error) {
+      io.err(`✗ ${error}`);
+      return undefined;
+    }
+    const result = validateModelFiles(files);
+    const prefix = relative(process.cwd(), where.root);
+    return {
+      path: where.path,
+      text: modelSourceText(files),
+      result,
+      root: resolve(opts.out ?? where.root),
+      /** Shown before each diagnostic's own file (relative to the model root). */
+      label: prefix,
+      split: true as const,
+      locate: (p: Path) => result.parsed.locate(p),
+    };
+  }
+  const path = where.path;
+  const text = readText(path) ?? "";
+  const result = validateModelText(text);
+  return { path, text, result, root: resolve(opts.out ?? dirname(path)), label: basename(path), split: false as const, locate: (p: Path) => parseModel(text).locate(p) };
+}
+
+function printDiagnostics(io: Io, diagnostics: Diagnostic[], file: string, split = false): void {
   for (const d of diagnostics) {
-    const s = formatDiagnostic(d, file);
+    // Multi-file models: each diagnostic names its own source, relative to the model root (`file` is that root).
+    const own = split ? { ...d, file: d.file ? (file ? join(file, d.file) : d.file) : file || "ddd.yaml" } : d;
+    const s = formatDiagnostic(own, file);
     const color = d.severity === "error" ? "31" : d.severity === "warning" ? "33" : "36";
     io.err(s.replace(/: (error|warning|info) /, (m) => paint(io, color, m)));
   }
@@ -55,12 +145,12 @@ export function cmdValidate(io: Io, opts: CommonOpts & { strict: boolean }): num
   const { result } = m;
   // --strict also reviews coverage: rules no scenario tests, errors nothing raises, extension points nothing calls.
   const diagnostics =
-    opts.strict && result.analysis ? sortDiagnostics([...result.diagnostics, ...coverageDiagnostics(result.analysis, parseModel(m.text).locate)]) : result.diagnostics;
+    opts.strict && result.analysis ? sortDiagnostics([...result.diagnostics, ...coverageDiagnostics(result.analysis, m.locate)]) : result.diagnostics;
   const failed = !result.ok || (opts.strict && diagnostics.some((d) => d.severity === "warning"));
   if (opts.format === "json") {
     io.out(JSON.stringify({ ok: !failed, diagnostics }, null, 2));
   } else {
-    printDiagnostics(io, diagnostics, basename(m.path));
+    printDiagnostics(io, diagnostics, m.label, m.split);
     io.out(failed ? paint(io, "31", `✗ ${summary(diagnostics)}`) : paint(io, "32", `✓ Model is valid (${summary(diagnostics)})`));
   }
   return failed ? EXIT.failed : EXIT.ok;
@@ -91,7 +181,7 @@ function prepare(io: Io, opts: CommonOpts & { prune?: boolean; force?: boolean }
   const m = loadModel(io, opts);
   if (!m) return { ok: false as const, code: EXIT.usage };
   if (!m.result.ok || !m.result.analysis) {
-    printDiagnostics(io, m.result.diagnostics, basename(m.path));
+    printDiagnostics(io, m.result.diagnostics, m.label, m.split);
     io.err(paint(io, "31", `✗ Generation stopped: ${summary(m.result.diagnostics)}`));
     return { ok: false as const, code: EXIT.failed };
   }
@@ -295,13 +385,14 @@ export function cmdVersion(io: Io, format: "text" | "json"): number {
   return EXIT.ok;
 }
 
-export function cmdMigrate(io: Io, opts: CommonOpts & { write: boolean }): number {
+export function cmdMigrate(io: Io, opts: CommonOpts & { write: boolean; split?: boolean; force?: boolean }): number {
   const path = resolve(opts.model);
   const text = readText(path);
   if (text === undefined) {
     io.err(`Model file not found: ${opts.model}`);
     return EXIT.usage;
   }
+  if (opts.split) return migrateToSplit(io, path, text, opts);
   const v = /^schema_version:\s*(\d+)/m.exec(text)?.[1];
   const version = v ? Number(v) : undefined;
   if (version === SCHEMA_VERSION) {
@@ -318,13 +409,57 @@ export function cmdMigrate(io: Io, opts: CommonOpts & { write: boolean }): numbe
   return EXIT.failed;
 }
 
-export function cmdInit(io: Io, dir: string, language: GenerationTarget = "python"): number {
+/** `ddd migrate --split`: writes the multi-file format (docs/10 §12) next to the YAML model (or into --out). */
+function migrateToSplit(io: Io, path: string, text: string, opts: CommonOpts & { force?: boolean }): number {
+  const out = splitModelText(text);
+  if (!Object.keys(out.files).length) {
+    printDiagnostics(io, out.diagnostics, basename(path));
+    io.err(paint(io, "31", "✗ The YAML model has errors; fix them before converting it."));
+    return EXIT.failed;
+  }
+  const root = resolve(opts.out ?? dirname(path));
+  const existing = Object.keys(out.files).filter((p) => existsSync(join(root, p)));
+  if (existing.length && !opts.force) {
+    io.err(paint(io, "31", `✗ ${existing.length} file(s) already exist in ${root}: ${existing.slice(0, 5).join(", ")}${existing.length > 5 ? ", …" : ""}`));
+    io.err("Nothing was written. Pass --out <dir> to write somewhere else, or --force to overwrite them.");
+    return EXIT.failed;
+  }
+  atomicApply(root, Object.entries(out.files).map(([p, content]) => ({ path: p, content })));
+  // Check what was written reads back as the same model before telling anyone to switch.
+  const check = validateModelFiles(out.files);
+  for (const p of Object.keys(out.files).sort()) io.out(`${paint(io, "32", "+")} ${relative(process.cwd(), join(root, p))}`);
+  if (!check.ok) {
+    printDiagnostics(io, check.diagnostics, relative(process.cwd(), root), true);
+    io.err(paint(io, "33", "warning: the converted model has the diagnostics above (the YAML has them too)"));
+  }
+  const dir = relative(process.cwd(), root) || ".";
+  io.out(
+    paint(io, "32", `✓ Wrote ${Object.keys(out.files).length} file(s).`) +
+      `\n\nThe YAML model is unchanged. Once the multi-file model is the one you edit:\n  ddd validate ${dir}\n  ddd generate ${dir}   (updates the model hash in the generated manifest)\nthen delete ${relative(process.cwd(), path)}.`,
+  );
+  return EXIT.ok;
+}
+
+export function cmdInit(io: Io, dir: string, language: GenerationTarget = "python", split = false): number {
+  const sample = language === "typescript" ? SAMPLE_MODEL_TS : SAMPLE_MODEL;
+  if (split) {
+    const files = splitModelText(sample).files;
+    const existing = Object.keys(files).filter((p) => existsSync(join(resolve(dir), p)));
+    if (existing.length) {
+      io.err(`✗ ${join(resolve(dir), existing[0]!)} already exists`);
+      return EXIT.failed;
+    }
+    atomicApply(resolve(dir), Object.entries(files).map(([path, content]) => ({ path, content })));
+    const run = language === "typescript" ? `\n  npm install && npm test   (in ${dir}; or bun install && bun run test)` : "";
+    io.out(`✓ Created a multi-file model in ${resolve(dir)} (${Object.keys(files).length} files: ddd.yaml, .proto, .domain, .flow, .scenarios.yaml)\n\nNext steps:\n  ddd validate ${dir}\n  ddd diff ${dir}\n  ddd generate ${dir}${run}`);
+    return EXIT.ok;
+  }
   const target = join(resolve(dir), "model.ddd.yaml");
   if (existsSync(target)) {
     io.err(`✗ ${target} already exists`);
     return EXIT.failed;
   }
-  atomicApply(resolve(dir), [{ path: "model.ddd.yaml", content: language === "typescript" ? SAMPLE_MODEL_TS : SAMPLE_MODEL }]);
+  atomicApply(resolve(dir), [{ path: "model.ddd.yaml", content: sample }]);
   const model = join(dir, "model.ddd.yaml");
   const run = language === "typescript" ? `\n  npm install && npm test   (in ${dir}; or bun install && bun run test)` : "";
   io.out(`✓ Created ${target}\n\nNext steps:\n  ddd validate ${model}\n  ddd diff ${model}\n  ddd generate ${model}${run}`);
@@ -335,7 +470,7 @@ export function cmdRules(io: Io, opts: CommonOpts): number {
   const m = loadModel(io, opts);
   if (!m) return EXIT.usage;
   if (!m.result.analysis) {
-    printDiagnostics(io, m.result.diagnostics, basename(m.path));
+    printDiagnostics(io, m.result.diagnostics, m.label, m.split);
     return EXIT.failed;
   }
   const usage = ruleUsage(m.result.analysis);

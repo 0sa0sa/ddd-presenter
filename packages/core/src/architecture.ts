@@ -369,11 +369,27 @@ export function deriveArchitecture(model: ModelIR, analysis?: Analysis, options:
       label: "HTTP API",
       technology: t("TypeScript, Web-standard fetch handler, zod", "TypeScript・Web 標準の fetch ハンドラ・zod"),
       description: t(
-        `Contract, server routes and error mapping under ${model.generation.typescript.api!.basePath || "/"}.${sec ? " Authenticates, authorizes and rate limits every request." : ""}`,
-        `${model.generation.typescript.api!.basePath || "/"} 以下の契約・サーバーのルート・エラーの対応づけ。${sec ? "すべてのリクエストを認証・認可・レート制限する。" : ""}`,
+        `Contract, server routes and error mapping under ${model.generation.typescript.api!.basePath || "/"}.${sec ? " Authenticates, authorizes and rate limits every request." : ""}${model.generation.typescript.api!.connect ? " Also serves the protobuf contract (generated/proto) over the Connect protocol." : ""}`,
+        `${model.generation.typescript.api!.basePath || "/"} 以下の契約・サーバーのルート・エラーの対応づけ。${sec ? "すべてのリクエストを認証・認可・レート制限する。" : ""}${model.generation.typescript.api!.connect ? "protobuf の契約（generated/proto）を Connect プロトコルでも出す。" : ""}`,
       ),
       path: apiPath,
-      badges: [model.generation.typescript.api!.basePath || "/", jwt && "JWT", defaultRate && rateBadge(defaultRate), tenancy && "tenant"],
+      badges: [model.generation.typescript.api!.basePath || "/", model.generation.typescript.api!.connect && "Connect", jwt && "JWT", defaultRate && rateBadge(defaultRate), tenancy && "tenant"],
+      code: [{ area: "api" }],
+    });
+  }
+  const pyConnect = target === "python" && !!model.generation.python?.connect;
+  if (pyConnect) {
+    L2.add({
+      id: "ctr:connect",
+      kind: "container",
+      label: t("Connect API", "Connect API"),
+      technology: t("Python, WSGI application (Connect protocol, JSON and binary)", "Python・WSGI アプリ（Connect プロトコル、JSON とバイナリ）"),
+      description: t(
+        `The use cases and queries as the rpcs of the protobuf contract (generated/proto) under ${model.generation.python!.basePath || "/"}.`,
+        `${model.generation.python!.basePath || "/"} 以下で、Use case とクエリを protobuf の契約（generated/proto）の rpc として出す。`,
+      ),
+      path: ["generation", "python"],
+      badges: [model.generation.python!.basePath || "/", "Connect"],
       code: [{ area: "api" }],
     });
   }
@@ -481,13 +497,20 @@ export function deriveArchitecture(model: ModelIR, analysis?: Analysis, options:
   const entry = (ctxName: string) => (http ? "ctr:http-api" : `ctr:app:${ctxName}`);
   if (http) {
     for (const name of persons) L2.link(`person:${name}`, "ctr:web-client", t("uses", "使う"));
-    L2.link("ctr:web-client", "ctr:http-api", t("calls", "呼び出す"), { technology: jwt ? "HTTPS JSON, Bearer JWT" : "HTTPS JSON" });
+    const wire = model.generation.typescript.api!.connect ? "HTTPS JSON / Connect" : "HTTPS JSON";
+    L2.link("ctr:web-client", "ctr:http-api", t("calls", "呼び出す"), { technology: jwt ? `${wire}, Bearer JWT` : wire });
     if (jwt) L2.link("ctr:web-client", "ctr:idp", t("signs in, obtains JWT", "サインインして JWT を得る"), { technology: "OIDC" });
     if (sec) L2.link("ctr:http-api", "ctr:security", t("authenticates, authorizes, rate limits", "認証・認可・レート制限"));
   } else {
     for (const [name, a] of actors) if (a.external) for (const c of a.contexts) L2.link(`person:${name}`, entry(c), t("uses (in-process API)", "使う（プロセス内 API）"));
   }
   for (const r of sec?.platformRoles ?? []) for (const c of crossTenantContexts) L2.link(`role:${r.name}`, entry(c), t("operates across tenants", "テナントをまたいで操作"), { technology: "cross_tenant" });
+  if (pyConnect) {
+    if (sec) L2.link("ctr:connect", "ctr:security", t("authenticates, rate limits", "認証・レート制限"), { technology: t("in-process call", "プロセス内呼び出し") });
+    for (const ctx of model.contexts) {
+      if (ctx.useCases.some(servedOverHttp) || ctx.queries.length) L2.link("ctr:connect", `ctr:app:${ctx.name}`, t("runs use cases and queries", "ユースケース・クエリを実行"), { technology: t("in-process call", "プロセス内呼び出し") });
+    }
+  }
   for (const ctx of model.contexts) {
     const app = `ctr:app:${ctx.name}`;
     if (http && (ctx.useCases.some(servedOverHttp) || ctx.aggregates.length)) L2.link("ctr:http-api", app, t("runs use cases and queries", "ユースケース・クエリを実行"), { technology: t("in-process call", "プロセス内呼び出し") });

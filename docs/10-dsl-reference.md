@@ -1,6 +1,6 @@
 # 10. Model DSL Reference (schema_version 1)
 
-モデルは `*.ddd.yaml` に書く。構造は [JSON Schema](../packages/core/schema/model.schema.json) で公開し、意味（参照・型・Rule式・シナリオの完全性）は `ddd validate` が検査する。完全な例は [examples/cleaning-platform/model.ddd.yaml](../examples/cleaning-platform/model.ddd.yaml)。
+モデルは `*.ddd.yaml` に書く（または §12 の複数ファイル形式: `ddd.yaml` と `.proto` / `.domain` / `.flow` / `.scenarios.yaml`）。構造は [JSON Schema](../packages/core/schema/model.schema.json) で公開し、意味（参照・型・Rule式・シナリオの完全性）は `ddd validate` が検査する。完全な例は [examples/cleaning-platform/model.ddd.yaml](../examples/cleaning-platform/model.ddd.yaml)。
 
 ## 1. ファイルの骨格
 
@@ -73,12 +73,26 @@ generation:
     api:
       base_path: /api               # 既定 /api。/ で始め、末尾に / を付けない（/api/v1 など）。接頭辞なしは ""
       client: tanstack-query        # 既定・唯一の値（@tanstack/react-query v5.102 以上）
+      connect: true                 # 任意（既定 false）。同じ Use case とクエリを Connect プロトコルでも出す（下記）
 ```
 
 | キー | 値 | 検査 |
 |---|---|---|
 | `base_path` | `/` で始まり末尾に `/` のないパス（`/api`, `/api/v1`）か `""` | 形が違えば `invalid-value` |
 | `client` | `tanstack-query` | ほかの値は `invalid-value` |
+| `connect` | `true` / `false` | 真偽値でなければ `invalid-shape` |
+
+**`connect: true`（Connect プロトコル、docs/09 §25）:** モデルの protobuf の契約（§12 の `.proto` と同じもの）を `src/<package>/generated/proto/` に書き、その rpc を Connect プロトコル（unary。protobuf JSON とバイナリの両方の codec）で出す。
+
+- `generated/api/connect.ts` の `createConnectHandler(dependencies, options)` は `createApiHandler` と同じ引数を取る。`POST <base_path>/<package>.<Service>/<Method>`（例 `/api/cleaning_staff.v1.CleaningStaffService/IssueInvitation`）に protobuf JSON（`application/json`）またはバイナリ（`application/proto`）を受け、各呼び出しをその rpc の HTTP API のエンドポイントに通す。認証・認可・レート制限・検証は HTTP API と同じになる。応答は要求と同じ codec で返す。
+- クエリは副作用のない rpc なので `GET …?encoding=json|proto&message=…` でも呼べる。
+- 応答は protobuf JSON。enum は値の名前（`INVITATION_STATUS_PENDING`）、`Integer` は文字列、`DateTime` は Timestamp（RFC 3339）、値オブジェクトは入れ子のメッセージ、省略できるフィールドは値がなければ出さない。
+- エラーは Connect のエラーコード（400 → `invalid_argument`、401 → `unauthenticated`、403 → `permission_denied`、404 → `not_found`、409 / 422 → `failed_precondition`（楽観ロックの衝突は `aborted`）、429 → `resource_exhausted`）。ドメインのエラーコードは応答ヘッダー `ddd-error-code` に入る。
+- クライアント:
+  - 生成する `generated/api/connect-client.ts` の `createConnectClient(options)` は、`createApiClient` と同じ型付きのクライアント（同じメソッド・スキーマ・ドメインのエラーのクラス・TanStack Query のオプション）。通信だけが Connect になる（`binary: true` でバイナリ）。rpc のない呼び出し（集約を識別子で読む `GET …/:id`）は HTTP API のまま。
+  - ほかの言語や公式のクライアントは、`generated/proto/` から buf と protoc-gen-es などで作る（`@connectrpc/connect-web` で JSON・バイナリの両方を確かめている）。
+- ストリーミングの rpc はモデルにないので生成しない（rpc はすべて unary）。内部用の Use case（`authorize: internal`）は rpc として宣言されるが、エンドポイントがないので `unimplemented` になる。
+- テスト `tests/generated/connect.test.ts` も生成する（両方の codec での往復、プロトコルの境界、エラーコード）。Python target は §1.3。
 
 生成するもの（詳細と規約は docs/05 §8、設計の理由は docs/09 §18）:
 
@@ -87,6 +101,32 @@ generation:
 - エンドポイント: Use case ごとに `POST <base_path>/<context>/<use-case>`（入力はコマンドのスキーマ、出力は Use case の戻り値。戻り値がなければ 204）、Aggregate ごとに `GET <base_path>/<context>/<aggregate>/:id`（Aggregate の JSON 形）、クエリ（§10）ごとに `GET <base_path>/<context>/queries/<query>?…`（1ページ分の `{ items, nextCursor }`）。パスの名前は kebab-case（`/api/cleaning-staff/accept-invitation`）。クエリは `generated/api/query-runtime.ts` と、Aggregate のクエリファクトリの `infiniteQueryOptions`（キーは `lists()` の下）になる。
 - テスト `tests/generated/<context>-api.test.ts`（ネットワークも DOM も使わず、クライアントの `fetch` を生成したハンドラにつなぐ）。
 - 依存: 新しく作る `package.json` には `@tanstack/react-query`・`react`（dependencies）と `@types/react`（devDependencies）が入る。既存のプロジェクトの `package.json` は顧客所有なので書き換えない。手で足す（docs/05 §8 の移行メモ）。
+
+### 1.3 Connect の WSGI アプリ（Python, `generation.python`）
+
+Python target だけのオプトイン。
+
+```yaml
+generation:
+  python: { connect: true, base_path: /api }   # base_path の既定は /api（接頭辞なしは ""）
+```
+
+| キー | 値 | 検査 |
+|---|---|---|
+| `connect` | `true` / `false` | 真偽値でなければ `invalid-shape` |
+| `base_path` | `/` で始まり末尾に `/` のないパスか `""` | 形が違えば `invalid-value` |
+
+生成するもの（設計の理由は docs/09 §25）:
+
+- `src/<package>/generated/proto/`: §1.2 と同じ protobuf の契約。
+- `generated/_connect.py`: モデルに依存しない部分。protobuf JSON とバイナリの変換、手続きの表、Connect のエラー、WSGI アプリ。依存は Pydantic と標準ライブラリだけ。
+- `generated/connect.py`: `create_connect_app(services, *, authenticate=…, rate_limiter=…, on_error=…)`。
+  - Use case とクエリを rpc として出す WSGI アプリで、`wsgiref`・gunicorn・Flask・Django に載せられる。
+  - `services` は Use case 名・クエリ名から、そのサービス（`execute` を持つもの）への対応。渡さない rpc は `unimplemented` になる。
+  - `authenticate` は Authorization ヘッダーの値から principal を作る関数（`BearerJwtAuthenticator(...).authenticate` をそのまま渡せる）。
+  - レート制限は `RATE_LIMITS` に従う。
+  - 要求は rpc のコマンド（クエリは入力）のモデルで検証する。エラーの対応は TypeScript と同じ。
+- テスト `tests/generated/test_connect.py`。
 
 ## 2. 型
 
@@ -768,3 +808,264 @@ scenarios:
 ```
 
 生成テストは、テナントの中の Use case に「テナントのないトークンは何も読む前に `Unauthenticated`」「最初の成功したシナリオを別テナントで実行すると not found」を、`cross_tenant` の Use case に「テナントのロールだけではテナントをまたげない」を足す。ほかに `rbac.test.ts` / `test_security.py`（権限の解決と継承・スコープごとの判定）、テナントに縛られたリポジトリ・クエリ・カーソル・ポリシー・HTTP（401・403・テナントごとのレート制限）のテストを生成する。
+
+## 12. 複数ファイル形式（`.proto` / `.domain` / `.flow`）
+
+YAML の1ファイルの代わりに、層ごとのファイルにモデルを書ける。読み込むと YAML と同じ内部表現になるので、検証・生成されるコード・`ddd` の各コマンドは同じ（生成テストでも、サンプルのモデルすべてで同じコードになることを確かめている）。決定の経緯は docs/09 §24。
+
+| ファイル | 中身 | 層 |
+|---|---|---|
+| `ddd.yaml` | プロジェクトの設定（`schema_version` `project` `description` `generation` `security` `relationships`）と、コンテキストの一覧 `contexts: [Ordering, Billing]`（この順に並ぶ） | — |
+| `<context>/v1/<context>.proto` | データの形と契約: エラー、enum、値オブジェクトと集約のフィールド、Use case とクエリの rpc と入力、認可（権限）、レート制限 | 契約 |
+| `<context>.domain` | 集約の規則: 不変条件、状態ガード、ファクトリ、操作、エンティティの不変条件、Extension point、用語集 | ドメイン層 |
+| `<context>.flow` | Use case の手順、読み込んだ後の認可、クエリの絞り込み・検索・並び順、ポリシー | アプリケーション層 |
+| `<context>.scenarios.yaml` | シナリオ（生成テスト）。中身は YAML 形式の `scenarios:` と同じ | テスト |
+| `ddd/v1/options.proto`, `buf.yaml` | `.proto` が使うオプションの定義と buf の設定（`ddd migrate --split` が書く。`buf.yaml` は lint を STANDARD、`ddd/` を lint しない、breaking を WIRE_JSON にする） | — |
+
+`ddd.yaml` のあるディレクトリがモデルの根で、その下のファイルを（`node_modules`・`.` で始まるディレクトリ・`generated` などを除いて）すべて読む。`option (ddd.v1.context)` のない `.proto`（ほかのサービスや依存先の proto）はモデルの一部ではないので読まない（ハッシュにも入らない）。`.domain` / `.flow` / `.scenarios.yaml` は1行目の `context <Name>`（YAML は `context:`）で、`.proto` は `option (ddd.v1.context)` でコンテキストを決める。ファイル名と置き場所は自由（`ddd migrate --split` は `.proto` を buf の流儀どおりパッケージのディレクトリ `cleaning_staff/v1/` に置く）。1つのコンテキストに `.proto` は1つ、`.domain` / `.flow` / `.scenarios.yaml` は複数に分けてよい（パスの順に読む）。
+
+### 12.1 説明とコメント
+
+宣言のすぐ上（空行を挟まない）のコメントが、その宣言の説明（YAML の `description`）になる。protobuf と同じ規則。空行を挟んだコメントはただのコメント。
+
+```proto
+// 招待先のメールアドレス        ← EmailAddress の説明
+message EmailAddress { ... }
+
+// ただのメモ（空行があるので説明ではない）
+
+message Invitation { ... }
+```
+
+説明を書く場所は宣言のある1か所だけ。エラー・enum・値オブジェクト・集約・フィールド・Use case とクエリ（rpc）は `.proto`、不変条件・ガード・ファクトリ・操作・Extension point は `.domain`、ポリシーは `.flow`。`.domain` の `aggregate X {` と `.flow` の `flow` / `query` の上のコメントは説明にならない（説明は `.proto` 側）。
+
+### 12.2 `.proto`
+
+proto3 そのもの（`buf build` / `buf lint` / `buf breaking` が読める）。モデルの意味は `ddd.v1` のオプションで付ける。
+
+```proto
+syntax = "proto3";
+package ordering.v1;
+import "ddd/v1/options.proto";
+import "google/protobuf/timestamp.proto";
+
+option (ddd.v1.context) = { name: "Ordering" subdomain: CORE };
+
+// The order was not found.
+message OrderNotFound {
+  option (ddd.v1.error) = { code: "order_not_found" message: "No such order" };
+}
+
+message OrderClosed {
+  option (ddd.v1.error) = { code: "order_closed" message: "The order is closed" };
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_OPEN = 1;
+  ORDER_STATUS_PLACED = 2;
+}
+
+// An order
+message Order {
+  option (ddd.v1.aggregate) = { identity: "id" authorize { authenticated: true } };
+  string id = 1 [(ddd.v1.type) = UUID];
+  OrderStatus status = 2;
+  // When it was placed.
+  optional google.protobuf.Timestamp placed_at = 3;
+  repeated string tags = 4 [(ddd.v1.rules) = { max_items: 5 }];
+}
+
+service OrderingService {
+  // Opens an order.
+  rpc OpenOrder(OpenOrderRequest) returns (OpenOrderResponse) {
+    option (ddd.v1.authorize) = { roles: ["clerk"] };
+  }
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse) {
+    option (ddd.v1.use_case) = { actor: "Clerk" };
+    option (ddd.v1.authorize) = { roles: ["clerk"] };
+    option (ddd.v1.rate_limit) = { requests: 10 per: MINUTE by: PRINCIPAL };
+  }
+}
+
+message OpenOrderRequest {}
+message OpenOrderResponse {
+  string result = 1 [(ddd.v1.type) = UUID];
+}
+message PlaceOrderRequest {
+  string order_id = 1 [(ddd.v1.type) = UUID];
+  google.protobuf.Timestamp at = 2;
+}
+message PlaceOrderResponse {
+  bool result = 1;
+}
+```
+
+**宣言**
+
+| モデル | `.proto` |
+|---|---|
+| エラー | `message` + `option (ddd.v1.error) = { code message }`。フィールドが `details` |
+| enum | `enum`。値は `<ENUM名の大文字スネーク>_` を外して小文字にしたもの（`ORDER_STATUS_ON_HOLD` → `on_hold`）。番号 0 の値は読まない（buf lint が求める `_UNSPECIFIED`）。それ以外の名前は `[(ddd.v1.value) = "x"]` |
+| 値オブジェクト | `message` + `option (ddd.v1.value_object) = { normalize { field: "value" steps: [STRIP, LOWER] } }`（`normalize` がなければ `{}`） |
+| 集約 | `message` + `option (ddd.v1.aggregate) = { identity: "id" tenancy: TENANCY_GLOBAL authorize { ... } rate_limit { ... } }` |
+| エンティティ | 集約の中の入れ子の `message` + `option (ddd.v1.entity) = { identity: "line_id" }` |
+| Use case | `service` の `rpc`。rpc 名が `command`、名前は rpc 名のスネークケース（違うときは `(ddd.v1.use_case) = { name: "x" }`）。入力は request のフィールド。`(ddd.v1.use_case)` に `actor` `transaction: NONE` `idempotency_key` `retry: true` |
+| クエリ | `rpc` + `option idempotency_level = NO_SIDE_EFFECTS;`。パラメータは request のフィールド（`optional` が省略可、つけないと `required: true`）。検索語（`search` の名前）・`limit`・`cursor` も request に置くが、パラメータには数えない |
+| 認可 | `(ddd.v1.authorize) = { public: true }` / `{ internal: true }` / `{ authenticated: true }` / `{ roles: [...] permissions: [...] cross_tenant: true }`。`allow_if` の規則は `.domain` / `.flow` の `authorize` 文 |
+| レート制限 | `(ddd.v1.rate_limit) = { requests: 10 per: MINUTE by: TENANT }`、既定から外すのは `{ none: true }` |
+
+response の `message` は契約（ConnectRPC などで使う形）として書くもので、モデルは読まない（戻り値の型は手順の `return` から決まる）。`ddd migrate --split` は戻り値の型から書く。
+
+**型**
+
+| モデルの型 | `.proto` |
+|---|---|
+| `String` / `Integer` / `Boolean` | `string` / `int64`（`int32` なども可） / `bool` |
+| `UUID` / `Decimal` / `Date` | `string [(ddd.v1.type) = UUID]` / `DECIMAL` / `DATE` |
+| `DateTime` | `google.protobuf.Timestamp` |
+| `Ref[Order]` | `string [(ddd.v1.ref) = "Order"]` |
+| `List[X]` | `repeated X` |
+| `required: false` | `optional`（`repeated` は `[(ddd.v1.optional_list) = true]`） |
+| 値オブジェクト・enum・エンティティ | その名前（集約の外からエンティティを指すときは `Order.OrderLine`） |
+| それ以外（`Optional[String]` など） | `string [(ddd.v1.type_expr) = "Optional[String]"]` |
+| `constraints` | `[(ddd.v1.rules) = { min_length: 3 max_length: 254 pattern: "..." }]`（キーは YAML と同じ） |
+
+`double` / `float` / `bytes` にはモデルの型がないのでエラー。`oneof` `map` `stream` も使えない。
+
+### 12.3 `.domain`
+
+```ddd-domain
+context Ordering
+
+glossary {
+  "Order": "A customer's request for goods"
+}
+
+// Whether the customer may order (implemented by hand).
+extension credit_ok(customer: String) -> Boolean default true
+
+aggregate Order {
+  // Placed orders know when.
+  invariant placed_has_time: status != placed or placed_at != null else OrderClosed
+
+  guard is_open: status == open else OrderClosed
+
+  // Opens an order.
+  factory open(id: UUID) {
+    new { id, status: open, tags: [] }
+    emit OrderOpened { id }
+  }
+
+  operation place(at: DateTime) requires is_open {
+    change { status: placed, placed_at: at }
+    emit OrderPlaced { id, at }
+  }
+}
+```
+
+| 文 | 意味（YAML） |
+|---|---|
+| `invariant <name>: <規則> else <Error> [on construct]` | `invariants`。`on construct` / `on transition` / `on construct, transition`（既定、書かない）/ `on none` が `check_on` |
+| `guard <name>[(<引数>)]: <条件> else <Error>` | `state_guards` |
+| `factory <name>(<引数>) [requires <ガード>, ...] { new { ... } emit ... }` | `factories`（`new` が `fields`） |
+| `operation <name>(<引数>) [requires ...] { change { ... } emit ... }` | `operations`（`change` が `changes`） |
+| `emit <Event> { a, b: <式> } [when <条件>]` | `emits`。`a` だけならパラメータかフィールドの値、`b: 式` は計算した値 |
+| `new` / `change` の `{ id, status: open }` | `id` だけは `id: id` と同じ |
+| `<name>: <型>?` | 省略できる引数（`required: false`） |
+| `entity <Name> { invariant ... }` | エンティティの不変条件（集約の中に書く） |
+| `value <Name> { invariant ... }` | 値オブジェクトの不変条件 |
+| `authorize <規則>` | 集約を識別子で読むときの `allow_if` |
+| `extension <name>(<引数>) -> <型> [default <値>]` | `extension_points`（`default` が `test_default`。値は YAML の書き方） |
+
+規則・条件・値はすべて §4 の Rule 式で、YAML に書くのと同じ文字列としてそのまま検査される（`and` / `or` / `not`、enum の値は小文字のまま）。式は行の終わりで終わる。長い式は括弧の中で改行できる。`requires a,` のように `,`（`where` では `and`）で終わる行は、次の行に続く。
+
+### 12.4 `.flow`
+
+```ddd-flow
+context Ordering
+
+flow open_order() {
+  let order = Order.open(id: ids.new)
+  save order
+  return order.id
+}
+
+flow place_order(order_id, at) {
+  let order = load Order(order_id) else fail OrderNotFound
+  if order.status == placed {
+    return false
+  } else if order.status == open {
+    order.place(at: at)
+  } else {
+    fail OrderClosed
+  }
+  save order
+  publish OrderPlaced after commit
+  return true
+}
+```
+
+| 文 | YAML の手順 |
+|---|---|
+| `flow <name>(<入力の名前>, ...) { ... }` | Use case の `steps`。括弧の中は rpc の request のフィールド名（型は `.proto`）。過不足はエラー |
+| `let x = load Order(<識別子>) [else fail <Error>]` | `load`（`else fail` が `not_found`） |
+| `let x = Order.open(id: <式>, ...)` | `create`（`Order` が集約のとき。そうでなければ `let`） |
+| `x.place(at: <式>)` | `invoke` |
+| `let total = <式>` | `let` |
+| `save x` / `publish E` / `publish E after commit` | `save` / `publish` / `publish_after_commit` |
+| `if <条件> { ... } else if ... { ... } else { ... }`、`if <条件> fail <Error>` | `if` |
+| `fail <Error>` / `return <式>` | `fail` / `return` |
+| `authorize <規則>` | `authorize.allow_if`（flow の一番外側に1つ。読み込んだ集約を参照できる） |
+
+クエリとポリシー:
+
+```ddd-flow
+query search_invitations(status, created_after) from Invitation {
+  authorize principal.email != null
+  where status == :status
+  where created_at > :created_after
+  where company_id == principal.company_id
+  where archived == false
+  search q on email.value, name trigram >= 0.4
+  order by relevance, created_at desc
+  page 20 max 100
+  returns id, email, status
+}
+
+// Registers the staff member when an invitation is accepted.
+policy register_staff_on_acceptance on CleaningStaff.InvitationAccepted {
+  run register_staff(invitation_id: event.id, joined_at: event.at)
+}
+```
+
+`where` の右辺は `:パラメータ`、`principal.<メンバー>`、リテラル（YAML の書き方）のどれか。`where a == :x and b > :y` と1行にも書ける。`search <パラメータ> on <フィールド>, ... <trigram|prefix|exact> [>= 類似度]`、`order by` の向きは `relevance` が `desc`、それ以外が `asc` のとき省略できる。`page` を書かなければ 20 件・最大 100 件。
+
+### 12.5 シナリオ（`.scenarios.yaml`）
+
+```yaml
+context: Ordering
+aggregates:
+  Order:
+    - name: an_open_order_can_be_placed
+      given: { aggregate: { id: "00000000-0000-0000-0000-000000000001", status: open, tags: [] } }
+      when: { operation: place, args: { at: "2026-01-01T10:00:00+00:00" } }
+      then: { state: { status: placed } }
+use_cases:
+  open_order:
+    - name: opens
+      given: { ids: ["00000000-0000-0000-0000-0000000000aa"] }
+      when: { input: {} }
+      then: { returns: "00000000-0000-0000-0000-0000000000aa" }
+```
+
+各シナリオの書き方は §7（Use case・集約）と §10（クエリ）と同じ。存在しない集約・Use case・クエリの名前はエラー。
+
+### 12.6 コマンドとエディタ
+
+- `ddd init <dir> --split`: サンプルを複数ファイル形式で作る。
+- `ddd migrate model.ddd.yaml --split [--out dir]`: YAML を複数ファイル形式に書き出す（YAML は残す。設定とシナリオの YAML コメントは残り、ほかのコメントは説明と区別された `//` コメントになる）。書いた結果を読み戻して検証してから終わる。
+- `ddd validate|diff|generate|rules <dir>`（または `<dir>/ddd.yaml`）: `ddd.yaml` があればそのディレクトリを複数ファイル形式として読む。引数がなく `./model.ddd.yaml` もなければ `./ddd.yaml` を読む。診断はファイル名と行で出る（`ordering.flow:12:7: error [...]`）。
+- 生成されたマニフェストの `model_sha256` は、すべてのソースをパスの順につないだものの値。YAML から移ると、生成コードは同じでもマニフェストだけ1回更新される。
+- VS Code 拡張機能: `.domain` / `.flow` の色付け、プロジェクト全体の診断（開いていない `.proto` の誤りも、そのファイルに出る）、名前の補完・ホバー・定義へ移動（別のファイルにも飛ぶ）、名前の一括変更（F2。エラー・enum・値オブジェクト・集約・エンティティ・イベント・ガード・ファクトリ・操作・Extension point。すべてのファイルを書き換え、新しいエラーが出るなら変更しない。enum は `.proto` の値の接頭辞も変える）。
+- Web: モデルのタブの「複数ファイル形式…」で、ファイルごとに見て・編集して（入力のたびに検証）、YAML に変換してモデルに反映できる。ZIP の書き出しと、ZIP・ファイル・フォルダの読み込みもできる。保存されるのは YAML（説明でないコメントは残らない）。

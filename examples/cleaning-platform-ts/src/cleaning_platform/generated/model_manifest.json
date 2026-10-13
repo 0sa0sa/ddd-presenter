@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "5686d1e85a4e7bbcac2c131aa513b19cbac1c955cda11202bc06e5765eaad779",
+  "model_sha256": "d2462ef0611f20a0a9d7024ccb1b768d6767d8b7f230214860ac0515a4094b18",
   "files": [
     {
       "path": "sql/cleaning_staff.sql",
@@ -20,6 +20,22 @@
     {
       "path": "src/cleaning_platform/generated/api/client.ts",
       "sha256": "7826e38d22dc0d8b0d005962ae0c780bca139861e5bfe99b684c7b243027acc3"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/connect-client.ts",
+      "sha256": "4cc58752308cc263193b7370d6f3372b45026d64e7c5ad112745fd280df317bd"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/connect-runtime.ts",
+      "sha256": "c5e74f24a78e620280a2234b23ef1853d2014dde57ba9ea3ce85ee42aaab1240"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/connect-schema.ts",
+      "sha256": "bd087621193f87256ea3dcc52e2311be04e680d715945886165e13005f593757"
+    },
+    {
+      "path": "src/cleaning_platform/generated/api/connect.ts",
+      "sha256": "96d79b64d816b35a9eb25e5d88aaad90b133b29c48c03914fc982654d5be6d1a"
     },
     {
       "path": "src/cleaning_platform/generated/api/contract.ts",
@@ -51,7 +67,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/ARCHITECTURE.md",
-      "sha256": "8aa094c5bf80f741c391bb26528237508b14a0383dd37408d3bbf04f9ccb5ce0"
+      "sha256": "7ff4a339f95c41f6aa11fdf720382da0a54926a160b1bee32cb9c8482bd0a400"
     },
     {
       "path": "src/cleaning_platform/generated/cleaning-staff/api/contract.ts",
@@ -136,6 +152,22 @@
     {
       "path": "src/cleaning_platform/generated/persistence.ts",
       "sha256": "f11ba32dd3f6500edecfe603567310875b98a7c2f38813e2011aa0b8fe11bb31"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/buf.yaml",
+      "sha256": "a43e2b707b6b251b2f6f92ca1c551e2ecdd2a5943bcfaeae688126187f929da1"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/cleaning_staff/v1/cleaning_staff.proto",
+      "sha256": "96912a7c562b697ef8f312f51991f8d36d6717544f5a74fad5d38a4044bc01dd"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/ddd/v1/options.proto",
+      "sha256": "1b25855b6e993594855ce835bfd15f20017560f131e2b75fab289d89e8a37c4b"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/staffing/v1/staffing.proto",
+      "sha256": "1f62b4c1738cc53326c985a0cf9b7294b2755ff091966e985b821c47e48b785c"
     },
     {
       "path": "src/cleaning_platform/generated/runtime.ts",
@@ -252,6 +284,10 @@
     {
       "path": "tests/generated/cleaning-staff-search-invitations.test.ts",
       "sha256": "d36321e5ab4e85c462c53ed11e5f37a4e6066dfb0eecee2b46fe8313bdbc329f"
+    },
+    {
+      "path": "tests/generated/connect.test.ts",
+      "sha256": "493d43801465d5814176ac39daee6bfe71a4c8c01e637b20e16783ba11f7cd4d"
     },
     {
       "path": "tests/generated/rbac.test.ts",

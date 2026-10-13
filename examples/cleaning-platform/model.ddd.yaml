@@ -5,6 +5,8 @@ generation:
   package: cleaning_platform
   src_dir: src
   tests_dir: tests
+  # Connect（docs/09 §25）: generated/connect.py の WSGI アプリで Use case とクエリを protobuf の契約どおりに出す
+  python: { connect: true, base_path: /api }
 
 # 認証・認可・レート制限（docs/09 §20）。宣言すると、すべての Use case と Aggregate に authorize が必要（既定は拒否）
 security:

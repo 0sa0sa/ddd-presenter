@@ -77,6 +77,7 @@ flowchart TB
     n_ctr_app_Staffing["<b>Staffing application</b><br/>[Python]"]
     n_ctr_domain_Staffing["<b>Staffing domain</b><br/>[Python, Pydantic v2]<br/><small>tenant</small>"]
   end
+  n_ctr_connect["<b>Connect API</b><br/>[Python, WSGI application (Connect protocol, JSON and binary)]<br/><small>/api · Connect</small>"]
   n_ctr_security["<b>Security</b><br/>[Python, PyJWT]<br/><small>JWT · RBAC · tenant: org_id · rate 60/min by tenant · platform roles</small>"]
   n_person_65c6ef(["<b>清掃会社の管理者</b>"])
   n_person_3cec76(["<b>スタッフ候補</b>"])
@@ -90,6 +91,8 @@ flowchart TB
   n_person_3cec76 -->|"uses (in-process API)"| n_ctr_app_CleaningStaff
   n_person_1258c9 -->|"uses (in-process API)"| n_ctr_app_CleaningStaff
   n_role_operator -->|"operates across tenants<br/>[cross_tenant]"| n_ctr_app_CleaningStaff
+  n_ctr_connect -->|"authenticates, rate limits<br/>[in-process call]"| n_ctr_security
+  n_ctr_connect -->|"runs use cases and queries<br/>[in-process call]"| n_ctr_app_CleaningStaff
   n_ctr_app_CleaningStaff -->|"loads, changes, saves aggregates<br/>[in-process call]"| n_ctr_domain_CleaningStaff
   n_ctr_app_CleaningStaff -->|"authorizes<br/>[in-process call]"| n_ctr_security
   n_ctr_app_CleaningStaff -->|"reads and writes<br/>[SQL, tenant_id filter + RLS (app.tenant_id)]"| n_ctr_postgres
@@ -108,7 +111,7 @@ flowchart TB
   classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
   classDef port fill:#e8f1fb,stroke:#5d82a8,color:#000
   classDef adapter fill:#f4f4f4,stroke:#8a8a8a,color:#000,stroke-dasharray:4 3
-  class n_ctr_security,n_ctr_app_CleaningStaff,n_ctr_domain_CleaningStaff,n_ctr_app_Staffing,n_ctr_domain_Staffing,n_ctr_events container
+  class n_ctr_connect,n_ctr_security,n_ctr_app_CleaningStaff,n_ctr_domain_CleaningStaff,n_ctr_app_Staffing,n_ctr_domain_Staffing,n_ctr_events container
   class n_person_65c6ef,n_person_3cec76,n_person_1258c9 person
   class n_role_operator role
   class n_ctr_postgres database
@@ -117,6 +120,7 @@ flowchart TB
 
 | Element | Kind | Technology | Description | Badges |
 |---|---|---|---|---|
+| Connect API | Container | Python, WSGI application (Connect protocol, JSON and binary) | The use cases and queries as the rpcs of the protobuf contract (generated/proto) under /api. | `/api` `Connect` |
 | Security | Container | Python, PyJWT | Principal, roles and permissions, authorization checks, rate limiting, tenant context, bearer JWT authenticator. | `JWT` `RBAC` `tenant: org_id` `rate 60/min by tenant` `platform roles` |
 | 清掃会社の管理者 | Person | — | — | — |
 | スタッフ候補 | Person | — | — | — |
@@ -137,6 +141,8 @@ flowchart TB
 | スタッフ候補 | CleaningStaff application | uses (in-process API) | — |
 | 運用担当 | CleaningStaff application | uses (in-process API) | — |
 | operator | CleaningStaff application | operates across tenants | cross_tenant |
+| Connect API | Security | authenticates, rate limits | in-process call |
+| Connect API | CleaningStaff application | runs use cases and queries | in-process call |
 | CleaningStaff application | CleaningStaff domain | loads, changes, saves aggregates | in-process call |
 | CleaningStaff application | Security | authorizes | in-process call |
 | CleaningStaff application | PostgreSQL | reads and writes | SQL, tenant_id filter + RLS (app.tenant_id) |

@@ -268,3 +268,76 @@ describe("pruning removes directories it leaves empty", () => {
     }
   });
 });
+
+describe("ddd CLI: multi-file models (docs/10 §12)", () => {
+  test("migrate --split → validate → generate leaves the generated code as it was", () => {
+    const { dir, model } = project();
+    expect(cli(["generate", model]).code).toBe(0);
+    const split = cli(["migrate", model, "--split"]);
+    expect(split.code).toBe(0);
+    for (const f of ["ddd.yaml", "cleaning_staff/v1/cleaning_staff.proto", "cleaning_staff.domain", "cleaning_staff.flow", "cleaning_staff.scenarios.yaml", "ddd/v1/options.proto", "buf.yaml"]) {
+      expect(existsSync(join(dir, f))).toBe(true);
+    }
+    // A second run refuses to overwrite.
+    expect(cli(["migrate", model, "--split"]).code).toBe(1);
+
+    const { rmSync } = require("node:fs") as typeof import("node:fs");
+    rmSync(model);
+    expect(cli(["validate", dir]).code).toBe(0);
+    expect(cli(["validate", join(dir, "ddd.yaml")]).code).toBe(0);
+    // Same model, so only the model hash of the generated manifest changes.
+    const d = cli(["diff", dir]);
+    expect(d.out).toContain("0 to create, 1 to update");
+    expect(d.out).toContain("model_manifest.json");
+    expect(cli(["generate", dir]).code).toBe(0);
+    expect(cli(["diff", dir, "--check"]).code).toBe(0);
+    expect(cli(["validate", dir, "--strict"]).code).toBe(0);
+  });
+
+  test("diagnostics name the source file and line", () => {
+    const { dir, model } = project();
+    expect(cli(["migrate", model, "--split"]).code).toBe(0);
+    const flow = join(dir, "cleaning_staff.flow");
+    writeFileSync(flow, readFileSync(flow, "utf8").replace("fail EmailBlocked", "fail EmailBlockd"));
+    const r = cli(["validate", join(dir, "ddd.yaml"), "--format", "json"]);
+    expect(r.code).toBe(1);
+    const [d] = JSON.parse(r.out).diagnostics;
+    expect(d).toMatchObject({ code: "unknown-error", file: "cleaning_staff.flow", line: 4 });
+    const text = cli(["validate", join(dir, "ddd.yaml")]);
+    expect(text.err).toContain(`${join(require("node:path").relative(process.cwd(), dir), "cleaning_staff.flow")}:4:`);
+
+    // A syntax error does not cascade into "missing flow" errors for everything in the file.
+    writeFileSync(flow, readFileSync(flow, "utf8").replace("save invitation\n", "save invitation extra\n"));
+    const s = JSON.parse(cli(["validate", dir, "--format", "json"]).out);
+    expect(s.diagnostics.map((x: { code: string }) => x.code)).toEqual(["syntax"]);
+  });
+});
+
+describe("ddd init --split", () => {
+  test("scaffolds the sample as a multi-file model that validates and generates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-cli-split-"));
+    const r = cli(["init", dir, "--split"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(dir, "ddd.yaml"))).toBe(true);
+    expect(existsSync(join(dir, "model.ddd.yaml"))).toBe(false);
+    expect(cli(["validate", dir]).code).toBe(0);
+    expect(cli(["generate", dir]).code).toBe(0);
+    expect(existsSync(join(dir, "src/cleaning_platform/generated/cleaning_staff/domain/aggregates.py"))).toBe(true);
+    expect(cli(["init", dir, "--split"]).code).toBe(1);
+  });
+});
+
+describe("ddd CLI: other .proto files next to a multi-file model", () => {
+  test("a vendored proto2 file neither breaks validation nor changes the model hash", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-cli-vendor-"));
+    expect(cli(["init", dir, "--split"]).code).toBe(0);
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(join(dir, "third_party"));
+    const vendored = join(dir, "third_party/vendor.proto");
+    writeFileSync(vendored, 'syntax = "proto2";\npackage vendor;\nmessage Thing { map<string, int32> counts = 1; oneof k { string a = 2; } }\n');
+    expect(cli(["validate", dir]).code).toBe(0);
+    expect(cli(["generate", dir]).code).toBe(0);
+    writeFileSync(vendored, readFileSync(vendored, "utf8") + "// edited\n");
+    expect(cli(["diff", dir, "--check"]).code).toBe(0);
+  });
+});

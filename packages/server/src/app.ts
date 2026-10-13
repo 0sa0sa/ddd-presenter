@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { boardGhosts, emptyBoard, normalizeBoard, proposeLocally, ruleUsage, STICKY_KINDS, validateModelText, type Board, type BoardGhost, type ProposalKind, type StickyKind, type ValidateResult } from "@ddd/core";
+import { boardGhosts, emptyBoard, facilitatorBrief, facilitatorTurn, normalizeBoard, placeSuggestions, proposeLocally, ruleUsage, validateModelText, type Board, type BoardGhost, type ProposalKind, type ValidateResult } from "@ddd/core";
 import { AiBusyError, PROVIDER_LABEL, type ModelAssistant, type ProviderId } from "./ai.ts";
 import { fitToCursor } from "./fit.ts";
 import { computePlan, generate, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
@@ -26,6 +26,8 @@ const MAX_LAYOUT_KEYS = 5000;
 const MAX_BOARD_ITEMS = 3000;
 const MAX_BOARD_FRAMES = 1000;
 const MAX_BOARD_CONNECTORS = 10_000;
+/** Messages of a facilitation chat sent with each turn (the browser keeps the most recent ones). */
+const MAX_FACILITATOR_HISTORY = 80;
 const USERNAME = /^[A-Za-z0-9_.-]+$/;
 /** Names from an authenticating proxy may be e-mail addresses. */
 const PROXY_USERNAME = /^[A-Za-z0-9_.@+-]{1,100}$/;
@@ -992,30 +994,48 @@ export function createApp(db: Database, options: AppOptions = {}) {
       spendAi(c);
       try {
         const suggestions = await ai.board({ board, instruction, signal: c.req.raw.signal });
-        suggestions.slice(0, 20).forEach((s, i) => {
-          const near = board.items.find((it) => it.id === s.near_item_id);
-          if (!near || !(s.kind in STICKY_KINDS) || !s.text.trim()) return;
-          const meta = STICKY_KINDS[s.kind as StickyKind];
-          const gap = 40;
-          const pos =
-            s.placement === "left" ? { x: near.x - meta.w - gap, y: near.y } : s.placement === "above" ? { x: near.x, y: near.y - meta.h - gap } : s.placement === "below" ? { x: near.x, y: near.y + near.h + gap } : { x: near.x + near.w + gap, y: near.y };
-          const id = `ghost-llm-${i}-${near.id}`;
-          ghosts.push({
-            id,
-            kind: s.kind as StickyKind,
-            text: s.text.slice(0, 200),
-            ...pos,
-            connect: s.connect === "from_near" ? { from: near.id, to: id } : s.connect === "to_near" ? { from: id, to: near.id } : undefined,
-            reason: s.reason.slice(0, 300),
-            source: "llm",
-          });
-        });
+        ghosts.push(...placeSuggestions(board, suggestions, `ghost-llm-${Date.now().toString(36)}`));
       } catch (e) {
         busy(e);
         console.error("assist.board failed:", (e as Error).message);
       }
     }
     return c.json({ ghosts, ai: !!ai });
+  });
+
+  /**
+   * One turn of the AI facilitator of an EventStorming workshop (docs/11 §4). The transcript lives in the browser and
+   * comes with each turn; the answer is checked against the board (known steps and stickies, placed ghosts). The
+   * facilitator never changes the board: its stickies and its next step are proposals people accept.
+   */
+  app.post("/api/projects/:projectId/assist/facilitate", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const raw = await body<{ board?: unknown; history?: unknown; message?: unknown }>(c, BODY_BOARD);
+    const board = checkedBoard(raw.board);
+    if (raw.history !== undefined && !Array.isArray(raw.history)) fail(400, "history must be an array");
+    const entries = (raw.history ?? []) as unknown[];
+    if (entries.length > MAX_FACILITATOR_HISTORY) fail(413, `history can hold up to ${MAX_FACILITATOR_HISTORY} messages`);
+    const history = entries.map((h) => {
+      const m = h as { role?: unknown; text?: unknown; author?: unknown };
+      if (typeof m !== "object" || m === null || (m.role !== "user" && m.role !== "assistant")) fail(400, "history entries need a role (user or assistant)");
+      const text = capped(m.text, "history text", 6000) ?? "";
+      const author = capped(m.author, "history author", 100);
+      return { role: m.role as "user" | "assistant", text, ...(author ? { author } : {}) };
+    });
+    const message = capped(raw.message, "message", 2000)?.trim();
+    const ai = aiFor(project.workspace_id);
+    if (!ai) fail(403, "AI assistance is not enabled for this workspace");
+    spendAi(c);
+    try {
+      const answer = await ai!.facilitate({ board, brief: facilitatorBrief(board), history, ...(message ? { message: { text: message, author: c.get("user").username } } : {}), signal: c.req.raw.signal });
+      const turn = answer ? facilitatorTurn(board, answer, `ghost-fac-${Date.now().toString(36)}`) : undefined;
+      if (!turn) return c.json({ turn: null, message: "AI が返答しませんでした" });
+      return c.json({ turn });
+    } catch (e) {
+      busy(e);
+      console.error("assist.facilitate failed:", (e as Error).message);
+      return c.json({ turn: null, message: "AI の応答を取得できませんでした" });
+    }
   });
 
   // -- discovery board (EventStorming canvas) -----------------------------------

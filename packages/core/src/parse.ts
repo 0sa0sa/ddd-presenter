@@ -740,7 +740,7 @@ function readApiSettings(r: Reader, bag: DiagnosticBag, value: unknown): ApiSett
   const path = ["generation", "typescript", "api"];
   const o = r.obj(value, path, "generation.typescript.api");
   if (!o) return undefined;
-  r.keys(o, ["base_path", "client"], path, "generation.typescript.api");
+  r.keys(o, ["base_path", "client", "connect"], path, "generation.typescript.api");
   const basePath = r.str(o, "base_path", path, false) ?? "/api";
   if (!/^(\/[A-Za-z0-9._~-]+)*$/.test(basePath)) {
     bag.error("invalid-value", `Invalid API base path "${basePath}"`, [...path, "base_path"], {
@@ -751,7 +751,8 @@ function readApiSettings(r: Reader, bag: DiagnosticBag, value: unknown): ApiSett
   if (!(API_CLIENTS as readonly string[]).includes(client)) {
     bag.error("invalid-value", `Unknown API client "${client}"`, [...path, "client"], { hint: `Use one of ${API_CLIENTS.join(", ")} (default tanstack-query)` });
   }
-  return { basePath, client: "tanstack-query" };
+  const connect = r.bool(o, "connect", path, false);
+  return { basePath, client: "tanstack-query", ...(connect ? { connect } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,6 +1142,22 @@ export function parseModel(text: string): ParseResult {
     );
     return { diagnostics: bag.items, locate, rangeOf, keyRangeOf };
   }
+  const model = readModelData(data, bag);
+
+  for (const d of bag.items) {
+    if (d.line === undefined) {
+      const loc = locate(d.path);
+      if (loc) Object.assign(d, loc);
+    }
+  }
+  return { model, diagnostics: bag.items, locate, rangeOf, keyRangeOf };
+}
+
+/**
+ * Data (the YAML document as plain values, or the same shape assembled from the .proto / .domain / .flow sources)
+ * → IR. Structural errors go to `bag` with model paths; the caller attaches source positions.
+ */
+export function readModelData(data: unknown, bag: DiagnosticBag): ModelIR | undefined {
   const r = new Reader(bag);
   const root = r.obj(data, [], "model");
   let model: ModelIR | undefined;
@@ -1156,7 +1173,7 @@ export function parseModel(text: string): ParseResult {
     }
     const project = r.str(root, "project", [], true) ?? "";
     const gen = root.generation === undefined ? {} : r.obj(root.generation, ["generation"], "generation") ?? {};
-    r.keys(gen, ["package", "src_dir", "tests_dir", "target", "typescript"], ["generation"], "generation");
+    r.keys(gen, ["package", "src_dir", "tests_dir", "target", "typescript", "python"], ["generation"], "generation");
     const defaultPackage = project.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "domain";
     const target = r.str(gen, "target", ["generation"], false) ?? "python";
     if (!(GENERATION_TARGETS as readonly string[]).includes(target)) {
@@ -1169,6 +1186,12 @@ export function parseModel(text: string): ParseResult {
       bag.error("invalid-value", `Unknown test runner "${testRunner}"`, ["generation", "typescript", "test_runner"], { hint: `Use one of ${TEST_RUNNERS.join(", ")} (default vitest)` });
     }
     const api = readApiSettings(r, bag, ts.api);
+    const py = gen.python === undefined ? undefined : r.obj(gen.python, ["generation", "python"], "generation.python") ?? {};
+    if (py) r.keys(py, ["connect", "base_path"], ["generation", "python"], "generation.python");
+    const pyBase = py ? r.str(py, "base_path", ["generation", "python"], false) ?? "/api" : "/api";
+    if (py && !/^(\/[A-Za-z0-9._~-]+)*$/.test(pyBase)) {
+      bag.error("invalid-value", `Invalid base path "${pyBase}"`, ["generation", "python", "base_path"], { hint: 'Write a path starting with "/" without a trailing "/" (e.g. /api), or "" for none' });
+    }
     model = {
       schemaVersion: typeof version === "number" ? version : SCHEMA_VERSION,
       project,
@@ -1179,6 +1202,7 @@ export function parseModel(text: string): ParseResult {
         testsDir: r.str(gen, "tests_dir", ["generation"], false) ?? "tests",
         target: target === "typescript" ? "typescript" : "python",
         typescript: { testRunner: testRunner === "bun" ? "bun" : "vitest", ...(api ? { api } : {}) },
+        ...(py ? { python: { connect: r.bool(py, "connect", ["generation", "python"], false), basePath: pyBase } } : {}),
       },
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
       relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),
@@ -1187,11 +1211,5 @@ export function parseModel(text: string): ParseResult {
     if (security) model.security = security;
   }
 
-  for (const d of bag.items) {
-    if (d.line === undefined) {
-      const loc = locate(d.path);
-      if (loc) Object.assign(d, loc);
-    }
-  }
-  return { model, diagnostics: bag.items, locate, rangeOf, keyRangeOf };
+  return model;
 }

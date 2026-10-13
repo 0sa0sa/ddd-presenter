@@ -19,3 +19,5 @@ export * from "./drawio.ts";
 export * from "./security.ts";
 export * from "./architecture.ts";
 export * from "./architecture-render.ts";
+export * from "./split/index.ts";
+export * from "./facilitator.ts";

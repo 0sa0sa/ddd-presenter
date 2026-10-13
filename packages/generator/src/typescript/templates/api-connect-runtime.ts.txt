@@ -1,0 +1,809 @@
+/**
+ * Shape of a field in protobuf JSON (https://protobuf.dev/programming-guides/json/): strings (also
+ * UUID, Decimal, Date, Timestamp), int64 as a decimal string, booleans, enums by value name,
+ * messages and repeated fields.
+ */
+export type ConnectType =
+  | { readonly t: "string" }
+  | { readonly t: "int64" }
+  | { readonly t: "bool" }
+  | { readonly t: "timestamp" }
+  | { readonly t: "enum"; readonly values: ReadonlyArray<readonly [name: string, value: string]> }
+  | { readonly t: "message"; readonly name: string }
+  | { readonly t: "list"; readonly item: ConnectType };
+
+/**
+ * A message field: its proto name, protobuf JSON name, name in the HTTP API's JSON, type and
+ * presence.
+ */
+export interface ConnectField {
+  /** The field number in the contract (the binary codec's key). */
+  readonly no: number;
+  readonly name: string;
+  readonly json: string;
+  readonly rest: string;
+  readonly type: ConnectType;
+  readonly optional: boolean;
+}
+
+/**
+ * What a response carries: a use case's result (`result`), or a query's page (`items`,
+ * `next_cursor`).
+ */
+export type ConnectResponse =
+  | { readonly kind: "result"; readonly type?: ConnectType }
+  | { readonly kind: "page"; readonly item: string };
+
+/** An rpc of the contract and the endpoint of the HTTP API that serves it. */
+export interface ConnectProcedure {
+  readonly method: "POST" | "GET";
+  readonly path: string;
+  readonly request: readonly ConnectField[];
+  readonly response: ConnectResponse;
+}
+
+export interface ConnectSchema {
+  /** Fields of each message, by full name (`ordering.v1.Money`). */
+  readonly messages: Readonly<Record<string, readonly ConnectField[]>>;
+  /** Procedures by path (`/ordering.v1.OrderingService/PlaceOrder`). */
+  readonly procedures: Readonly<Record<string, ConnectProcedure>>;
+}
+
+export const T = {
+  string: { t: "string" },
+  int64: { t: "int64" },
+  bool: { t: "bool" },
+  timestamp: { t: "timestamp" },
+} as const satisfies Record<string, ConnectType>;
+
+/** A message type by full name. */
+export function msg(name: string): ConnectType {
+  return { t: "message", name };
+}
+
+export function list(item: ConnectType): ConnectType {
+  return { t: "list", item };
+}
+
+/** An enum: value `on_hold` of `OrderStatus` is `ORDER_STATUS_ON_HOLD` (prefix `ORDER_STATUS_`). */
+export function enumOf(prefix: string, values: readonly string[]): ConnectType {
+  return { t: "enum", values: values.map((v) => [prefix + v.toUpperCase(), v] as const) };
+}
+
+/** protoc's JSON name: underscores dropped, the next character upper-cased. */
+export function jsonName(name: string): string {
+  return name.replace(/_+(.?)/g, (_m, c: string) => c.toUpperCase());
+}
+
+/** The HTTP API's JSON name: an underscore before a letter becomes the upper-case letter. */
+export function restName(name: string): string {
+  return name.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+}
+
+export function f(no: number, name: string, type: ConnectType, optional = false): ConnectField {
+  return { no, name, json: jsonName(name), rest: restName(name), type, optional };
+}
+
+export function result(type?: ConnectType): ConnectResponse {
+  return type ? { kind: "result", type } : { kind: "result" };
+}
+
+export function page(item: string): ConnectResponse {
+  return { kind: "page", item };
+}
+
+// ---------------------------------------------------------------------------
+// Protobuf JSON ↔ the HTTP API's JSON
+// ---------------------------------------------------------------------------
+
+/** A request that is not valid protobuf JSON for its message (Connect code invalid_argument). */
+export class ConnectInputError extends Error {}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+function messageFields(schema: ConnectSchema, name: string): readonly ConnectField[] {
+  const fields = schema.messages[name];
+  if (!fields) throw new Error(`Unknown message ${name}`);
+  return fields;
+}
+
+/** The value an absent proto3 field stands for (protobuf JSON leaves default values out). */
+function absent(type: ConnectType): { value: unknown } | undefined {
+  switch (type.t) {
+    case "string":
+      return { value: "" };
+    case "int64":
+      return { value: 0 };
+    case "bool":
+      return { value: false };
+    case "list":
+      return { value: [] };
+    default:
+      return undefined;
+  }
+}
+
+function valueToRest(schema: ConnectSchema, type: ConnectType, v: unknown, at: string): unknown {
+  switch (type.t) {
+    case "string":
+    case "timestamp":
+      if (typeof v !== "string") throw new ConnectInputError(`${at}: expected a string`);
+      return v;
+    case "int64":
+      if (typeof v === "number" && Number.isSafeInteger(v)) return v;
+      if (typeof v === "string" && /^-?\d+$/.test(v) && Number.isSafeInteger(Number(v)))
+        return Number(v);
+      throw new ConnectInputError(`${at}: expected an integer`);
+    case "bool":
+      if (typeof v !== "boolean") throw new ConnectInputError(`${at}: expected true or false`);
+      return v;
+    case "enum": {
+      const byName = type.values.find(([name]) => name === v);
+      if (byName) return byName[1];
+      if (typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= type.values.length) {
+        return type.values[v - 1]?.[1];
+      }
+      throw new ConnectInputError(`${at}: unknown enum value ${JSON.stringify(v)}`);
+    }
+    case "message":
+      if (!isRecord(v)) throw new ConnectInputError(`${at}: expected an object`);
+      return messageToRest(schema, messageFields(schema, type.name), v, at);
+    case "list":
+      if (!Array.isArray(v)) throw new ConnectInputError(`${at}: expected a list`);
+      return v.map((item, i) => valueToRest(schema, type.item, item, `${at}[${String(i)}]`));
+  }
+}
+
+/** A protobuf JSON message as the HTTP API's JSON object (unknown fields are ignored). */
+export function messageToRest(
+  schema: ConnectSchema,
+  fields: readonly ConnectField[],
+  message: Record<string, unknown>,
+  at = "message",
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    const v = message[field.json] ?? message[field.name];
+    if (v === undefined || v === null) {
+      const fallback = field.optional ? undefined : absent(field.type);
+      if (fallback) out[field.rest] = fallback.value;
+      continue;
+    }
+    out[field.rest] = valueToRest(schema, field.type, v, `${at}.${field.json}`);
+  }
+  return out;
+}
+
+function valueFromRest(schema: ConnectSchema, type: ConnectType, v: unknown): unknown {
+  switch (type.t) {
+    case "string":
+    case "timestamp":
+      return typeof v === "string" ? v : JSON.stringify(v);
+    case "int64":
+      return typeof v === "number" ? String(v) : v;
+    case "bool":
+      return v;
+    case "enum":
+      return type.values.find(([, value]) => value === v)?.[0] ?? v;
+    case "message":
+      return isRecord(v) ? messageFromRest(schema, messageFields(schema, type.name), v) : v;
+    case "list":
+      return Array.isArray(v) ? v.map((item) => valueFromRest(schema, type.item, item)) : v;
+  }
+}
+
+/** The HTTP API's JSON object as a protobuf JSON message (absent and null fields are left out). */
+export function messageFromRest(
+  schema: ConnectSchema,
+  fields: readonly ConnectField[],
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    const v = value[field.rest];
+    if (v === undefined || v === null) continue;
+    out[field.json] = valueFromRest(schema, field.type, v);
+  }
+  return out;
+}
+
+/** The protobuf JSON response message of a procedure, from the HTTP API's response body. */
+export function responseFromRest(
+  schema: ConnectSchema,
+  response: ConnectResponse,
+  body: unknown,
+): Record<string, unknown> {
+  if (response.kind === "page") {
+    if (!isRecord(body) || !Array.isArray(body.items)) return {};
+    const fields = messageFields(schema, response.item);
+    const items = (body.items as unknown[]).map((item) =>
+      isRecord(item) ? messageFromRest(schema, fields, item) : item,
+    );
+    return typeof body.nextCursor === "string" ? { items, nextCursor: body.nextCursor } : { items };
+  }
+  if (!response.type || body === undefined || body === null) return {};
+  return { result: valueFromRest(schema, response.type, body) };
+}
+
+// ---------------------------------------------------------------------------
+// The binary codec (protobuf wire format) ↔ protobuf JSON values
+// ---------------------------------------------------------------------------
+
+/** Fields of a procedure's response message: `result` (1), or `items` (1) and `next_cursor` (2). */
+export function responseFields(response: ConnectResponse): readonly ConnectField[] {
+  if (response.kind === "page") {
+    return [f(1, "items", list(msg(response.item))), f(2, "next_cursor", T.string, true)];
+  }
+  return response.type ? [f(1, "result", response.type, true)] : [];
+}
+
+const TIMESTAMP_FIELDS: readonly ConnectField[] = [
+  f(1, "seconds", T.int64),
+  f(2, "nanos", T.int64),
+];
+
+/** RFC 3339 → Timestamp (seconds, nanos), keeping fractions finer than a millisecond. */
+function timestampParts(value: string): { seconds: bigint; nanos: number } {
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) throw new ConnectInputError(`Invalid timestamp ${value}`);
+  const fraction = /\.(\d+)/.exec(value.replace(/(Z|[+-]\d{2}:\d{2})$/, ""))?.[1] ?? "";
+  const nanos = Number((fraction + "000000000").slice(0, 9));
+  return { seconds: BigInt(Math.floor(ms / 1000)), nanos };
+}
+
+/** Timestamp → RFC 3339 in UTC with as many fraction digits as needed (protobuf JSON's form). */
+function timestampText(seconds: bigint, nanos: number): string {
+  const base = new Date(Number(seconds) * 1000).toISOString().slice(0, 19);
+  if (nanos === 0) return `${base}Z`;
+  const digits = String(nanos).padStart(9, "0").replace(/0+$/, "");
+  const padded = digits.padEnd(digits.length <= 3 ? 3 : digits.length <= 6 ? 6 : 9, "0");
+  return `${base}.${padded}Z`;
+}
+
+class ProtoWriter {
+  private readonly parts: number[] = [];
+
+  varint(value: bigint): void {
+    let v = BigInt.asUintN(64, value);
+    while (v > 0x7fn) {
+      this.parts.push(Number(v & 0x7fn) | 0x80);
+      v >>= 7n;
+    }
+    this.parts.push(Number(v));
+  }
+
+  tag(no: number, wireType: number): void {
+    this.varint(BigInt((no << 3) | wireType));
+  }
+
+  bytes(no: number, data: Uint8Array): void {
+    this.tag(no, 2);
+    this.varint(BigInt(data.length));
+    for (const b of data) this.parts.push(b);
+  }
+
+  finish(): Uint8Array {
+    return Uint8Array.from(this.parts);
+  }
+}
+
+function encodeValue(
+  schema: ConnectSchema,
+  w: ProtoWriter,
+  no: number,
+  type: ConnectType,
+  v: unknown,
+): void {
+  switch (type.t) {
+    case "string":
+      w.bytes(no, new TextEncoder().encode(typeof v === "string" ? v : JSON.stringify(v)));
+      return;
+    case "int64":
+      w.tag(no, 0);
+      w.varint(BigInt(typeof v === "number" || typeof v === "string" ? v : 0));
+      return;
+    case "bool":
+      w.tag(no, 0);
+      w.varint(v === true ? 1n : 0n);
+      return;
+    case "enum": {
+      const index = type.values.findIndex(([name]) => name === v);
+      w.tag(no, 0);
+      w.varint(BigInt(index >= 0 ? index + 1 : typeof v === "number" ? v : 0));
+      return;
+    }
+    case "timestamp": {
+      const parts = timestampParts(typeof v === "string" ? v : "");
+      w.bytes(
+        no,
+        encodeMessage(schema, TIMESTAMP_FIELDS, {
+          seconds: String(parts.seconds),
+          nanos: String(parts.nanos),
+        }),
+      );
+      return;
+    }
+    case "message":
+      w.bytes(no, encodeMessage(schema, messageFields(schema, type.name), isRecord(v) ? v : {}));
+      return;
+    case "list":
+      for (const item of Array.isArray(v) ? (v as unknown[]) : [])
+        encodeValue(schema, w, no, type.item, item);
+      return;
+  }
+}
+
+/** A protobuf JSON message (its JSON field names) in the protobuf wire format. */
+export function encodeMessage(
+  schema: ConnectSchema,
+  fields: readonly ConnectField[],
+  message: Record<string, unknown>,
+): Uint8Array {
+  const w = new ProtoWriter();
+  for (const field of fields) {
+    const v = message[field.json];
+    if (v === undefined || v === null) continue;
+    encodeValue(schema, w, field.no, field.type, v);
+  }
+  return w.finish();
+}
+
+class ProtoReader {
+  pos = 0;
+  private readonly buf: Uint8Array;
+
+  constructor(buf: Uint8Array) {
+    this.buf = buf;
+  }
+
+  get done(): boolean {
+    return this.pos >= this.buf.length;
+  }
+
+  varint(): bigint {
+    let result = 0n;
+    for (let shift = 0n; shift < 70n; shift += 7n) {
+      const b = this.buf[this.pos++];
+      if (b === undefined) throw new ConnectInputError("Truncated message");
+      result |= BigInt(b & 0x7f) << shift;
+      if ((b & 0x80) === 0) return result;
+    }
+    throw new ConnectInputError("Invalid varint");
+  }
+
+  bytes(): Uint8Array {
+    const length = Number(this.varint());
+    if (this.pos + length > this.buf.length) throw new ConnectInputError("Truncated message");
+    const out = this.buf.subarray(this.pos, this.pos + length);
+    this.pos += length;
+    return out;
+  }
+
+  skip(wireType: number): void {
+    if (wireType === 0) this.varint();
+    else if (wireType === 1) this.pos += 8;
+    else if (wireType === 2) this.bytes();
+    else if (wireType === 5) this.pos += 4;
+    else throw new ConnectInputError(`Unsupported wire type ${String(wireType)}`);
+  }
+}
+
+function decodeScalar(
+  schema: ConnectSchema,
+  type: ConnectType,
+  wireType: number,
+  r: ProtoReader,
+): unknown {
+  switch (type.t) {
+    case "string":
+      return new TextDecoder().decode(r.bytes());
+    case "int64":
+      return String(BigInt.asIntN(64, r.varint()));
+    case "bool":
+      return r.varint() !== 0n;
+    case "enum": {
+      const n = Number(r.varint());
+      return type.values[n - 1]?.[0] ?? n;
+    }
+    case "timestamp": {
+      const t = decodeMessage(schema, TIMESTAMP_FIELDS, r.bytes());
+      return timestampText(
+        BigInt(typeof t.seconds === "string" ? t.seconds : "0"),
+        Number(t.nanos ?? 0),
+      );
+    }
+    case "message":
+      return decodeMessage(schema, messageFields(schema, type.name), r.bytes());
+    case "list":
+      throw new ConnectInputError(
+        `Nested repeated fields are not supported (wire type ${String(wireType)})`,
+      );
+  }
+}
+
+const PACKABLE = new Set(["int64", "bool", "enum"]);
+
+/** A message in the protobuf wire format as protobuf JSON values (unknown fields are skipped). */
+export function decodeMessage(
+  schema: ConnectSchema,
+  fields: readonly ConnectField[],
+  data: Uint8Array,
+): Record<string, unknown> {
+  const r = new ProtoReader(data);
+  const out: Record<string, unknown> = {};
+  while (!r.done) {
+    const key = Number(r.varint());
+    const no = key >>> 3;
+    const wireType = key & 7;
+    const field = fields.find((x) => x.no === no);
+    if (!field) {
+      r.skip(wireType);
+      continue;
+    }
+    if (field.type.t === "list") {
+      const items = (out[field.json] as unknown[] | undefined) ?? [];
+      const item = field.type.item;
+      if (wireType === 2 && PACKABLE.has(item.t)) {
+        // Packed repeated scalars: one length-delimited run of varints.
+        const packed = new ProtoReader(r.bytes());
+        while (!packed.done) items.push(decodeScalar(schema, item, 0, packed));
+      } else items.push(decodeScalar(schema, item, wireType, r));
+      out[field.json] = items;
+    } else out[field.json] = decodeScalar(schema, field.type, wireType, r);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The Connect protocol (unary, JSON codec) over the HTTP API's handler
+// ---------------------------------------------------------------------------
+
+/** HTTP status of each Connect error code (https://connectrpc.com/docs/protocol/#error-codes). */
+export const CONNECT_STATUS = {
+  canceled: 499,
+  unknown: 500,
+  invalid_argument: 400,
+  deadline_exceeded: 504,
+  not_found: 404,
+  already_exists: 409,
+  permission_denied: 403,
+  resource_exhausted: 429,
+  failed_precondition: 400,
+  aborted: 409,
+  out_of_range: 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  data_loss: 500,
+  unauthenticated: 401,
+} as const;
+export type ConnectCode = keyof typeof CONNECT_STATUS;
+
+/** The Connect code of an HTTP API error response. */
+export function connectCode(status: number, code: string | undefined): ConnectCode {
+  if (code === "route_not_found" || code === "method_not_allowed") return "unimplemented";
+  if (code === "concurrency_conflict") return "aborted";
+  switch (status) {
+    case 400:
+      return "invalid_argument";
+    case 401:
+      return "unauthenticated";
+    case 403:
+      return "permission_denied";
+    case 404:
+      return "not_found";
+    case 409:
+    case 422:
+      return "failed_precondition";
+    case 429:
+      return "resource_exhausted";
+    case 500:
+      return "internal";
+    default:
+      return "unknown";
+  }
+}
+
+/** A Connect error response; the domain error code travels in the `ddd-error-code` header. */
+export function connectError(
+  code: ConnectCode,
+  message: string,
+  headers: Headers = new Headers(),
+): Response {
+  headers.set("content-type", "application/json");
+  return new Response(JSON.stringify({ code, message }), { status: CONNECT_STATUS[code], headers });
+}
+
+/**
+ * Headers of the HTTP API's response that the Connect response keeps (RateLimit, Retry-After, ...).
+ */
+function passHeaders(from: Headers): Headers {
+  const out = new Headers();
+  from.forEach((value, key) => {
+    if (key !== "content-type" && key !== "content-length") out.set(key, value);
+  });
+  return out;
+}
+
+/** The codecs served: protobuf JSON and the protobuf wire format. */
+export type ConnectCodec = "json" | "proto";
+
+function base64Bytes(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) =>
+    c.charCodeAt(0),
+  );
+}
+
+/**
+ * The request message as protobuf JSON values: a JSON or binary body (POST), or the `message`
+ * query parameter (GET, side-effect-free rpcs: `encoding=json|proto`, `base64=1`).
+ */
+async function readMessage(
+  schema: ConnectSchema,
+  request: Request,
+  procedure: ConnectProcedure,
+  url: URL,
+): Promise<
+  { readonly response: Response } | { readonly message: unknown; readonly codec: ConnectCodec }
+> {
+  if (request.method === "POST") {
+    const type = (request.headers.get("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+    if (type === "application/proto") {
+      const data = new Uint8Array(await request.arrayBuffer());
+      return { message: decodeMessage(schema, procedure.request, data), codec: "proto" };
+    }
+    if (type !== "application/json") {
+      const accept = "application/json, application/proto";
+      return { response: new Response(null, { status: 415, headers: { "accept-post": accept } }) };
+    }
+    const text = await request.text();
+    const message: unknown = text.trim() === "" ? {} : JSON.parse(text);
+    return { message, codec: "json" };
+  }
+  if (request.method === "GET" && procedure.method === "GET") {
+    const encoding = url.searchParams.get("encoding");
+    const raw = url.searchParams.get("message") ?? "";
+    const base64 = url.searchParams.get("base64") === "1";
+    if (encoding === "proto") {
+      const data = base64 ? base64Bytes(raw) : new TextEncoder().encode(raw);
+      return { message: decodeMessage(schema, procedure.request, data), codec: "proto" };
+    }
+    if (encoding !== "json") {
+      return {
+        response: connectError("invalid_argument", "GET requests need encoding=json or proto"),
+      };
+    }
+    const text = base64 ? new TextDecoder().decode(base64Bytes(raw)) : raw || "{}";
+    const message: unknown = JSON.parse(text);
+    return { message, codec: "json" };
+  }
+  const allow = procedure.method === "GET" ? "GET, POST" : "POST";
+  return {
+    response: connectError(
+      "unimplemented",
+      `${request.method} is not allowed here`,
+      new Headers({ allow }),
+    ),
+  };
+}
+
+/**
+ * Serves the Connect protocol (unary rpcs) in front of the HTTP API's handler: `POST
+ * <basePath>/<package>.<Service>/<Method>` with a protobuf JSON (`application/json`) or binary
+ * (`application/proto`) body, and `GET ?encoding=json|proto&message=` for queries. Each request is
+ * translated to the HTTP API endpoint that serves the rpc, so authentication, authorization, rate
+ * limits and validation are the same; the response comes back in the request's codec, errors as
+ * Connect errors (JSON, as the protocol requires) with the domain error code in the
+ * `ddd-error-code` header.
+ */
+export function connectHandler(
+  rest: (request: Request) => Promise<Response>,
+  schema: ConnectSchema,
+  options: { readonly basePath?: string } = {},
+): (request: Request) => Promise<Response> {
+  const base = options.basePath ?? "";
+  return async (request) => {
+    const url = new URL(request.url);
+    const path =
+      base !== "" && url.pathname.startsWith(base) ? url.pathname.slice(base.length) : url.pathname;
+    const procedure = schema.procedures[path];
+    if (!procedure)
+      return connectError("unimplemented", `Unknown procedure ${path}`, new Headers());
+    let read: Awaited<ReturnType<typeof readMessage>>;
+    try {
+      read = await readMessage(schema, request, procedure, url);
+    } catch (error) {
+      const why = error instanceof ConnectInputError ? error.message : "not valid JSON";
+      return connectError("invalid_argument", `The request message could not be read: ${why}`);
+    }
+    if ("response" in read) return read.response;
+    const message = read.message;
+    if (!isRecord(message))
+      return connectError("invalid_argument", "The request message must be a JSON object");
+    let input: Record<string, unknown>;
+    try {
+      input = messageToRest(schema, procedure.request, message);
+    } catch (error) {
+      if (error instanceof ConnectInputError)
+        return connectError("invalid_argument", error.message);
+      throw error;
+    }
+    const headers = new Headers(request.headers);
+    for (const h of [
+      "content-type",
+      "content-length",
+      "connect-protocol-version",
+      "connect-timeout-ms",
+    ]) {
+      headers.delete(h);
+    }
+    const target = new URL(procedure.path, url);
+    let restRequest: Request;
+    if (procedure.method === "GET") {
+      for (const [key, value] of Object.entries(input)) {
+        for (const v of Array.isArray(value) ? (value as unknown[]) : [value]) {
+          target.searchParams.append(key, typeof v === "string" ? v : JSON.stringify(v));
+        }
+      }
+      restRequest = new Request(target.href, { method: "GET", headers });
+    } else {
+      headers.set("content-type", "application/json");
+      restRequest = new Request(target.href, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(input),
+      });
+    }
+    const response = await rest(restRequest);
+    const out = passHeaders(response.headers);
+    if (response.status === 200 || response.status === 204) {
+      const body: unknown = response.status === 204 ? undefined : await response.json();
+      const reply = responseFromRest(schema, procedure.response, body);
+      if (read.codec === "proto") {
+        out.set("content-type", "application/proto");
+        const data = encodeMessage(schema, responseFields(procedure.response), reply);
+        return new Response(data, { status: 200, headers: out });
+      }
+      out.set("content-type", "application/json");
+      return new Response(JSON.stringify(reply), { status: 200, headers: out });
+    }
+    let errorBody: unknown;
+    try {
+      errorBody = await response.json();
+    } catch {
+      errorBody = undefined;
+    }
+    const restCode =
+      isRecord(errorBody) && typeof errorBody.code === "string" ? errorBody.code : undefined;
+    const text =
+      isRecord(errorBody) && typeof errorBody.message === "string"
+        ? errorBody.message
+        : response.statusText;
+    if (restCode !== undefined) out.set("ddd-error-code", restCode);
+    // What the generated Connect client needs to rebuild the HTTP API's error exactly.
+    out.set("ddd-http-status", String(response.status));
+    if (isRecord(errorBody) && isRecord(errorBody.details)) {
+      out.set("ddd-error-details", encodeURIComponent(JSON.stringify(errorBody.details)));
+    }
+    return connectError(connectCode(response.status, restCode), text, out);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The client side: the generated typed client over the Connect protocol
+// ---------------------------------------------------------------------------
+
+/** The HTTP API's response body for a procedure's response message (undefined: 204 No Content). */
+export function responseToRest(
+  schema: ConnectSchema,
+  response: ConnectResponse,
+  reply: Record<string, unknown>,
+): unknown {
+  if (response.kind === "page") {
+    const fields = messageFields(schema, response.item);
+    const items = Array.isArray(reply.items) ? (reply.items as unknown[]) : [];
+    return {
+      items: items.map((item) => (isRecord(item) ? messageToRest(schema, fields, item) : item)),
+      nextCursor: typeof reply.nextCursor === "string" ? reply.nextCursor : null,
+    };
+  }
+  if (!response.type) return undefined;
+  const value = reply.result;
+  return value === undefined || value === null
+    ? null
+    : valueToRest(schema, response.type, value, "result");
+}
+
+/** A query-string value of the HTTP API as the typed value of its field. */
+function queryValue(type: ConnectType, raw: string): unknown {
+  if (type.t === "int64") return Number(raw);
+  if (type.t === "bool") return raw === "true";
+  return raw;
+}
+
+export interface ConnectFetchOptions {
+  /** Path prefix of the procedures (the HTTP API's base path). */
+  readonly basePath: string;
+  /** Sends the Connect request (default: the global `fetch`). */
+  readonly fetch?: (request: Request) => Promise<Response>;
+  /** Send and receive the binary codec (`application/proto`) instead of protobuf JSON. */
+  readonly binary?: boolean;
+}
+
+/**
+ * A `fetch` for the generated API client that speaks the Connect protocol: a request to an
+ * endpoint of the HTTP API that serves an rpc is sent as that rpc (protobuf JSON or binary), and
+ * the Connect response (or error) is turned back into the endpoint's response, so the typed client
+ * and its TanStack Query options work unchanged. Requests without an rpc (reading an aggregate by
+ * id) go to the HTTP API as they are.
+ */
+export function connectFetch(
+  schema: ConnectSchema,
+  options: ConnectFetchOptions,
+): (request: Request) => Promise<Response> {
+  const send = options.fetch ?? ((request: Request) => fetch(request));
+  return async (request) => {
+    const url = new URL(request.url);
+    const found = Object.entries(schema.procedures).find(
+      ([, p]) => p.method === request.method && p.path === url.pathname,
+    );
+    if (!found) return send(request);
+    const [path, procedure] = found;
+    let input: Record<string, unknown> = {};
+    if (request.method === "GET") {
+      for (const field of procedure.request) {
+        const raw = url.searchParams.get(field.rest);
+        if (raw !== null) input[field.rest] = queryValue(field.type, raw);
+      }
+    } else {
+      const text = await request.text();
+      const parsed: unknown = text ? JSON.parse(text) : {};
+      if (isRecord(parsed)) input = parsed;
+    }
+    const message = messageFromRest(schema, procedure.request, input);
+    const headers = new Headers(request.headers);
+    headers.delete("content-length");
+    headers.delete("accept");
+    headers.set("connect-protocol-version", "1");
+    headers.set("content-type", options.binary ? "application/proto" : "application/json");
+    const body = options.binary
+      ? encodeMessage(schema, procedure.request, message)
+      : JSON.stringify(message);
+    const target = new URL(`${options.basePath}${path}`, url).href;
+    const response = await send(
+      new Request(target, { method: "POST", headers, body, signal: request.signal }),
+    );
+    const out = passHeaders(response.headers);
+    out.set("content-type", "application/json");
+    if (response.status === 200) {
+      const binary = (response.headers.get("content-type") ?? "").startsWith("application/proto");
+      const reply: unknown = binary
+        ? decodeMessage(
+            schema,
+            responseFields(procedure.response),
+            new Uint8Array(await response.arrayBuffer()),
+          )
+        : await response.json();
+      const restBody = responseToRest(schema, procedure.response, isRecord(reply) ? reply : {});
+      if (restBody === undefined) return new Response(null, { status: 204, headers: out });
+      return new Response(JSON.stringify(restBody), { status: 200, headers: out });
+    }
+    // A Connect error: the HTTP API's error response again (status, code, message, details).
+    let error: unknown;
+    try {
+      error = await response.json();
+    } catch {
+      error = undefined;
+    }
+    const fromBody = isRecord(error) && typeof error.code === "string" ? error.code : "http_error";
+    const code = response.headers.get("ddd-error-code") ?? fromBody;
+    const text = isRecord(error) && typeof error.message === "string" ? error.message : "";
+    const status = Number(response.headers.get("ddd-http-status") ?? String(response.status));
+    const rawDetails = response.headers.get("ddd-error-details");
+    const details: unknown = rawDetails ? JSON.parse(decodeURIComponent(rawDetails)) : undefined;
+    const restError = { code, message: text, ...(isRecord(details) ? { details } : {}) };
+    return new Response(JSON.stringify(restError), { status, headers: out });
+  };
+}

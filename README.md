@@ -7,7 +7,7 @@ Entity / Value Object / Aggregate、名前付きの不変条件（Invariant）�
 - **検証**: 参照、型、Rule式、Aggregate境界、循環、シナリオの完全性、コンテキストをまたぐ連携のイベント契約（ポリシーとコンテキストマップ）を、位置と修正案つきで診断する。
 - **生成**: Python（Pydantic v2）または TypeScript（Zod v4）のドメイン層・アプリケーション層とテスト（pytest / vitest・bun test）を決定的に生成する。生成物は `mypy --strict` / `tsc --strict` を通る。
 - **安全な再生成**: 手編集を検知して停止する。削除されたファイルは stale として報告し（生成したままの古い生成テストだけは削除する）、顧客所有の拡張コードは上書きしない。
-- **ディスカバリー**: Miro のように自由に付箋を置ける EventStorming のボードで、イベント・コマンド・集約・コンテキストの境界を探る。抜けの指摘、集約とコンテキスト連携の候補を示し、決めた内容を差分を確認してからモデルに反映する（候補は提案のみで、決めるのはチーム）。
+- **ディスカバリー**: Miro のように自由に付箋を置ける EventStorming のボードで、イベント・コマンド・集約・コンテキストの境界を探る。抜けの指摘、集約とコンテキスト連携の候補を示し、決めた内容を差分を確認してからモデルに反映する（候補は提案のみで、決めるのはチーム）。AI を有効にすると、AI がチャットで問いかけながらワークショップを進める「AI 進行役」も使える。
 - **書きやすさ**: YAML でも、キー・型・エラー・イベント・操作・変数・Rule 式のフィールドや Enum 値を補完し、説明の表示・定義へ移動・名前の一括変更ができる（Web のエディタと VS Code 拡張で同じ言語サービス）。
 - **Web**: モデルを編集・レビューする（YAML、フォーム、図、ルール追跡、シナリオ、生成プレビュー、履歴、メンバーと権限）。
 
@@ -34,6 +34,8 @@ bun run ddd validate my-project/model.ddd.yaml # 検証（エラーがあれば�
 bun run ddd diff my-project/model.ddd.yaml --patch   # 生成したら何が変わるか
 bun run ddd generate my-project/model.ddd.yaml       # 生成（ddd.lock を作る）
 bun run ddd rules my-project/model.ddd.yaml          # ルールの適用箇所とテスト
+bun run ddd migrate my-project/model.ddd.yaml --split # .proto / .domain / .flow の複数ファイル形式に書き出す（docs/10 §12）
+bun run ddd validate my-project                      # ddd.yaml のあるフォルダは複数ファイル形式として読む
 ```
 
 | コマンド | 主なオプション |
@@ -83,6 +85,8 @@ npm install && npm run typecheck && npm test   # または bun install && bun ru
 Value Object・コマンド・イベントは Zod スキーマと推論型、Entity・Aggregate は不変のクラス（`X.from(...)` で検証して作る）、操作は `Transition<T>`（新しい状態と発生イベント）を返す。Decimal は decimal.js、UUID は `Id<"Order">` のようなブランド型。詳しい対応は [docs/05 §8](docs/05-generation-and-architecture.md) と [docs/09 §14](docs/09-implementation-decisions.md)。
 
 #### HTTP API と TanStack Query のクライアント（オプトイン）
+
+`api: { base_path: /api, connect: true }` にすると、同じ Use case とクエリを Connect プロトコル（protobuf JSON とバイナリ）でも出す（サーバー `generated/api/connect.ts`、型付きのクライアント `connect-client.ts`、契約は `generated/proto/`。docs/10 §1.2、docs/09 §25）。Python target では `generation.python: { connect: true }` で WSGI アプリ（`generated/connect.py`）を生成する（docs/10 §1.3）。
 
 `typescript.api` を書くと、Use case ごとの `POST /api/<context>/<use-case>` と Aggregate ごとの `GET /api/<context>/<aggregate>/:id` の契約（Zod）、Web 標準のハンドラ（`Request` → `Response`）、型付きのクライアントと TanStack Query v5 のクエリファクトリ（キーと queryOptions を Aggregate ごとに1つのオブジェクトにまとめたもの）と mutationOptions を生成する。カスタムフックは生成しない（TkDodo の最近の記事に沿う。[docs/05 §8](docs/05-generation-and-architecture.md)・[docs/09 §18](docs/09-implementation-decisions.md)）。
 
@@ -244,7 +248,7 @@ bun run build:vscode
 code --install-extension packages/vscode/ddd-presenter-0.1.0.vsix
 ```
 
-`*.ddd.yaml` で補完・ホバー・定義へ移動（F12）・名前の一括変更（F2）・診断が使える。使い方は [docs/11](docs/11-discovery-and-editing.md)。
+`*.ddd.yaml` で補完・ホバー・定義へ移動（F12）・名前の一括変更（F2）・診断が使える。複数ファイル形式（`ddd.yaml` と `.proto` / `.domain` / `.flow`）では、`.domain` / `.flow` の色付け、プロジェクト全体の診断、補完・ホバー・ファイルをまたぐ定義へ移動・名前の一括変更が使える。使い方は [docs/11](docs/11-discovery-and-editing.md)。
 
 ### Web
 
@@ -384,7 +388,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 | `packages/server` | Hono + bun:sqlite。Workspace / 権限 / テナント分離 / モデル版（楽観排他）/ プレビュー / 監査ログ |
 | `packages/web` | React + Vite。ディスカバリーボード、YAML エディタ（補完つき）、アウトライン、インスペクタ、図（React Flow）、ルール、シナリオ、プレビュー、履歴 |
 | `packages/lsp` | Language Server（stdio / IPC）。core の言語サービスと検証を LSP で提供 |
-| `packages/vscode` | VS Code 拡張（`*.ddd.yaml`） |
+| `packages/vscode` | VS Code 拡張（`*.ddd.yaml`、`.domain` / `.flow` / `.proto` の複数ファイル形式） |
 
 同じ `validateModelText` を CLI・サーバー・ブラウザが使う。一致はテストで確認している（FR-030 / FR-034）。
 
@@ -402,7 +406,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し） |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行（AI 進行役のチャットを含む）、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し） |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語

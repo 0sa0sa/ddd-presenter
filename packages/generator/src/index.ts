@@ -1,4 +1,6 @@
-import { architectureMarkdown, deriveArchitecture, type Analysis, type GenerationTarget } from "@ddd/core";
+import { architectureMarkdown, deriveArchitecture, protoFiles, type Analysis, type GenerationTarget } from "@ddd/core";
+import { connectPlan } from "./connect-plan.ts";
+import { pyConnectFiles, pyConnectTestFile } from "./python/connect.ts";
 import { portsFile, resolveReturn, useCasesFile } from "./python/application.ts";
 import { contextReadme } from "./python/docs.ts";
 import { aggregatesFile, commandsFile, entitiesFile, enumsFile, errorsFile, eventsFile, paramTypes, rulesFile, valueObjectsFile } from "./python/domain.ts";
@@ -108,6 +110,17 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
       const sql = contextSqlFile(model, ca);
       if (sql) gen(sql.path, sql.content);
       withQueries = true;
+    }
+  }
+  if (model.generation.python?.connect) {
+    // The Connect protocol as a WSGI application, and the protobuf contract it serves (docs/09 §25).
+    const cplan = connectPlan(analysis);
+    for (const f of pyConnectFiles(model, cplan)) gen(f.path, f.content);
+    const t = pyConnectTestFile(model, cplan);
+    gen(t.path, t.content);
+    const head = header(model);
+    for (const [path, content] of Object.entries(protoFiles(model, analysis))) {
+      gen(`${src}/${pkg}/generated/proto/${path}`, `${path.endsWith(".yaml") ? head : head.replace(/^#/gm, "//")}\n\n${content}`);
     }
   }
   if (withQueries) {

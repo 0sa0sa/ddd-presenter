@@ -78,7 +78,7 @@ flowchart TB
     n_ctr_domain_Staffing["<b>Staffing domain</b><br/>[TypeScript, zod]<br/><small>tenant</small>"]
   end
   n_ctr_web_client["<b>Web client</b><br/>[TypeScript, TanStack Query]<br/><small>tanstack-query</small>"]
-  n_ctr_http_api["<b>HTTP API</b><br/>[TypeScript, Web-standard fetch handler, zod]<br/><small>/api · JWT · rate 60/min by tenant · tenant</small>"]
+  n_ctr_http_api["<b>HTTP API</b><br/>[TypeScript, Web-standard fetch handler, zod]<br/><small>/api · Connect · JWT · rate 60/min by tenant · tenant</small>"]
   n_ctr_security["<b>Security</b><br/>[TypeScript, zod, jose]<br/><small>JWT · RBAC · tenant: org_id · rate 60/min by tenant · platform roles</small>"]
   n_person_65c6ef(["<b>清掃会社の管理者</b>"])
   n_person_3cec76(["<b>スタッフ候補</b>"])
@@ -91,7 +91,7 @@ flowchart TB
   n_person_65c6ef -->|"uses"| n_ctr_web_client
   n_person_3cec76 -->|"uses"| n_ctr_web_client
   n_person_1258c9 -->|"uses"| n_ctr_web_client
-  n_ctr_web_client -->|"calls<br/>[HTTPS JSON, Bearer JWT]"| n_ctr_http_api
+  n_ctr_web_client -->|"calls<br/>[HTTPS JSON / Connect, Bearer JWT]"| n_ctr_http_api
   n_ctr_web_client -->|"signs in, obtains JWT<br/>[OIDC]"| n_ctr_idp
   n_ctr_http_api -->|"authenticates, authorizes, rate limits"| n_ctr_security
   n_role_operator -->|"operates across tenants<br/>[cross_tenant]"| n_ctr_http_api
@@ -123,7 +123,7 @@ flowchart TB
 | Element | Kind | Technology | Description | Badges |
 |---|---|---|---|---|
 | Web client | Container | TypeScript, TanStack Query | Typed query / mutation options for every endpoint (generated client). | `tanstack-query` |
-| HTTP API | Container | TypeScript, Web-standard fetch handler, zod | Contract, server routes and error mapping under /api. Authenticates, authorizes and rate limits every request. | `/api` `JWT` `rate 60/min by tenant` `tenant` |
+| HTTP API | Container | TypeScript, Web-standard fetch handler, zod | Contract, server routes and error mapping under /api. Authenticates, authorizes and rate limits every request. Also serves the protobuf contract (generated/proto) over the Connect protocol. | `/api` `Connect` `JWT` `rate 60/min by tenant` `tenant` |
 | Security | Container | TypeScript, zod, jose | Principal, roles and permissions, authorization checks, rate limiting, tenant context, bearer JWT authenticator. | `JWT` `RBAC` `tenant: org_id` `rate 60/min by tenant` `platform roles` |
 | 清掃会社の管理者 | Person | — | — | — |
 | スタッフ候補 | Person | — | — | — |
@@ -143,7 +143,7 @@ flowchart TB
 | 清掃会社の管理者 | Web client | uses | — |
 | スタッフ候補 | Web client | uses | — |
 | 運用担当 | Web client | uses | — |
-| Web client | HTTP API | calls | HTTPS JSON, Bearer JWT |
+| Web client | HTTP API | calls | HTTPS JSON / Connect, Bearer JWT |
 | Web client | Identity provider | signs in, obtains JWT | OIDC |
 | HTTP API | Security | authenticates, authorizes, rate limits | — |
 | operator | HTTP API | operates across tenants | cross_tenant |

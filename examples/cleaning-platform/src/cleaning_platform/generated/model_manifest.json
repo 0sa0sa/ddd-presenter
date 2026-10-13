@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "e6d8bf6e50d671b686f005a02f0729dac019b71cb27633dad8d229a466336766",
+  "model_sha256": "182f593a1d8b883433a2fd49c70ae3948910d0d5d0f1a138efbad3b18758c143",
   "files": [
     {
       "path": "sql/cleaning_staff.sql",
@@ -12,6 +12,10 @@
     {
       "path": "src/cleaning_platform/generated/__init__.py",
       "sha256": "9548a940bca40da12d0036590df64b2469820996812da4c6862b2bf2eded2c75"
+    },
+    {
+      "path": "src/cleaning_platform/generated/_connect.py",
+      "sha256": "9efaab6c9d9967403b7c87e3d586123323de0af2e89debcb15023433830f25a7"
     },
     {
       "path": "src/cleaning_platform/generated/_persistence.py",
@@ -27,7 +31,7 @@
     },
     {
       "path": "src/cleaning_platform/generated/ARCHITECTURE.md",
-      "sha256": "1c5641b07e6ecb3c277efafa3858adf17ecc1ba3465ae38dc71f021225b87341"
+      "sha256": "b564f36edda0b679a5c3bc7090dc2bd3c55d516d3652662ca274194e4f0987be"
     },
     {
       "path": "src/cleaning_platform/generated/authentication.py",
@@ -112,6 +116,26 @@
     {
       "path": "src/cleaning_platform/generated/cleaning_staff/testing.py",
       "sha256": "a7713e39620f75f935b38956f29f52a3cabcfd3d808e8272233df6ad4bf7e298"
+    },
+    {
+      "path": "src/cleaning_platform/generated/connect.py",
+      "sha256": "c1128f7e3937181f085a2c44bd32ddb1c37c9820e30a54b64ab01e07e796e6c4"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/buf.yaml",
+      "sha256": "58deaaabacb7b98f60637e3015b24e3bded5f03c9d074eeaff9380456eb8aa69"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/cleaning_staff/v1/cleaning_staff.proto",
+      "sha256": "dbd4d8e372489d5e4f59e460ebaec8f70bea78ff66203f83e865d0e43d5611e5"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/ddd/v1/options.proto",
+      "sha256": "b6e0c1df92eb20fdc5d23bbdb3a90efdf198313f360a04e191e03a8f59af34ed"
+    },
+    {
+      "path": "src/cleaning_platform/generated/proto/staffing/v1/staffing.proto",
+      "sha256": "08e86ba558d1f6ed08e7b95907b43690f35c61a131a61884372490c2784a32c6"
     },
     {
       "path": "src/cleaning_platform/generated/rate_limit.py",
@@ -220,6 +244,10 @@
     {
       "path": "tests/generated/test_cleaning_staff_search_invitations.py",
       "sha256": "15d0649e99ea6be239fac1443fe1d33c416b6a3331ea93dd2c32c45833287f9b"
+    },
+    {
+      "path": "tests/generated/test_connect.py",
+      "sha256": "285c7415878eaca1b7eba3838de2fbb41ba746a94c9a0eb8e8ae93f602bea8ec"
     },
     {
       "path": "tests/generated/test_security.py",

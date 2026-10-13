@@ -224,6 +224,12 @@ const SECURITY = readFileSync(join(import.meta.dir, "fixtures/security.ddd.yaml"
 /** Queries (read side) and the PostgreSQL adapters (their SQL is exercised on PGlite by queries.test.ts). */
 const QUERIES = readFileSync(join(import.meta.dir, "fixtures/queries.ddd.yaml"), "utf8");
 const SECURE_QUERIES = readFileSync(join(import.meta.dir, "fixtures/secure-queries.ddd.yaml"), "utf8");
+/** A model with `generation.python.connect` (the Connect WSGI application, docs/09 §25). */
+function withConnect(text: string): string {
+  if (/^ {2}python:/m.test(text)) return text;
+  return text.replace(/^generation:\n/m, "generation:\n  python: { connect: true, base_path: /rpc }\n");
+}
+
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -241,6 +247,10 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
 
     ["the queries model (trigram / prefix / exact search, keyset paging, cursors, PostgreSQL mapping without a database)", QUERIES],
     ["the secure-queries model (protected queries: roles, rows scoped by a claim and by principal.id, cursors bound to the caller)", SECURE_QUERIES],
+    ["the kitchen-sink model over Connect (lists, decimals, dates, entities in protobuf JSON; no security)", withConnect(KITCHEN_SINK)],
+    ["the ordering model over Connect (entities, arithmetic results)", withConnect(ORDERING)],
+    ["the security model over Connect (authenticator, rate limits per principal and IP)", withConnect(SECURITY)],
+    ["the secure-queries model over Connect (protected queries and pages)", withConnect(SECURE_QUERIES)],
     ["a model reflected from the discovery board", FROM_BOARD],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
@@ -299,6 +309,10 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
 
     ["the queries model", QUERIES],
     ["the secure-queries model", SECURE_QUERIES],
+    ["the kitchen-sink model over Connect", withConnect(KITCHEN_SINK)],
+    ["the ordering model over Connect", withConnect(ORDERING)],
+    ["the security model over Connect", withConnect(SECURITY)],
+    ["the secure-queries model over Connect", withConnect(SECURE_QUERIES)],
     ["a model reflected from the discovery board", FROM_BOARD],
   ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));

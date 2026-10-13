@@ -1,10 +1,11 @@
-import { itemsInFrame, SUBDOMAIN_LABEL, type AggregateCandidate, type Board, type ContextLink, type Finding, type ModelIR } from "@ddd/core";
+import { itemsInFrame, SUBDOMAIN_LABEL, type AggregateCandidate, type Board, type BoardGhost, type ContextLink, type Finding, type ModelIR } from "@ddd/core";
 import { useState } from "react";
 import { addConnector, addItem } from "../../lib/boardOps.ts";
+import { FacilitatorPanel } from "./FacilitatorPanel.tsx";
 import { SyncPanel } from "./SyncPanel.tsx";
 import { WorkshopPanel } from "./WorkshopPanel.tsx";
 
-type Tab = "workshop" | "hints" | "aggregates" | "contexts" | "model";
+type Tab = "facilitator" | "workshop" | "hints" | "aggregates" | "contexts" | "model";
 
 export function AssistPanel({
   board,
@@ -21,7 +22,15 @@ export function AssistPanel({
   onVoting,
   modelText,
   onModelYaml,
+  projectId,
+  boardId,
+  aiActive,
+  onShowGhosts,
 }: {
+  projectId: string;
+  boardId: string;
+  aiActive: boolean;
+  onShowGhosts: (ghosts: BoardGhost[]) => void;
   modelText: string;
   onModelYaml: (yaml: string, message: string) => void;
   model?: ModelIR;
@@ -62,6 +71,9 @@ export function AssistPanel({
         </button>
       </div>
       <div className="tabs assist-tabs" role="tablist">
+        <button className="tab" role="tab" data-tour="assist-tab-facilitator" aria-selected={tab === "facilitator"} onClick={() => setTab("facilitator")} title="AI がチャットで問いかけながらワークショップを進めます">
+          AI 進行役
+        </button>
         <button className="tab" role="tab" data-tour="assist-tab-workshop" aria-selected={tab === "workshop"} onClick={() => setTab("workshop")}>
           進行
         </button>
@@ -79,6 +91,10 @@ export function AssistPanel({
         </button>
       </div>
 
+      {/* Kept mounted on the other tabs, so a reply on its way is not lost when someone looks at another tab. */}
+      <div hidden={tab !== "facilitator"}>
+        <FacilitatorPanel projectId={projectId} boardId={boardId} board={board} user={user} canEdit={canEdit} aiActive={aiActive} onChange={onChange} onFocus={onFocus} onShowGhosts={onShowGhosts} />
+      </div>
       {tab === "workshop" && <WorkshopPanel board={board} user={user} canEdit={canEdit} voting={voting} onVoting={onVoting} onChange={onChange} onFocus={onFocus} />}
       {tab === "model" && <SyncPanel board={board} model={model} modelText={modelText} onModelYaml={onModelYaml} canEdit={canEdit} onChange={onChange} onFocus={onFocus} onReflect={onReflect} />}
 

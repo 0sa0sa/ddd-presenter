@@ -9,6 +9,7 @@ import { HistoryView } from "../components/HistoryView.tsx";
 import { Inspector } from "../components/Inspector.tsx";
 import { Outline } from "../components/Outline.tsx";
 import { ProposeDialog } from "../components/ProposeDialog.tsx";
+import { SplitFormatDialog } from "../components/SplitFormatDialog.tsx";
 import type { ProposeKind } from "../lib/propose.ts";
 import { PreviewView } from "../components/PreviewView.tsx";
 import { RulesView } from "../components/RulesView.tsx";
@@ -65,6 +66,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
   const [ai, setAi] = useState<{ available: boolean; enabled: boolean; active: boolean; model: string | null }>();
   const [aiBusy, setAiBusy] = useState(false);
   const [propose, setPropose] = useState<{ context: string; aggregate: string; kind: ProposeKind }>();
+  const [splitOpen, setSplitOpen] = useState(false);
   const [board, setBoard] = useState<{ id: string; name: string }>(() => {
     try {
       return { id: localStorage.getItem(`ddd.board.${id}`) ?? "main", name: "" };
@@ -403,6 +405,9 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
                 <p className="editor-help small muted" data-tour="editor-help">
                   グレーの予測は Tab で確定・Esc で消す・⌥\ で今すぐ予測・Ctrl+Space 補完・F12 定義へ・F2 名前を一括変更
                   <span className="spacer" />
+                  <button className="quiet small-button" onClick={() => setSplitOpen(true)} title="モデルを .proto / .domain / .flow に分けた形式で書き出す・読み込む">
+                    複数ファイル形式…
+                  </button>
                   <span className={ai?.active ? "ai-on" : "muted"}>
                     {ai?.active ? `AI: オン（${ai.model}）${aiBusy ? " 考えています…" : ""}` : ai?.available ? "AI: オフ（ワークスペースの設定で有効化）" : "予測: ローカルのみ"}
                   </span>
@@ -496,6 +501,19 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} onPropose={(context, aggregate, kind) => setPropose({ context, aggregate, kind })} />
         )}
       </div>
+      {splitOpen && (
+        <SplitFormatDialog
+          text={text}
+          project={project?.name ?? "model"}
+          canEdit={canEdit}
+          onClose={() => setSplitOpen(false)}
+          onImport={(yaml, msg) => {
+            setText(yaml);
+            setSplitOpen(false);
+            setStatus(msg);
+          }}
+        />
+      )}
       {propose && (
         <ProposeDialog
           projectId={id}

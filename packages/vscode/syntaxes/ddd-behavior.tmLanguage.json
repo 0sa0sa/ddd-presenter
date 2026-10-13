@@ -1,0 +1,58 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "DDD Presenter rules and flows",
+  "scopeName": "source.ddd-behavior",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#declaration" },
+    { "include": "#keyword" },
+    { "include": "#parameter" },
+    { "include": "#number" },
+    { "include": "#operator" },
+    { "include": "#type" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        { "name": "comment.line.double-slash.ddd", "match": "//.*$" },
+        { "name": "comment.block.ddd", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "string": {
+      "patterns": [
+        { "name": "string.quoted.double.ddd", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.ddd", "match": "\\\\." }] },
+        { "name": "string.quoted.single.ddd", "begin": "'", "end": "'", "patterns": [{ "name": "constant.character.escape.ddd", "match": "\\\\." }] }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(context|aggregate|value|entity|flow|query|policy)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "keyword.declaration.ddd" }, "2": { "name": "entity.name.type.ddd" } }
+        },
+        {
+          "match": "\\b(invariant|guard|factory|operation|extension)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "keyword.declaration.ddd" }, "2": { "name": "entity.name.function.ddd" } }
+        },
+        {
+          "match": "\\b(emit|publish|fail|else\\s+fail)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "keyword.control.ddd" }, "2": { "name": "entity.name.type.ddd" } }
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        { "name": "keyword.control.ddd", "match": "\\b(if|else|return|fail|let|load|save|publish|after|commit|emit|new|change|requires|when|run|authorize|where|search|order|by|asc|desc|page|max|returns|from|on|default)\\b" },
+        { "name": "keyword.other.ddd", "match": "\\b(glossary|construct|transition|none|trigram|prefix|exact)\\b" },
+        { "name": "keyword.operator.logical.ddd", "match": "\\b(and|or|not)\\b" },
+        { "name": "constant.language.ddd", "match": "\\b(true|false|null)\\b" },
+        { "name": "variable.language.ddd", "match": "\\b(clock|ids|principal|event)\\b" }
+      ]
+    },
+    "parameter": { "name": "variable.parameter.ddd", "match": ":[A-Za-z_][A-Za-z0-9_]*\\b" },
+    "number": { "name": "constant.numeric.ddd", "match": "\\b[0-9]+(\\.[0-9]+)?\\b" },
+    "operator": { "name": "keyword.operator.ddd", "match": "==|!=|<=|>=|->|[<>+\\-*/?=]" },
+    "type": { "name": "entity.name.type.ddd", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
+  }
+}

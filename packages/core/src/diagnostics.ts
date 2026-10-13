@@ -13,6 +13,8 @@ export interface Diagnostic {
   hint?: string;
   line?: number;
   column?: number;
+  /** Source file of `line` / `column` when the model spans several files (.proto / .domain / .flow sources). */
+  file?: string;
 }
 
 export class DiagnosticBag {
@@ -45,6 +47,7 @@ const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2
 export function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
   return [...diagnostics].sort(
     (a, b) =>
+      (a.file ?? "").localeCompare(b.file ?? "") ||
       (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER) ||
       (a.column ?? 0) - (b.column ?? 0) ||
       SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
@@ -60,7 +63,8 @@ export function formatPath(path: Path): string {
 }
 
 export function formatDiagnostic(d: Diagnostic, file = "model"): string {
-  const loc = d.line ? `${file}:${d.line}:${d.column ?? 1}` : file;
+  const f = d.file ?? file;
+  const loc = d.line ? `${f}:${d.line}:${d.column ?? 1}` : f;
   const where = d.element ? ` (${d.element})` : "";
   const hint = d.hint ? `\n    hint: ${d.hint}` : "";
   const at = d.path.length ? `\n    at ${formatPath(d.path)}` : "";

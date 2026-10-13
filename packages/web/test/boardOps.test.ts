@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { boardGhosts, emptyBoard, sampleBoard, type Board, type BoardGhost } from "@ddd/core";
-import { acceptGhost, addComment, addConnector, addFrame, addItem, addLane, duplicate, frameContents, History, moveBy, removeComment, removeIds, updateItem, updateLane, visibleGhosts } from "../src/lib/boardOps.ts";
+import { acceptGhost, acceptGhosts, addComment, addConnector, addFrame, addItem, addLane, duplicate, frameContents, History, moveBy, removeComment, onBoard, removeIds, updateItem, updateLane, visibleGhosts } from "../src/lib/boardOps.ts";
 import { applyRenames } from "../src/lib/boardRenames.ts";
 
 describe("board operations", () => {
@@ -138,5 +138,25 @@ describe("workshop edits", () => {
     expect(r.items[0]!.codeName).toBe("InvitationWasAccepted");
     expect(r.frames[0]!.codeName).toBe("Recruiting");
     expect(applyRenames(b, [{ from: "Nope", to: "X" }])).toBe(b);
+  });
+});
+
+describe("facilitator suggestions", () => {
+  test("acceptGhosts adds a chain in order and connects each sticky to the one it was suggested next to", () => {
+    const b: Board = { version: 1, items: [{ id: "e1", kind: "event", text: "完了した", x: 0, y: 0, w: 160, h: 100 }], frames: [], connectors: [] };
+    const ghosts: BoardGhost[] = [
+      { id: "g-0", kind: "command", text: "完了する", x: -200, y: 0, connect: { from: "g-0", to: "e1" }, reason: "", source: "llm" },
+      { id: "g-1", kind: "actor", text: "ユーザー", x: -200, y: -100, connect: { from: "g-1", to: "g-0" }, reason: "", source: "llm" },
+      { id: "g-2", kind: "event", text: "x", x: 0, y: 300, connect: { from: "gone", to: "g-2" }, reason: "", source: "llm" },
+    ];
+    const r = acceptGhosts(b, ghosts);
+    expect(r.ids).toHaveLength(3);
+    const [cmd, actor] = r.ids as [string, string];
+    expect(r.board.connectors.map((c) => [c.from, c.to])).toEqual([
+      [cmd, "e1"],
+      [actor, cmd],
+    ]); // the arrow to a sticky that no longer exists is left out
+    expect(onBoard(r.board, { kind: "actor", text: " ユーザー。" })).toBe(true);
+    expect(onBoard(r.board, { kind: "event", text: "ユーザー" })).toBe(false);
   });
 });

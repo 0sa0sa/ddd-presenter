@@ -121,12 +121,13 @@ describe("containers (L2)", () => {
   test("TypeScript with the HTTP API: web client, API, security, PostgreSQL (RLS, trigram), identity provider", () => {
     const v = arch(TS).containers;
     expect(el(v, "ctr:web-client").technology).toContain("TanStack Query");
-    expect(el(v, "ctr:http-api").badges).toEqual(expect.arrayContaining(["/api", "JWT", "rate 60/min by tenant", "tenant"]));
+    expect(el(v, "ctr:http-api").badges).toEqual(expect.arrayContaining(["/api", "Connect", "JWT", "rate 60/min by tenant", "tenant"]));
     expect(el(v, "ctr:postgres").badges).toEqual(expect.arrayContaining(["RLS on", "trigram", "tenant_id"]));
     expect(el(v, "ctr:idp").badges).toContain("RS256");
     expect(el(v, "ctr:events").kind).toBe("container");
     const link = (s: string, t: string) => v.relations.find((r) => r.source === s && r.target === t);
-    expect(link("ctr:web-client", "ctr:http-api")!.technology).toBe("HTTPS JSON, Bearer JWT");
+    // The example also serves the Connect protocol (generation.typescript.api.connect).
+    expect(link("ctr:web-client", "ctr:http-api")!.technology).toBe("HTTPS JSON / Connect, Bearer JWT");
     expect(link("ctr:security", "ctr:idp")!.technology).toBe("JWKS (HTTPS)");
     expect(link("ctr:app:CleaningStaff", "ctr:postgres")!.technology).toContain("RLS");
     expect(link("ctr:events", "ctr:app:Staffing")).toBeDefined();
@@ -149,7 +150,7 @@ describe("containers (L2)", () => {
     const queries = arch(FIXTURES[2]!).containers;
     expect(el(queries, "ctr:postgres").badges).not.toContain("RLS on");
     // TypeScript without the API does not verify JWTs (the authenticator lives in the HTTP layer).
-    const noApi = arch(replaced(TS, "    api: { base_path: /api, client: tanstack-query }", "")).containers;
+    const noApi = arch(replaced(TS, "    api: { base_path: /api, client: tanstack-query, connect: true }", "")).containers;
     expect(noApi.elements.some((e) => e.id === "ctr:idp" || e.id === "ctr:http-api")).toBe(false);
   });
 });

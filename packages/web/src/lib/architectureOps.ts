@@ -235,7 +235,7 @@ export function generatedFilesFor(code: ArchCode[] | undefined, paths: string[])
       policies: inCtx("application/policies."),
       persistence: inCtx("persistence/"),
       testing: inCtx("testing."),
-      api: c.context ? inCtx("api/") : (p) => /\/generated\/api\//.test(p),
+      api: c.context ? inCtx("api/") : (p) => /\/generated\/api\/|\/generated\/_?connect\.py$|\/generated\/proto\//.test(p),
       sql: (p) => p === `sql/${snake}.sql`,
       extensions: (p) => dirs.some((d) => p.includes(`/extensions/${d}/`)),
       security: (p) => /\/generated\/(security|authentication|rate_limit)\.(py|ts)$|\/generated\/api\/(authentication|rate-limit)\.ts$/.test(p),

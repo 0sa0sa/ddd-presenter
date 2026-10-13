@@ -5,7 +5,7 @@
  * and nothing is sent unless the workspace owner enabled AI.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import type { Board, Proposal } from "@ddd/core";
+import type { Board, FacilitatorAnswer, FacilitatorBrief, Proposal, StickySuggestion } from "@ddd/core";
 import { mkdtempSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,13 +36,17 @@ export interface BoardRequest {
   signal?: AbortSignal;
 }
 
-export interface BoardSuggestion {
-  kind: string;
-  text: string;
-  near_item_id: string;
-  placement: "right" | "left" | "above" | "below";
-  connect: "from_near" | "to_near" | "none";
-  reason: string;
+export type BoardSuggestion = StickySuggestion;
+
+export interface FacilitateRequest {
+  board: Board;
+  /** The workshop step, its checks and the board's findings (facilitatorBrief). */
+  brief: FacilitatorBrief;
+  /** Earlier turns, oldest first. */
+  history: { role: "user" | "assistant"; text: string; author?: string }[];
+  /** The participant's new message; absent when the facilitator opens or continues the session. */
+  message?: { text: string; author: string };
+  signal?: AbortSignal;
 }
 
 /** What the rest of the server needs from an LLM. Tests inject a fake implementation. */
@@ -52,6 +56,8 @@ export interface ModelAssistant {
   inline(req: InlineRequest): Promise<string | undefined>;
   propose(req: ProposeRequest): Promise<Omit<Proposal, "source"> | undefined>;
   board(req: BoardRequest): Promise<BoardSuggestion[]>;
+  /** One turn of the workshop facilitator (chat). */
+  facilitate(req: FacilitateRequest): Promise<FacilitatorAnswer | undefined>;
 }
 
 /** Where assistance can come from. */
@@ -71,7 +77,7 @@ export interface Message {
 }
 
 export interface CompleteRequest {
-  purpose: "inline" | "propose" | "board";
+  purpose: "inline" | "propose" | "board" | "facilitate";
   messages: Message[];
   /** JSON Schema for a structured answer; the result is then JSON text. */
   schema?: Record<string, unknown>;
@@ -139,6 +145,58 @@ const BOARD_SCHEMA = {
     },
   },
 } as const;
+
+const SUGGESTION_ITEM = BOARD_SCHEMA.properties.suggestions.items;
+
+const FACILITATOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reply", "suggestions", "next_phase", "focus_item_ids", "options"],
+  properties: {
+    reply: { type: "string", description: "What the facilitator says to the participants" },
+    suggestions: {
+      type: "array",
+      items: {
+        ...SUGGESTION_ITEM,
+        required: ["ref", ...SUGGESTION_ITEM.required],
+        properties: { ref: { type: "string" }, ...SUGGESTION_ITEM.properties },
+      },
+    },
+    next_phase: { type: "string", description: "Id of the workshop step to move to, or empty" },
+    focus_item_ids: { type: "array", items: { type: "string" } },
+    options: { type: "array", items: { type: "string" }, description: "Up to 4 short answers the participants may click" },
+  },
+} as const;
+
+/** How the facilitator works; the board's state comes with every turn. */
+const FACILITATOR_TASK = `You are the facilitator of an EventStorming workshop on the discovery board of "DDD Presenter".
+The participants are a product team (possibly a single person) and their domain experts. Lead them through the
+workshop steps one at a time, the way an experienced EventStorming facilitator would.
+
+How to facilitate:
+- Work on the current step only. Its goal, its prompts and its checks are in <workshop>. Ask about what the
+  unmet checks and the findings point at; when the board is empty, first ask what business or product they want
+  to model and which happy path to start with.
+- Ask at most two questions per turn and keep the reply short (about 2-6 sentences). No lectures; explain an
+  EventStorming idea only when it helps the next step, in one sentence.
+- Turn what the participants said into sticky suggestions (events in past tense, commands as intentions, actors,
+  policies "whenever X then Y", aggregates, rules, hotspots). Suggestions are only proposals that people accept:
+  you cannot change the board yourself, so say that you suggest stickies (they appear as translucent proposals
+  to add), never that you placed, moved or added them.
+- Never invent business facts. When something is unclear or disputed, suggest a hotspot sticky with the question
+  instead of guessing, and move on.
+- When the participants jump ahead (solutions, database, screens) while the step is about something else, park it
+  as a hotspot and bring them back.
+- When every check of the step is done, or the participants want to move on, propose the next step in
+  next_phase (an id from <workshop> phases) and say what it is about. Otherwise next_phase is "".
+- Refer to stickies by their text in the reply and put their ids in focus_item_ids.
+- options: up to 4 short, concrete answers the participants could click (in the board's language), or none.
+- Write the reply, sticky texts, reasons and options in the participants' language (Japanese unless they write
+  in another language).
+
+Suggestions: ref is a short unique id ("s1", "s2", ...). near_item_id is an existing sticky id, the ref of an
+earlier suggestion in this answer (to build a chain such as actor → command → event), or "" to put the sticky at
+the end of the timeline. Suggest at most 8 stickies per turn.`;
 
 const KIND_HINT: Record<string, string> = {
   "next-operation": "Propose the next operation this aggregate needs (lifecycle transitions that are missing), with its guard, changes and emitted event.",
@@ -224,6 +282,44 @@ ${JSON.stringify(compact)}
         ],
       });
       return parseJson<{ suggestions: BoardSuggestion[] }>(text)?.suggestions ?? [];
+    },
+
+    async facilitate({ board, brief, history, message, signal }) {
+      const compact = {
+        frames: board.frames.map((f) => ({ id: f.id, title: f.title, ...(f.subdomain ? { subdomain: f.subdomain } : {}) })),
+        items: board.items.map((i) => ({ id: i.id, kind: i.kind, text: i.text, ...(i.pivotal ? { pivotal: true } : {}), ...(i.resolved ? { resolved: true } : {}), ...(i.votes?.length ? { votes: i.votes.length } : {}) })),
+        connectors: board.connectors.map((c) => ({ from: c.from, to: c.to })),
+      };
+      // Earlier turns as a conversation (consecutive messages of one side merged; the first turn is the user's).
+      const messages: Message[] = [];
+      const push = (role: Message["role"], content: string) => {
+        const last = messages[messages.length - 1];
+        if (last?.role === role) last.content += `\n\n${content}`;
+        else messages.push({ role, content });
+      };
+      for (const h of history) push(h.role, h.role === "user" ? `[${h.author ?? "participant"}] ${h.text}` : h.text);
+      if (messages[0]?.role === "assistant") messages.unshift({ role: "user", content: "(The workshop starts.)" });
+      const turn = message
+        ? `<participant_message author="${message.author.replace(/[<>"]/g, "")}">\n${message.text}\n</participant_message>`
+        : history.length
+          ? "(No new message: continue facilitating from where the board is now.)"
+          : "(The session starts: greet the participants briefly, say what the current step is for, and ask the first question.)";
+      push(
+        "user",
+        `${FACILITATOR_TASK}
+
+<workshop>
+${JSON.stringify(brief)}
+</workshop>
+
+<board>
+${JSON.stringify(compact)}
+</board>
+
+${turn}`,
+      );
+      const text = await completer.complete({ purpose: "facilitate", signal, effort: "low", maxTokens: 6000, schema: FACILITATOR_SCHEMA, messages });
+      return parseJson<FacilitatorAnswer>(text);
     },
   };
 }
@@ -373,7 +469,7 @@ function flatten(messages: Message[]): string {
   return messages.map((m) => (m.role === "user" ? m.content : `<your_previous_answer>\n${m.content}\n</your_previous_answer>`)).join("\n\n");
 }
 
-const TIMEOUT: Record<CompleteRequest["purpose"], number> = { inline: 120_000, propose: 600_000, board: 300_000 };
+const TIMEOUT: Record<CompleteRequest["purpose"], number> = { inline: 120_000, propose: 600_000, board: 300_000, facilitate: 300_000 };
 
 export interface CliOptions {
   /** Executable (default: `claude` / `codex` on PATH). */

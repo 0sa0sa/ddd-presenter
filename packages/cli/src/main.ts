@@ -12,7 +12,10 @@ Usage:
   ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock] [--target python|typescript]
   ddd rules    [model] [--format json]              Where each named rule is applied and tested
   ddd migrate  [model] [--write]                    Upgrade an older schema_version
-  ddd init     [dir] [--target python|typescript]   Create a sample model.ddd.yaml
+  ddd migrate  [model] --split [--out dir] [--force] Convert a YAML model to the multi-file format
+                                                   (ddd.yaml + .proto / .domain / .flow / .scenarios.yaml)
+  ddd init     [dir] [--target python|typescript] [--split]
+                                                   Create a sample model.ddd.yaml (--split: the multi-file format)
   ddd version  [--format json]
 
 Options:
@@ -21,7 +24,9 @@ Options:
   --target <t>    python or typescript; overrides generation.target of the model (diff, generate)
   --no-color      Disable colors
 
-The model defaults to ./model.ddd.yaml. Nothing is sent over the network.`;
+The model defaults to ./model.ddd.yaml, else ./ddd.yaml. A model is a YAML file, or a directory holding
+ddd.yaml and the .proto / .domain / .flow / .scenarios.yaml sources (docs/10 §12).
+Nothing is sent over the network.`;
 
 export function run(argv: string[], io: Io): number {
   const [command, ...rest] = argv;
@@ -45,6 +50,7 @@ export function run(argv: string[], io: Io): number {
         "dry-run": { type: "boolean", default: false },
         "update-lock": { type: "boolean", default: false },
         write: { type: "boolean", default: false },
+        split: { type: "boolean", default: false },
         "no-color": { type: "boolean", default: false },
         target: { type: "string" },
       },
@@ -75,9 +81,9 @@ export function run(argv: string[], io: Io): number {
     case "rules":
       return cmdRules(io, common);
     case "migrate":
-      return cmdMigrate(io, { ...common, write: v.write! });
+      return cmdMigrate(io, { ...common, write: v.write!, split: v.split!, force: v.force! });
     case "init":
-      return cmdInit(io, parsed.positionals[0] ?? ".", target);
+      return cmdInit(io, parsed.positionals[0] ?? ".", target, v.split!);
     case "version":
       return cmdVersion(io, common.format);
     default:

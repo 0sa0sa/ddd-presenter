@@ -8,7 +8,7 @@ generation:
   tests_dir: tests
   typescript:
     test_runner: vitest             # vitest（既定）| bun
-    api: { base_path: /api, client: tanstack-query }   # HTTP API（契約・サーバーのハンドラ・TanStack Query のクライアント）。省略で生成しない
+    api: { base_path: /api, client: tanstack-query, connect: true }   # HTTP API（契約・サーバーのハンドラ・TanStack Query のクライアント）と Connect（docs/09 §25）。省略で生成しない
 
 # 認証・認可・レート制限（docs/09 §20）。宣言すると、すべての Use case と Aggregate に authorize が必要（既定は拒否）
 security:

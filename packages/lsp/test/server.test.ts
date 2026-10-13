@@ -1,8 +1,11 @@
 /** Speaks LSP (JSON-RPC over stdio) to the real server process, as VS Code does. */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { splitModelText } from "@ddd/core";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform/model.ddd.yaml"), "utf8");
 const SOURCE = join(import.meta.dir, "../src/server.ts");
@@ -129,5 +132,56 @@ describe.each(runs)("language server: %s", (_label, cmd) => {
     expect(newText).not.toContain("InvitationAlreadyClosed");
     const bad = await client.request("textDocument/prepareRename", { textDocument: { uri: URI }, position: positionOf(SAMPLE, "expression: expires_at", 14) });
     expect(bad.error.message).toContain("型");
+  });
+
+  describe("multi-file model", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ddd-lsp-split-"));
+    const files = splitModelText(SAMPLE).files;
+    for (const [p, c] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), c);
+    }
+    const FLOW = files["cleaning_staff.flow"]!;
+    const flowUri = pathToFileURL(join(dir, "cleaning_staff.flow")).toString();
+    const protoUri = pathToFileURL(join(dir, "cleaning_staff/v1/cleaning_staff.proto")).toString();
+    const diagsFor = (uri: string, pred: (ds: any[]) => boolean) =>
+      client.waitFor((m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === uri && pred(m.params.diagnostics));
+
+    test("validates the whole project and reports into the file that has the problem", async () => {
+      client.notify("textDocument/didOpen", { textDocument: { uri: flowUri, languageId: "ddd-flow", version: 1, text: FLOW } });
+      await diagsFor(flowUri, (ds) => ds.length === 0);
+      await diagsFor(protoUri, (ds) => ds.length === 0);
+      const broken = FLOW.replace("fail EmailBlocked", "fail EmailBlockd");
+      client.notify("textDocument/didChange", { textDocument: { uri: flowUri, version: 2 }, contentChanges: [{ text: broken }] });
+      const r = await diagsFor(flowUri, (ds) => ds.some((d) => d.code === "unknown-error"));
+      expect(r.params.diagnostics[0].range.start.line).toBe(positionOf(broken, "fail EmailBlockd", 0).line);
+      client.notify("textDocument/didChange", { textDocument: { uri: flowUri, version: 3 }, contentChanges: [{ text: FLOW }] });
+      await diagsFor(flowUri, (ds) => ds.length === 0);
+    });
+
+    test("completion, hover and definition across files", async () => {
+      const pos = positionOf(FLOW, "fail EmailBlocked", 7);
+      const c = await client.request("textDocument/completion", { textDocument: { uri: flowUri }, position: pos });
+      const labels = c.result.items.map((i: any) => i.label);
+      expect(labels).toContain("EmailBlocked");
+      expect(labels).toContain("publish");
+      const h = await client.request("textDocument/hover", { textDocument: { uri: flowUri }, position: pos });
+      expect(h.result.contents.value).toContain("email_blocked");
+      const d = await client.request("textDocument/definition", { textDocument: { uri: flowUri }, position: pos });
+      expect(d.result[0].uri).toBe(protoUri);
+      expect(d.result[0].range.start.line).toBe(positionOf(files["cleaning_staff/v1/cleaning_staff.proto"]!, "message EmailBlocked", 0).line);
+    });
+
+    test("rename changes every file that names the element", async () => {
+      const pos = positionOf(FLOW, "fail EmailBlocked", 7);
+      const prep = await client.request("textDocument/prepareRename", { textDocument: { uri: flowUri }, position: pos });
+      expect(prep.result.placeholder).toBe("EmailBlocked");
+      const r = await client.request("textDocument/rename", { textDocument: { uri: flowUri }, position: pos, newName: "EmailRefused" });
+      const uris = Object.keys(r.result.changes).sort();
+      expect(uris).toEqual([flowUri, pathToFileURL(join(dir, "cleaning_staff.scenarios.yaml")).toString(), protoUri].sort());
+      expect(r.result.changes[protoUri][0].newText).toContain("message EmailRefused {");
+      const bad = await client.request("textDocument/prepareRename", { textDocument: { uri: flowUri }, position: positionOf(FLOW, "(email, valid_until)", 2) });
+      expect(bad.error.message).toBeDefined();
+    });
   });
 });

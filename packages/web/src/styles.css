@@ -1268,6 +1268,95 @@ textarea,
   padding: 6px 8px;
   font-size: 12.5px;
 }
+/* AI facilitator (chat in the board's side panel) */
+.facilitator {
+  display: grid;
+  gap: 10px;
+}
+.facilitator-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.facilitator-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  max-height: 52vh;
+  overflow: auto;
+}
+.facilitator-log:empty {
+  display: none;
+}
+.chat-msg {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--line);
+}
+.chat-assistant {
+  background: var(--sunken);
+  border-color: transparent;
+  margin-right: 12px;
+}
+.chat-user {
+  background: var(--surface);
+  margin-left: 24px;
+}
+.chat-who {
+  color: var(--ink-faint);
+  font-size: 11.5px;
+}
+.chat-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-pending .chat-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-actions {
+  display: grid;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.chat-stickies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+.chat-stickies li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.chat-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chat-form {
+  display: grid;
+  gap: 6px;
+}
+.chat-form textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+}
+
 .assist-list {
   list-style: none;
   margin: 0;
@@ -1322,6 +1411,59 @@ textarea,
 
 .modal.reflect {
   width: min(900px, 100%);
+}
+.modal.split-format {
+  width: min(900px, 100%);
+}
+.split-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.split-files [aria-selected="true"] {
+  border-color: var(--focus);
+  color: var(--focus);
+}
+.split-preview {
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.split-editor {
+  width: 100%;
+  min-height: 40vh;
+  resize: vertical;
+  color: var(--ink);
+  tab-size: 2;
+}
+.split-diagnostics .link-button {
+  all: unset;
+  cursor: pointer;
+}
+.split-diagnostics .link-button:hover {
+  text-decoration: underline;
+}
+.split-diagnostics .link-button:focus-visible {
+  outline: 2px solid var(--focus);
+}
+.split-diagnostics {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 160px;
+  overflow: auto;
+}
+.file-button {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
 }
 .reflect-names {
   display: grid;

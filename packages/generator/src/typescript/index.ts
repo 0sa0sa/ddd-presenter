@@ -1,4 +1,4 @@
-import { architectureMarkdown, deriveArchitecture, type Analysis, type ModelIR } from "@ddd/core";
+import { architectureMarkdown, deriveArchitecture, protoFiles, type Analysis, type ModelIR } from "@ddd/core";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "../output.ts";
 import { GENERATOR_NAME, GENERATOR_VERSION } from "../python/support.ts";
 import { apiContexts, apiQueriesFile, clientFile, contextContractFile, contractFile, queriesFile, serverFile } from "./api.ts";
@@ -17,6 +17,9 @@ import API_REGISTER_TS from "./templates/api-register.ts.txt" with { type: "text
 import API_AUTHENTICATION_TS from "./templates/api-authentication.ts.txt" with { type: "text" };
 import API_RATE_LIMIT_TS from "./templates/api-rate-limit.ts.txt" with { type: "text" };
 import API_RUNTIME_TS from "./templates/api-runtime.ts.txt" with { type: "text" };
+import API_CONNECT_RUNTIME_TS from "./templates/api-connect-runtime.ts.txt" with { type: "text" };
+import { connectFiles, connectTestFile } from "./connect.ts";
+import { connectPlan } from "../connect-plan.ts";
 import PERSISTENCE_TS from "./templates/persistence.ts.txt" with { type: "text" };
 import RUNTIME_TS from "./templates/runtime.ts.txt" with { type: "text" };
 import { applicationQueriesFile, contextPlans, hasQueries, persistenceTestFile, postgresFile, queryTestFile, rowsFile } from "./queries.ts";
@@ -192,6 +195,18 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     }
     const securityTests = securityTestFile(served);
     if (securityTests) gen(securityTests.path, securityTests.content);
+    if (api.connect) {
+      // The Connect protocol over the HTTP API, and the protobuf contract it serves (docs/09 §25).
+      gen(P.file(P.apiModule("connect-runtime")), template("The Connect protocol (unary; JSON and binary codecs) over the HTTP API: protobuf JSON and wire format ↔ the API's JSON, the server handler, the client's fetch, Connect errors (no dependencies).", API_CONNECT_RUNTIME_TS));
+      const cplan = connectPlan(analysis);
+      for (const cf of connectFiles(P, served, api, cplan)) gen(cf.path, cf.content);
+      const ct = connectTestFile(served, api, cplan);
+      if (ct) gen(ct.path, ct.content);
+      const head = header(model);
+      for (const [path, content] of Object.entries(protoFiles(model, analysis))) {
+        gen(`${P.generated}/proto/${path}`, `${path.endsWith(".yaml") ? head.replace(/^\/\//gm, "#") : head}\n\n${content}`);
+      }
+    }
   }
   scaffold("package.json", packageJson(model));
   scaffold("tsconfig.json", tsconfigJson(model));

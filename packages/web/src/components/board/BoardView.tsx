@@ -1,4 +1,4 @@
-import { analyzeBoard, boardGhosts, boardToDrawio, boardToSvg, contextMap, parseDrawio, phaseOf, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type DrawioPage, type ModelIR, type StickyKind } from "@ddd/core";
+import { analyzeBoard, boardGhosts, boardToDrawio, boardToSvg, contextMap, parseDrawio, phaseOf, retargetGhosts, sampleBoard, STICKY_KINDS, suggestAggregates, toggleVote, type Board, type BoardGhost, type DrawioPage, type ModelIR, type StickyKind } from "@ddd/core";
 import { downloadBlob, downloadSvgAsPng, safeFileName } from "../../lib/download.ts";
 import {
   applyEdgeChanges,
@@ -243,8 +243,10 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
       const b = boardRef.current;
       const g = ghostsRef.current.find((x) => x.id === id);
       if (!b || !g) return;
-      commit(acceptGhost(b, g).board);
-      setLlmGhosts((prev) => prev.filter((x) => x.id !== id));
+      const r = acceptGhost(b, g);
+      commit(r.board);
+      // Ghosts suggested in a chain (actor → command → event) now connect to the new sticky.
+      setLlmGhosts((prev) => retargetGhosts(prev.filter((x) => x.id !== id), id, r.id));
       setStatus(`「${g.text}」を追加しました（ダブルクリックで直せます）`);
     },
     [commit],
@@ -742,6 +744,16 @@ function BoardCanvas({ projectId, canEdit, modelText, onReflect, aiActive, board
             onFocus={focus}
             onChange={commit}
             onReflect={() => setReflecting(true)}
+            projectId={projectId}
+            boardId={boardId}
+            aiActive={!!aiActive}
+            onShowGhosts={(gs) => {
+              setLlmGhosts(gs);
+              if (!gs.length) return;
+              setShowGhosts(true);
+              // Showing them again brings back the ones dismissed earlier.
+              setDismissed((prev) => new Set([...prev].filter((id) => !gs.some((g) => g.id === id))));
+            }}
           />
         </aside>
       </div>
