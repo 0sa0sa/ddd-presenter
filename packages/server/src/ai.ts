@@ -109,6 +109,17 @@ Principles:
 ${dslReference}
 </dsl_reference>`;
 
+/**
+ * The facilitator's system prompt: no DSL reference (a workshop needs none, and its examples steered the
+ * facilitator towards their own domain), so turns are also faster.
+ */
+export const FACILITATOR_SYSTEM = `You facilitate EventStorming workshops for software teams in "DDD Presenter", a tool for
+DDD (Domain-Driven Design). You only know the business from what the participants say and what is on the board;
+never bring in a domain of your own.`;
+
+/** The system prompt for a request. */
+export const systemFor = (purpose: CompleteRequest["purpose"]) => (purpose === "facilitate" ? FACILITATOR_SYSTEM : SYSTEM);
+
 const PROPOSAL_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -182,7 +193,8 @@ How to facilitate:
 - Turn what the participants said into sticky suggestions (events in past tense, commands as intentions, actors,
   policies "whenever X then Y", aggregates, rules, hotspots). Suggestions are only proposals that people accept:
   you cannot change the board yourself, so say that you suggest stickies (they appear as translucent proposals
-  to add), never that you placed, moved or added them.
+  to add), never that you placed, moved or added them. In Japanese write 「〜を提案します」「案を出しました」,
+  never 「置きました」「置いておきます」「追加しました」「追加しておきます」.
 - Never invent business facts. When something is unclear or disputed, suggest a hotspot sticky with the question
   instead of guessing, and move on.
 - When the participants jump ahead (solutions, database, screens) while the step is about something else, park it
@@ -191,6 +203,8 @@ How to facilitate:
   next_phase (an id from <workshop> phases) and say what it is about. Otherwise next_phase is "".
 - Refer to stickies by their text in the reply and put their ids in focus_item_ids.
 - options: up to 4 short, concrete answers the participants could click (in the board's language), or none.
+  Build them only from what the participants said and what is on the board: no placeholders (「〇〇」) and no
+  businesses or flows nobody mentioned. When you ask what they want to model, give no options.
 - Write the reply, sticky texts, reasons and options in the participants' language (Japanese unless they write
   in another language).
 
@@ -330,7 +344,7 @@ export function apiCompleter(options: { client?: Anthropic; model?: string; inli
   const client = options.client ?? new Anthropic();
   const model = options.model ?? process.env.DDD_AI_MODEL ?? "claude-opus-5";
   const inlineModel = options.inlineModel ?? process.env.DDD_AI_INLINE_MODEL ?? model;
-  const system: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
+  const system = (purpose: CompleteRequest["purpose"]): Anthropic.Beta.BetaTextBlockParam[] => [{ type: "text", text: systemFor(purpose), cache_control: { type: "ephemeral" } }];
   return {
     model,
     async complete({ purpose, messages, schema, effort, maxTokens, signal }) {
@@ -341,7 +355,7 @@ export function apiCompleter(options: { client?: Anthropic; model?: string; inli
           betas: ["server-side-fallback-2026-07-01"],
           fallbacks: "default",
           output_config: schema ? { effort, format: { type: "json_schema", schema } } : { effort },
-          system,
+          system: system(purpose),
           messages,
         },
         { signal },
@@ -531,7 +545,7 @@ export function claudeCodeCompleter(options: CliOptions = {}): Completer {
           "--effort",
           req.effort,
           "--system-prompt",
-          SYSTEM,
+          systemFor(req.purpose),
           ...(m ? ["--model", m] : []),
           ...(req.schema ? ["--json-schema", JSON.stringify(req.schema)] : []),
         ];
@@ -592,7 +606,7 @@ export function codexCompleter(options: CliOptions = {}): Completer {
             outFile,
             "-",
           ];
-          const stdin = `<instructions>\n${SYSTEM}\n</instructions>\n\n${flatten(req.messages)}`;
+          const stdin = `<instructions>\n${systemFor(req.purpose)}\n</instructions>\n\n${flatten(req.messages)}`;
           const r = await run(cmd, { stdin, cwd, timeoutMs: TIMEOUT[req.purpose], signal: req.signal, env });
           if (r.code !== 0) throw cliError("codex", r);
           const text = await readFile(outFile, "utf8").catch(() => "");

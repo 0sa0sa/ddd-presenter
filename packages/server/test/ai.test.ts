@@ -385,6 +385,9 @@ describe("facilitator prompt: opening, continuing and the CLIs", () => {
     await open.ai.facilitate({ board, brief, history: [] });
     expect(open.requests[0].messages).toHaveLength(1);
     expect(open.requests[0].messages[0].content).toContain("The session starts");
+    // The facilitator gets its own system prompt: no DSL reference (its examples steered the conversation).
+    expect(open.requests[0].system[0].text).not.toContain("<dsl_reference>");
+    expect(open.requests[0].system[0].text).toContain("EventStorming");
     const cont = capture();
     await cont.ai.facilitate({ board, brief, history: [{ role: "user", text: "Todo", author: "bob" }, { role: "assistant", text: "はい" }] });
     expect(cont.requests[0].messages.map((m: any) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -414,12 +417,15 @@ describe("facilitator prompt: opening, continuing and the CLIs", () => {
     expect(cmd).not.toContain("--model"); // the CLI's default model, not the fast one for ghost text
     expect(stdin).toContain("<your_previous_answer>\n何を作りますか？");
     expect(stdin).toContain('<participant_message author="bob">');
+    expect(cmd[cmd.indexOf("--system-prompt") + 1]).not.toContain("<dsl_reference>");
   });
 
   test("Codex: the schema goes in --output-schema and the answer is read from the last message", async () => {
     const { facilitatorBrief } = await import("@ddd/core");
     let schema = "";
-    const run: Runner = async (cmd) => {
+    let stdin = "";
+    const run: Runner = async (cmd, opts) => {
+      stdin = opts.stdin;
       schema = require("node:fs").readFileSync(cmd[cmd.indexOf("--output-schema") + 1]!, "utf8");
       writeFileSync(cmd[cmd.indexOf("--output-last-message") + 1]!, JSON.stringify(answer));
       return { code: 0, stdout: "", stderr: "" };
@@ -427,6 +433,8 @@ describe("facilitator prompt: opening, continuing and the CLIs", () => {
     const ai = assistantWith(codexCompleter({ run, cwd: "/tmp" }));
     expect(await ai.facilitate({ board, brief: facilitatorBrief(board), history: [] })).toEqual(answer);
     expect(JSON.parse(schema).properties.next_phase.type).toBe("string");
+    expect(stdin).toStartWith("<instructions>");
+    expect(stdin).not.toContain("<dsl_reference>");
   });
 });
 
