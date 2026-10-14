@@ -34,6 +34,7 @@ bun run ddd validate my-project/model.ddd.yaml # 検証（エラーがあれば�
 bun run ddd diff my-project/model.ddd.yaml --patch   # 生成したら何が変わるか
 bun run ddd generate my-project/model.ddd.yaml       # 生成（ddd.lock を作る）
 bun run ddd rules my-project/model.ddd.yaml          # ルールの適用箇所とテスト
+bun run ddd review my-project/model.ddd.yaml         # プロダクトマネージャーに答えてもらう「はい／いいえ」の質問票（docs/11 §11）
 bun run ddd migrate my-project/model.ddd.yaml --split # .proto / .domain / .flow の複数ファイル形式に書き出す（docs/10 §12）
 bun run ddd validate my-project                      # ddd.yaml のあるフォルダは複数ファイル形式として読む
 ```
@@ -43,6 +44,7 @@ bun run ddd validate my-project                      # ddd.yaml のあるフォ�
 | `validate [model]` | `--strict`（警告も失敗扱い。未検証のルール・使われないエラー・呼ばれない Extension point も警告）、`--format json` |
 | `diff [model]` | `--patch`（unified diff）、`--check`（生成物が古ければ終了コード 1。CI用） |
 | `generate [model]` | `--dry-run`、`--force`（手編集を破棄）、`--prune`（staleファイルを削除）、`--update-lock`、`--target python\|typescript`（モデルの `generation.target` を上書き。`diff` も同じ） |
+| `review [model]` | `--key`（モデルの答えと根拠つき）、`--template`（回答を書き込む YAML）、`--answers <file>`（回答を読み、モデルを直すものを一覧にする。あれば終了コード 1）、`--format json` |
 | `rules [model]` | `--format json` |
 | `migrate [model]` | schema_version の移行（現行は 1 のみ） |
 | `init [dir]` / `version` | `init --target typescript`（TypeScript 用のサンプル） |
@@ -264,6 +266,8 @@ bun run build:web && bun run start   # http://localhost:4870
 
 AI の予測・提案を使うには、サーバーのマシンで Claude Code（`claude`）か Codex CLI（`codex`）にログインしておくか、`ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで使う AI を選んで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
 
+プロジェクトの「レビュー」タブでは、モデルから作った「はい／いいえ」の文（「ある組織のユーザーは、別の組織の招待を見られる」「受諾済みの招待を取り消せる」など）にプロダクトマネージャーが答え、モデルと違う答えを直すべき所として一覧にできる（回答はプロジェクトに保存。docs/11 §11）。状態の移り変わりも網羅的に調べ、たどり着けない状態や実行できない操作を警告する（docs/10 §3）。
+
 プロジェクトの「アーキテクチャ」タブでは、モデルから導いたアーキテクチャをシステム全体・コンテナ・コンテキストの中身の3レベルで見られる（ダブルクリックで中に入る）。図の上でコンテキストを足す・つなぐ、外部システムを足す、生成ターゲットや HTTP API・RLS・レート制限を切り替える、といった操作がモデルへの編集になり（モデルを不正にする操作は適用されない）、各レベルを SVG・PNG・draw.io・Mermaid で書き出せる（docs/11 §9）。
 
 ログインはユーザー名とパスワード。サーバーは既定で `127.0.0.1` だけで待ち受け、パスワードを持つアカウントがまだない間は、ユーザー名だけで入れる「開発用の簡易ログイン」も使える（最初のパスワード付きアカウントができると自動で無効になる）。アカウントを作ると個人ワークスペースができる。データは `packages/server/data/ddd.sqlite`（`DDD_DB` で変更可）。
@@ -406,7 +410,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行（AI 進行役のチャットを含む）、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し） |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行（AI 進行役のチャットを含む）、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し）、プロダクトマネージャーのレビュー（はい／いいえの質問） |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語

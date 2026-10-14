@@ -139,6 +139,45 @@ describe("ddd CLI", () => {
     expect(r.out).toContain("test_expired_invitation_is_rejected");
   });
 
+  test("review: the sheet hides the model's answers, --key shows them, answers that differ fail", () => {
+    const { dir, model } = project();
+    const sheet = cli(["review", model]);
+    expect(sheet.code).toBe(0);
+    expect(sheet.out).toContain("ある組織のユーザーは、別の組織のスタッフ候補への招待（CleaningStaffInvitation）を見られる。 | ☐ | ☐ |");
+    expect(sheet.out).not.toContain("いまのモデル");
+    expect(sheet.out).not.toContain("組織ごとに保存され");
+    const key = cli(["review", model, "--key"]);
+    expect(key.out).toContain("| ある組織のユーザーは、別の組織のスタッフ候補への招待（CleaningStaffInvitation）を見られる。 | いいえ |");
+
+    const template = cli(["review", model, "--template"]);
+    expect(template.out).toContain('"tenancy:parent-reads-children": \n');
+    const answers = join(dir, "answers.yaml");
+    writeFileSync(answers, template.out.replace('"tenancy:parent-reads-children": ', '"tenancy:parent-reads-children": はい').replace('"tenancy:read-other:CleaningStaff.CleaningStaffInvitation": ', '"tenancy:read-other:CleaningStaff.CleaningStaffInvitation": no'));
+    const r = cli(["review", model, "--answers", answers]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("モデルを直す必要があるもの: 1 件");
+    expect(r.out).toContain("**上位の組織の管理者は、配下の組織のメンバーやデータをすべて見られる。** → 回答: はい（モデル: いいえ）");
+    // The template keeps the answers given so far.
+    expect(cli(["review", model, "--answers", answers, "--template"]).out).toContain('"tenancy:parent-reads-children": yes');
+    const json = JSON.parse(cli(["review", model, "--answers", answers, "--format", "json"]).out);
+    expect(json.findings.map((f: { question: { id: string } }) => f.question.id)).toEqual(["tenancy:parent-reads-children"]);
+
+    writeFileSync(answers, '"tenancy:read-other:CleaningStaff.CleaningStaffInvitation": no\n"nope": yes\n"tenancy:hierarchy": maybe\n');
+    const ok = cli(["review", model, "--answers", answers]);
+    expect(ok.code).toBe(0);
+    expect(ok.err).toContain('Unknown question "nope"');
+    expect(ok.err).toContain('"tenancy:hierarchy": answer yes or no, not "maybe"');
+    expect(cli(["review", model, "--answers", join(dir, "missing.yaml")]).code).toBe(2);
+  });
+
+  test("review of an invalid model reports the errors instead", () => {
+    const { model } = project();
+    appendFileSync(model, "\nbogus: 1\n");
+    const r = cli(["review", model]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("Fix the errors first");
+  });
+
   test("YAML with excessive aliases is an ordinary diagnostic (exit 1), never an internal error with a stack trace", () => {
     const { model } = project();
     writeFileSync(model, "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\n");

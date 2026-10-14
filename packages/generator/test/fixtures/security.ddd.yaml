@@ -68,6 +68,9 @@ contexts:
             parameters: [{ name: id, type: UUID }, { name: job_id, type: UUID }, { name: candidate_id, type: UUID }]
             fields: { id: id, job_id: job_id, candidate_id: candidate_id, status: submitted }
             emits: [{ name: ApplicationSubmitted, fields: [id, job_id, candidate_id] }]
+        operations:
+          - name: withdraw
+            changes: { status: withdrawn }
       - name: AuditEntry
         identity: id
         authorize: { roles: [admin] }

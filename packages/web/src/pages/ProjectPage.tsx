@@ -12,6 +12,7 @@ import { ProposeDialog } from "../components/ProposeDialog.tsx";
 import { SplitFormatDialog } from "../components/SplitFormatDialog.tsx";
 import type { ProposeKind } from "../lib/propose.ts";
 import { PreviewView } from "../components/PreviewView.tsx";
+import { ReviewView } from "../components/ReviewView.tsx";
 import { RulesView } from "../components/RulesView.tsx";
 import { ScenariosView } from "../components/ScenariosView.tsx";
 import { TopBar } from "../components/TopBar.tsx";
@@ -31,6 +32,7 @@ const TABS = [
   { id: "architecture", label: "アーキテクチャ" },
   { id: "rules", label: "ルール" },
   { id: "scenarios", label: "シナリオ" },
+  { id: "review", label: "レビュー" },
   { id: "preview", label: "生成プレビュー" },
   { id: "history", label: "履歴" },
 ] as const;
@@ -456,6 +458,9 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             )}
             {tab === "rules" && <RulesView rules={rules} onGoto={gotoPath} onSelect={setSelectedId} />}
             {tab === "scenarios" && model && <ScenariosView model={model} onGoto={gotoPath} />}
+            {tab === "review" && (
+              <ReviewView projectId={id} projectName={project?.name ?? "model"} savedYaml={saved.yaml} savedVersion={saved.version} dirty={dirty} canEdit={canEdit} onGoto={gotoPath} />
+            )}
             {tab === "preview" && <PreviewView projectId={id} version={saved.version} dirty={dirty} focusPath={previewFocus} />}
             {tab === "history" && (
               <HistoryView

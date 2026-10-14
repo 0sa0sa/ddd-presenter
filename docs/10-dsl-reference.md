@@ -217,6 +217,17 @@ operations:
 
 内部Entity型（`OrderLine`、`List[OrderLine]` など）の引数を持つFactory / Operationは警告 `entity-parameter` になる。Commandの入力は値だけを運び、式でEntityを作ることもできないため、Use caseが渡せるのは読み込んだAggregateがすでに持つEntity（`order.lines` など）だけである。呼び出し側が新しい項目を渡すなら、その値（単純なフィールドかValue Object）を引数にする。そうでなければその操作は手書きコードからだけ呼ぶ。
 
+### 状態の移り変わり（検査）
+
+Aggregate の enum のフィールドで、Factory の `fields` か Operation の `changes` が設定するものを**状態**として扱い、状態の移り変わりを網羅的に調べる（新しい書き方はない）。Factory が設定する値が最初の状態、各 Operation は `require` の State guard が成り立ちうる状態から、`changes` が設定する値へ移る（値が式なら、どの状態にもなりうる）。State guard は状態ごとに評価し、状態のフィールドのほか（ほかのフィールド・引数・時刻）は「わからない」として扱う。成り立たないと決まる状態だけを除く。
+
+| 診断 | 意味 |
+|---|---|
+| `unreachable-state`（警告） | enum の値なのに、作るときにも、どの操作でもその状態にならない。状態にする操作を足すか、enum から消す |
+| `never-enabled-operation`（警告） | 操作の `require` が、たどり着ける状態のどれでも成り立たない（その操作は実行できない） |
+
+Factory のない Aggregate は、どの状態でも外から来うるので、たどり着けるかは調べない。どの状態からどの操作ができるか、終わりの状態（どの操作でも変わらない状態）は `ddd review` の質問（docs/11 §11）になる。
+
 ## 4. Rule式
 
 | 要素 | 例 |

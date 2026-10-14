@@ -69,6 +69,8 @@ contexts:
           - name: suspend
             require: [is_active]
             changes: { status: suspended }
+          - name: leave
+            changes: { status: left }
           - name: award
             parameters:
               - { name: code, type: String }

@@ -1,4 +1,5 @@
 import type { Board, BoardGhost, Diagnostic, FacilitatorTurn, Proposal, RuleUsage } from "@ddd/core";
+import type { StoredAnswer } from "./lib/review.ts";
 
 export type Role = "owner" | "editor" | "viewer";
 
@@ -219,6 +220,9 @@ export const api = {
   preview: (id: string, version?: number) => request<Preview>("GET", `/api/projects/${id}/preview${version ? `?version=${version}` : ""}`),
   layout: (id: string) => request<{ positions: Record<string, { x: number; y: number }> }>("GET", `/api/projects/${id}/layout`),
   saveLayout: (id: string, positions: Record<string, { x: number; y: number }>) => request("PUT", `/api/projects/${id}/layout`, { positions }),
+  reviewAnswers: (id: string) => request<{ answers: Record<string, StoredAnswer> }>("GET", `/api/projects/${id}/review`),
+  saveReviewAnswer: (id: string, a: { question_id: string; answer: "yes" | "no" | null; note: string; text: string }) =>
+    request<{ ok: true; at: string; by: string }>("PUT", `/api/projects/${id}/review`, a),
   architectureLayout: (id: string) => request<{ levels: Record<string, { version: number; positions: Record<string, { x: number; y: number }> }> }>("GET", `/api/projects/${id}/architecture-layout`),
   saveArchitectureLayout: (id: string, level: string, positions: Record<string, { x: number; y: number }>, baseVersion: number) =>
     request<{ version: number; positions: Record<string, { x: number; y: number }> }>("PUT", `/api/projects/${id}/architecture-layout`, { level, positions, base_version: baseVersion }),

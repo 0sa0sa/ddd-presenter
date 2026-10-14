@@ -110,6 +110,18 @@ const MIGRATIONS: string[] = [
      updated_at TEXT NOT NULL,
      PRIMARY KEY (project_id, level)
    );`,
+  // A product manager's yes/no answers to the review questions of a project's model (レビュー tab, docs/09 §27),
+  // keyed by the question's stable id; the question as it read is kept with the answer.
+  `CREATE TABLE review_answers (
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     question_id TEXT NOT NULL,
+     answer TEXT CHECK (answer IN ('yes', 'no')),
+     note TEXT NOT NULL DEFAULT '',
+     question_text TEXT NOT NULL DEFAULT '',
+     answered_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+     answered_at TEXT NOT NULL,
+     PRIMARY KEY (project_id, question_id)
+   );`,
 ];
 
 export function openDatabase(path = ":memory:"): Database {

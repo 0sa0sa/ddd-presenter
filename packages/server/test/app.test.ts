@@ -9,9 +9,11 @@ import { openDatabase } from "../src/db.ts";
 const SAMPLE = readFileSync(join(import.meta.dir, "../../../examples/cleaning-platform/model.ddd.yaml"), "utf8");
 
 let app: ReturnType<typeof createApp>;
+let db: ReturnType<typeof openDatabase>;
 
 beforeEach(() => {
-  app = createApp(openDatabase(":memory:"), { devLogin: true });
+  db = openDatabase(":memory:");
+  app = createApp(db, { devLogin: true });
 });
 
 type Session = { cookie: string; call: (method: string, path: string, body?: unknown) => Promise<Response>; json: <T = any>(method: string, path: string, body?: unknown) => Promise<{ status: number; body: T }> };
@@ -336,6 +338,62 @@ describe("architecture layout", () => {
     expect((await bob.call("GET", url(project))).status).toBe(404);
     expect((await bob.call("PUT", url(project), { level: "system", base_version: 1, positions: {} })).status).toBe(404);
     expect((await app.request(url(project))).status).toBe(401);
+  });
+});
+
+describe("review answers", () => {
+  const url = (p: string) => `/api/projects/${p}/review`;
+  const id = "tenancy:read-other:CleaningStaff.CleaningStaffInvitation";
+
+  test("an answer with a note and who gave it; changing and clearing it", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    expect((await s.json("GET", url(project))).body).toEqual({ answers: {} });
+    const put = await s.json("PUT", url(project), { question_id: id, answer: "no", note: "他社の招待は見せない", text: "ある組織のユーザーは…" });
+    expect(put.status).toBe(200);
+    expect(put.body.by).toBe("alice");
+    let all = (await s.json("GET", url(project))).body.answers;
+    expect(all[id]).toMatchObject({ answer: "no", note: "他社の招待は見せない", text: "ある組織のユーザーは…", by: "alice" });
+    await s.json("PUT", url(project), { question_id: id, answer: "yes" });
+    all = (await s.json("GET", url(project))).body.answers;
+    expect(all[id]).toMatchObject({ answer: "yes", note: "" });
+    // A note alone is kept (a question to come back to); nothing at all removes the row.
+    await s.json("PUT", url(project), { question_id: id, answer: null, note: "営業に確認する" });
+    expect((await s.json("GET", url(project))).body.answers[id]).toMatchObject({ answer: null, note: "営業に確認する" });
+    await s.json("PUT", url(project), { question_id: id, answer: null, note: "  " });
+    expect((await s.json("GET", url(project))).body.answers).toEqual({});
+    // The model is untouched.
+    expect((await s.json("GET", `/api/projects/${project}/model`)).body.version).toBe(1);
+  });
+
+  test("bad input is rejected; long notes are cut", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    for (const question_id of ["", "nocolon", "Tenancy:x", "a:" + "x".repeat(301), "a:with space", 5, undefined]) {
+      expect((await s.call("PUT", url(project), { question_id, answer: "yes" })).status).toBe(400);
+    }
+    for (const answer of ["maybe", "はい", true, 1, undefined]) expect((await s.call("PUT", url(project), { question_id: id, answer })).status).toBe(400);
+    expect((await s.call("PUT", url(project), { question_id: id, answer: "yes", note: 5 })).status).toBe(400);
+    expect((await s.call("PUT", url(project), { question_id: id, answer: "yes", text: {} })).status).toBe(400);
+    await s.json("PUT", url(project), { question_id: id, answer: "yes", note: "x".repeat(5000) });
+    expect((await s.json("GET", url(project))).body.answers[id].note).toHaveLength(2000);
+  });
+
+  test("another tenant gets 404, a viewer reads but cannot answer (403), answers go with the project", async () => {
+    const owner = await login("owner");
+    const viewer = await login("viewer");
+    const bob = await login("bob");
+    const ws = await workspaceOf(owner);
+    expect((await owner.json("POST", `/api/workspaces/${ws}/members`, { username: "viewer", role: "viewer" })).status).toBe(201);
+    const project = await newProject(owner, ws);
+    await owner.json("PUT", url(project), { question_id: id, answer: "no" });
+    expect((await viewer.json("GET", url(project))).body.answers[id].answer).toBe("no");
+    expect((await viewer.call("PUT", url(project), { question_id: id, answer: "yes" })).status).toBe(403);
+    expect((await bob.call("GET", url(project))).status).toBe(404);
+    expect((await bob.call("PUT", url(project), { question_id: id, answer: "yes" })).status).toBe(404);
+    expect((await app.request(url(project))).status).toBe(401);
+    expect((await owner.call("DELETE", `/api/projects/${project}`)).status).toBeLessThan(300);
+    expect(db.query("SELECT COUNT(*) AS n FROM review_answers").get()).toEqual({ n: 0 });
   });
 });
 

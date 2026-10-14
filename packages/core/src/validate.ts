@@ -1,5 +1,6 @@
 import { BUILTIN_FUNCTIONS, checkExpression, exprChildren, ITEM_NAME, makeEnv, referencedFields, type ExprEnv, type TExpr } from "./checker.ts";
 import { DiagnosticBag, formatPath, sortDiagnostics, type Diagnostic, type Path } from "./diagnostics.ts";
+import { stateMachineDiagnostics } from "./statemachine.ts";
 import type {
   AggregateIR,
   AggregateScenarioIR,
@@ -2307,6 +2308,8 @@ export function analyzeModel(model: ModelIR, parsed?: Pick<ParseResult, "locate"
   const v = new Validator(model);
   v.run();
   const diagnostics = v.bag.items;
+  // State machines are read from the checked expressions, so only a model without errors gets them.
+  if (!v.bag.hasErrors) diagnostics.push(...stateMachineDiagnostics({ model, contexts: v.contexts, diagnostics: [] }));
   if (parsed) {
     for (const d of diagnostics) {
       if (d.line === undefined) {

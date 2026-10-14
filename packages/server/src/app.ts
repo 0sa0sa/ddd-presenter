@@ -887,6 +887,51 @@ export function createApp(db: Database, options: AppOptions = {}) {
     return c.json({ version, positions: clean });
   });
 
+  // -- review answers (yes/no questions to a product manager, docs/09 §27) ---------------
+
+  const REVIEW_ID = /^[a-z]+:[\x21-\x7e]{1,300}$/;
+  const MAX_REVIEW_ANSWERS = 5000;
+
+  app.get("/api/projects/:projectId/review", (c) => {
+    const { project } = loadProject(c);
+    const rows = db
+      .query("SELECT r.question_id, r.answer, r.note, r.question_text, r.answered_at, u.username FROM review_answers r LEFT JOIN users u ON u.id = r.answered_by WHERE r.project_id = ?")
+      .all(project.id) as { question_id: string; answer: "yes" | "no" | null; note: string; question_text: string; answered_at: string; username: string | null }[];
+    const answers: Record<string, { answer: "yes" | "no" | null; note: string; text: string; by: string | null; at: string }> = {};
+    for (const r of rows) answers[r.question_id] = { answer: r.answer, note: r.note, text: r.question_text, by: r.username, at: r.answered_at };
+    return c.json({ answers });
+  });
+
+  app.put("/api/projects/:projectId/review", async (c) => {
+    const { project } = loadProject(c, "editor");
+    const b = await body<{ question_id?: unknown; answer?: unknown; note?: unknown; text?: unknown }>(c, BODY_LAYOUT);
+    if (typeof b.question_id !== "string" || !REVIEW_ID.test(b.question_id)) fail(400, "question_id is required");
+    if (b.answer !== null && b.answer !== "yes" && b.answer !== "no") fail(400, "answer must be yes, no or null");
+    if (b.note !== undefined && typeof b.note !== "string") fail(400, "note must be a string");
+    if (b.text !== undefined && typeof b.text !== "string") fail(400, "text must be a string");
+    const note = ((b.note as string | undefined) ?? "").slice(0, 2000);
+    const text = ((b.text as string | undefined) ?? "").slice(0, 1000);
+    const id = b.question_id as string;
+    const answer = b.answer as "yes" | "no" | null;
+    const at = now();
+    db.transaction(() => {
+      // No answer and no note: nothing left to keep.
+      if (answer === null && !note.trim()) {
+        db.query("DELETE FROM review_answers WHERE project_id = ? AND question_id = ?").run(project.id, id);
+        return;
+      }
+      const exists = db.query("SELECT 1 FROM review_answers WHERE project_id = ? AND question_id = ?").get(project.id, id);
+      if (!exists) {
+        const count = (db.query("SELECT COUNT(*) AS n FROM review_answers WHERE project_id = ?").get(project.id) as { n: number }).n;
+        if (count >= MAX_REVIEW_ANSWERS) fail(413, `A project can hold up to ${MAX_REVIEW_ANSWERS} review answers`);
+      }
+      db.query(
+        "INSERT INTO review_answers (project_id, question_id, answer, note, question_text, answered_by, answered_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, question_id) DO UPDATE SET answer = excluded.answer, note = excluded.note, question_text = excluded.question_text, answered_by = excluded.answered_by, answered_at = excluded.answered_at",
+      ).run(project.id, id, answer, note, text, c.get("user").id, at);
+    })();
+    return c.json({ ok: true, at, by: c.get("user").username });
+  });
+
   // -- AI assistance ---------------------------------------------------------------
 
   /** The workspace's assistant when AI is on and still allowed (turned on by a current AI admin, or the workspace is listed). */

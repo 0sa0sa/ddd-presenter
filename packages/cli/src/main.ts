@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util";
-import { cmdDiff, cmdGenerate, cmdInit, cmdMigrate, cmdRules, cmdValidate, cmdVersion, EXIT, type Io } from "./commands.ts";
+import { cmdDiff, cmdGenerate, cmdInit, cmdMigrate, cmdReview, cmdRules, cmdValidate, cmdVersion, EXIT, type Io } from "./commands.ts";
 
 const HELP = `ddd — DDD Presenter CLI (model-driven Python / TypeScript domain code)
 
@@ -11,6 +11,11 @@ Usage:
   ddd diff     [model] [--patch] [--check]          Show what generate would change (--check: fail if out of date)
   ddd generate [model] [--dry-run] [--force] [--prune] [--update-lock] [--target python|typescript]
   ddd rules    [model] [--format json]              Where each named rule is applied and tested
+  ddd review   [model] [--key] [--template] [--answers file] [--format json]
+                                                   Yes/no questions for a product manager (Markdown):
+                                                   the sheet (default, without the model's answers),
+                                                   --key with them, --template an answers file to fill in,
+                                                   --answers: the answers that differ from the model (exit 1)
   ddd migrate  [model] [--write]                    Upgrade an older schema_version
   ddd migrate  [model] --split [--out dir] [--force] Convert a YAML model to the multi-file format
                                                    (ddd.yaml + .proto / .domain / .flow / .scenarios.yaml)
@@ -53,6 +58,9 @@ export function run(argv: string[], io: Io): number {
         split: { type: "boolean", default: false },
         "no-color": { type: "boolean", default: false },
         target: { type: "string" },
+        key: { type: "boolean", default: false },
+        template: { type: "boolean", default: false },
+        answers: { type: "string" },
       },
     });
   } catch (e) {
@@ -80,6 +88,8 @@ export function run(argv: string[], io: Io): number {
       return cmdGenerate(io, { ...common, force: v.force!, prune: v.prune!, dryRun: v["dry-run"]!, updateLock: v["update-lock"]! });
     case "rules":
       return cmdRules(io, common);
+    case "review":
+      return cmdReview(io, { ...common, key: v.key!, template: v.template!, ...(v.answers !== undefined ? { answers: v.answers } : {}) });
     case "migrate":
       return cmdMigrate(io, { ...common, write: v.write!, split: v.split!, force: v.force! });
     case "init":

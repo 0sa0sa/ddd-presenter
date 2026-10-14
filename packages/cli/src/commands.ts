@@ -5,6 +5,11 @@ import {
   MANIFEST_FILE,
   modelSourceText,
   parseModel,
+  parseReviewAnswers,
+  reviewAnswersTemplate,
+  reviewFindings,
+  reviewMarkdown,
+  reviewQuestions,
   ruleUsage,
   SCHEMA_VERSION,
   sortDiagnostics,
@@ -490,4 +495,43 @@ export function cmdRules(io: Io, opts: CommonOpts): number {
     }
   }
   return EXIT.ok;
+}
+
+/**
+ * Yes/no questions for a product manager (docs/11 §11): the sheet without the model's answers, the key with them,
+ * an answers file to fill in, or — with `--answers` — the answers that mean the model has to change.
+ */
+export function cmdReview(io: Io, opts: CommonOpts & { key: boolean; template: boolean; answers?: string }): number {
+  const m = loadModel(io, opts);
+  if (!m) return EXIT.usage;
+  if (!m.result.analysis || !m.result.ok) {
+    printDiagnostics(io, m.result.diagnostics, m.label, m.split);
+    io.err("✗ Fix the errors first: the questions are read from a valid model");
+    return EXIT.failed;
+  }
+  const questions = reviewQuestions(m.result.analysis);
+  const project = m.result.model?.project ?? "model";
+  let answers: Record<string, "yes" | "no"> | undefined;
+  if (opts.answers !== undefined) {
+    const text = readText(opts.answers);
+    if (text === undefined) {
+      io.err(`✗ Cannot read ${opts.answers}`);
+      return EXIT.usage;
+    }
+    const parsed = parseReviewAnswers(text, questions);
+    for (const p of parsed.problems) io.err(paint(io, "33", `warning: ${p}`));
+    answers = parsed.answers;
+  }
+  if (opts.template) {
+    io.out(reviewAnswersTemplate(questions, answers));
+    return EXIT.ok;
+  }
+  const findings = answers ? reviewFindings(questions, answers) : [];
+  if (opts.format === "json") {
+    io.out(JSON.stringify(answers ? { questions, answers, findings } : questions, null, 2));
+  } else {
+    io.out(reviewMarkdown(project, questions, { key: opts.key, ...(answers ? { answers } : {}) }));
+  }
+  // Answers that differ from the model fail like `diff --check`: the model has to change.
+  return findings.length ? EXIT.failed : EXIT.ok;
 }

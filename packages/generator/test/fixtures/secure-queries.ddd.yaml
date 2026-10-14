@@ -36,6 +36,9 @@ contexts:
           - name: post
             parameters: [{ name: id, type: UUID }, { name: company_id, type: UUID }, { name: title, type: String }, { name: at, type: DateTime }]
             fields: { id: id, company_id: company_id, title: title, status: open, posted_at: at }
+        operations:
+          - name: close
+            changes: { status: closed }
       - name: Application
         identity: id
         authorize: { roles: [admin] }
