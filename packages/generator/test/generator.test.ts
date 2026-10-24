@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { computePlan, generatePython, renderManifest, sha256, unifiedDiff } from "../src/index.ts";
 import { wrapLongLines } from "../src/python/layout.ts";
+import { withCounterexamples } from "./counterexamples.ts";
+import { declaredErrors } from "../src/python/properties.ts";
 import { emitExpr, Imports } from "../src/python/support.ts";
 
 const EXAMPLE = join(import.meta.dir, "../../../examples/cleaning-platform");
@@ -236,6 +238,10 @@ const FROM_BOARD = boardToModel(
   "schema_version: 1\nproject: staff\ngeneration:\n  package: staff_from_board\n\ncontexts:\n  - name: Core\n    errors: []\n    aggregates: []\n    use_cases: []\n",
 ).yaml!;
 
+const ORDERING_CEX = (await withCounterexamples(ORDERING)).text;
+/** The model with `generation.property_tests: true` (Hypothesis property tests of the aggregates). */
+const withProperties = (text: string) => text.replace(/^generation:\n/m, "generation:\n  property_tests: true\n");
+
 describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
   test.each([
     ["the sample model", MODEL],
@@ -252,6 +258,10 @@ describe.skipIf(!existsSync(VENV))("generated Python actually runs", () => {
     ["the security model over Connect (authenticator, rate limits per principal and IP)", withConnect(SECURITY)],
     ["the secure-queries model over Connect (protected queries and pages)", withConnect(SECURE_QUERIES)],
     ["a model reflected from the discovery board", FROM_BOARD],
+    ["the ordering model with every Z3 counterexample as a scenario (the generated code raises the predicted error)", ORDERING_CEX],
+    ["the ordering model with property tests (Hypothesis: random operations raise only declared errors)", withProperties(ORDERING)],
+    ["the kitchen-sink model with property tests (lists, entities, decimals, dates as strategies)", withProperties(KITCHEN_SINK)],
+    ["the security model with property tests", withProperties(SECURITY)],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
   ])("pytest and mypy --strict pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-gen-"));
@@ -314,6 +324,8 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
     ["the security model over Connect", withConnect(SECURITY)],
     ["the secure-queries model over Connect", withConnect(SECURE_QUERIES)],
     ["a model reflected from the discovery board", FROM_BOARD],
+    ["the ordering model with property tests", withProperties(ORDERING)],
+    ["the kitchen-sink model with property tests", withProperties(KITCHEN_SINK)],
   ])("ruff check and ruff format --check pass for %s", (_label, modelText) => {
     const dir = mkdtempSync(join(tmpdir(), "ddd-ruff-"));
     try {
@@ -330,6 +342,20 @@ describe.skipIf(!RUFF)("generated Python is ruff-clean (lint rules and format of
       rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
+});
+
+describe("property tests: declared errors", () => {
+  test("a value object built for an event payload declares its invariant's error (as the proofs check it)", () => {
+    const text = ORDERING.replace("- { name: InvalidMoney, code: invalid_money, message: invalid amount of money }", "- { name: InvalidMoney, code: invalid_money, message: invalid amount of money }\n      - { name: NegativeMoney, code: negative_money, message: the amount is negative }")
+      .replace("- { name: non_negative_amount, expression: amount >= 0, error: InvalidMoney }", "- { name: non_negative_amount, expression: amount >= 0, error: NegativeMoney }");
+    const r = validateModelText(text);
+    expect(r.ok).toBe(true);
+    const ca = r.analysis!.contexts.get("Sales")!;
+    const ag = ca.ir.aggregates[0]!;
+    // place builds Money(...) only in its OrderPlaced payload; add_line builds it in no change (its argument is given).
+    expect(declaredErrors({ ca }, ag, ag.operations.find((o) => o.name === "place")!, "operation")).toContain("NegativeMoney");
+    expect(declaredErrors({ ca }, ag, ag.operations.find((o) => o.name === "cancel")!, "operation")).not.toContain("NegativeMoney");
+  });
 });
 
 describe("multiple bounded contexts", () => {

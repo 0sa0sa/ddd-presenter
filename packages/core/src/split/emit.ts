@@ -584,29 +584,47 @@ function writeQuery(w: Writer, q: QueryIR, doc: Document): void {
   w.close();
 }
 
+function writePolicy(w: Writer, p: ContextIR["policies"][number], doc: Document): void {
+  w.comments(yamlComment(doc, p.path));
+  w.doc(p.description);
+  w.open(`policy ${p.name} on ${p.when} {`);
+  const args = argsText(p.args);
+  w.line(`run ${p.run}${args ? `(${args})` : ""}`);
+  w.close();
+}
+
+/** One block of a context's .flow source: a use case (`flow`), a query or a policy. */
+export interface FlowBlock {
+  kind: "use_case" | "query" | "policy";
+  name: string;
+  /** The block as the .flow file writes it (comments and description included). */
+  source: string;
+  path: Path;
+}
+
+/** The .flow blocks of a context, in the order of the .flow file. */
+export function contextFlowBlocks(ctx: ContextIR, doc: Document): FlowBlock[] {
+  const block = (write: (w: Writer) => void) => {
+    const w = new Writer();
+    write(w);
+    return w.toString();
+  };
+  return [
+    ...ctx.useCases.map((u) => ({ kind: "use_case" as const, name: u.name, source: block((w) => writeUseCase(w, u, doc)), path: u.path })),
+    ...ctx.queries.map((q) => ({ kind: "query" as const, name: q.name, source: block((w) => writeQuery(w, q, doc)), path: q.path })),
+    ...ctx.policies.map((p) => ({ kind: "policy" as const, name: p.name, source: block((w) => writePolicy(w, p, doc)), path: p.path })),
+  ];
+}
+
 function writeFlow(ctx: ContextIR, doc: Document): string | undefined {
-  if (!ctx.useCases.length && !ctx.queries.length && !ctx.policies.length) return undefined;
-  const w = new Writer();
-  w.line(`context ${ctx.name}`);
-  w.blank();
-  for (const u of ctx.useCases) {
-    writeUseCase(w, u, doc);
-    w.blank();
-  }
-  for (const q of ctx.queries) {
-    writeQuery(w, q, doc);
-    w.blank();
-  }
-  for (const p of ctx.policies) {
-    w.comments(yamlComment(doc, p.path));
-    w.doc(p.description);
-    w.open(`policy ${p.name} on ${p.when} {`);
-    const args = argsText(p.args);
-    w.line(`run ${p.run}${args ? `(${args})` : ""}`);
-    w.close();
-    w.blank();
-  }
-  return w.toString();
+  const blocks = contextFlowBlocks(ctx, doc);
+  if (!blocks.length) return undefined;
+  return flowFileText(ctx.name, blocks.map((b) => b.source));
+}
+
+/** A .flow file from its blocks. */
+export function flowFileText(context: string, blocks: string[]): string {
+  return [`context ${context}`, ...blocks.map((b) => b.replace(/\s+$/, ""))].join("\n\n") + "\n";
 }
 
 function writeUseCase(w: Writer, u: UseCaseIR, doc: Document): void {

@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "182f593a1d8b883433a2fd49c70ae3948910d0d5d0f1a138efbad3b18758c143",
+  "model_sha256": "e78d8de2474e73bc624be8c3700db7e72b093bc2f5e894a347f640ae9e545d46",
   "files": [
     {
       "path": "sql/cleaning_staff.sql",
@@ -238,6 +238,10 @@
       "sha256": "a1164443bd15287cb0172edcc25d84c06f7824f6dede7ad0e54087d41146e342"
     },
     {
+      "path": "tests/generated/test_cleaning_staff_properties.py",
+      "sha256": "8071886073ed0d5d985ef6664c5f0ad396097214403e7e086155fa9428f021f5"
+    },
+    {
       "path": "tests/generated/test_cleaning_staff_revoke_invitation.py",
       "sha256": "70d2bd9f16b71fe4361eb9a88595163a8eb48b23f06cf0a93ab6d26ec0fe8468"
     },
@@ -256,6 +260,10 @@
     {
       "path": "tests/generated/test_staffing_policies.py",
       "sha256": "0e49c1e170e8984f7f2909d68fd56158b2b3d561c540fe34d9739546ab714eb9"
+    },
+    {
+      "path": "tests/generated/test_staffing_properties.py",
+      "sha256": "b4912300822828b463911b7f04e4b734590045287dad3a1b200e282bafb8866f"
     },
     {
       "path": "tests/generated/test_staffing_register_staff.py",

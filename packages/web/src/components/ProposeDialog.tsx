@@ -1,4 +1,4 @@
-import { unifiedDiff, type Proposal } from "@ddd/core";
+import { behaviorChanges, unifiedDiff, validateModelText, type Proposal } from "@ddd/core";
 import { useEffect, useMemo, useState } from "react";
 import { api, describeError } from "../api.ts";
 import { PROPOSE_KINDS, type ProposeKind } from "../lib/propose.ts";
@@ -54,6 +54,14 @@ export function ProposeDialog({
   }, []);
 
   const diff = useMemo(() => (proposal && proposal.yaml !== text ? unifiedDiff("model.ddd.yaml", text, proposal.yaml) : ""), [proposal, text]);
+  // What the proposal changes in behaviour (docs/11 §13): checks it loosens come first.
+  const changes = useMemo(() => {
+    if (!proposal || proposal.yaml === text) return [];
+    const before = validateModelText(text);
+    const after = validateModelText(proposal.yaml);
+    return before.ok && after.ok && before.analysis && after.analysis ? behaviorChanges(before.analysis, after.analysis) : [];
+  }, [proposal, text]);
+  const weakening = changes.filter((c) => c.weakens);
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="propose-title">
@@ -123,6 +131,22 @@ export function ProposeDialog({
               <NoteList title="推測（チームで確認）" items={proposal.assumptions} tone="warn" />
               <NoteList title="ドメインエキスパートへの質問" items={proposal.questions} tone="ask" />
             </div>
+            {changes.length > 0 && (
+              <section className="behavior-changes">
+                <h3>振る舞いの変化</h3>
+                {weakening.length > 0 && (
+                  <p className="small sev-warning">▲ 検査を緩める変更が {weakening.length} 件あります。断っていた入力を受け付けるようになります。意図した変更か確かめてください。</p>
+                )}
+                <ul className="small">
+                  {changes.map((c, i) => (
+                    <li key={i} className={c.weakens ? "behavior-weakens" : undefined}>
+                      {c.weakens ? "▲ " : ""}
+                      {c.text}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             {errors.length > 0 && (
               <div className="error-banner small">
                 <div>適用すると検証エラーが残ります。YAML で直してから保存してください。</div>

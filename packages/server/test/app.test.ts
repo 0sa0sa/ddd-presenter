@@ -397,6 +397,56 @@ describe("review answers", () => {
   });
 });
 
+describe("proofs", () => {
+  test("the stored version is verified with Z3 (once per version); a viewer may read; another tenant gets 404", async () => {
+    const owner = await login("owner");
+    const bob = await login("bob");
+    const project = await newProject(owner);
+    const r = await owner.json("GET", `/api/projects/${project}/proofs`);
+    expect(r.status).toBe(200);
+    expect(r.body.version).toBe(1);
+    expect(r.body.report.results.length).toBeGreaterThan(0);
+    expect(r.body.report.assumptions.length).toBeGreaterThan(0);
+    // Same version: the same report (cached), ids usable as review question ids.
+    const again = await owner.json("GET", `/api/projects/${project}/proofs?version=1`);
+    expect(again.body.report.elapsedMs).toBe(r.body.report.elapsedMs);
+    for (const x of r.body.report.results as { id: string }[]) expect(/^[a-z]+:[\x21-\x7e]{1,300}$/.test(x.id)).toBe(true);
+    expect((await owner.call("GET", `/api/projects/${project}/proofs?version=0`)).status).toBe(400);
+    expect((await owner.call("GET", `/api/projects/${project}/proofs?version=9`)).status).toBe(404);
+    expect((await bob.call("GET", `/api/projects/${project}/proofs`)).status).toBe(404);
+  }, 60_000);
+
+  test("a proof still running is answered 202 \"running\"; asking again returns the report", async () => {
+    const before = process.env.DDD_PROOF_WAIT_MS;
+    process.env.DDD_PROOF_WAIT_MS = "0";
+    try {
+      app = createApp(db, { devLogin: true });
+    } finally {
+      if (before === undefined) delete process.env.DDD_PROOF_WAIT_MS;
+      else process.env.DDD_PROOF_WAIT_MS = before;
+    }
+    const s = await login("alice");
+    const project = await newProject(s);
+    const first = await s.json("GET", `/api/projects/${project}/proofs`);
+    expect(first).toEqual({ status: 202, body: { version: 1, report: null, reason: "running" } });
+    let r = first;
+    for (let i = 0; i < 100 && r.status === 202; i++) {
+      await Bun.sleep(100);
+      r = await s.json("GET", `/api/projects/${project}/proofs`);
+    }
+    expect(r.status).toBe(200);
+    expect(r.body.report.results.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  test("an invalid model gets no report", async () => {
+    const s = await login("alice");
+    const project = await newProject(s);
+    await s.json("PUT", `/api/projects/${project}/model`, { yaml: "schema_version: 1\nproject: x\ncontexts: 5\n", base_version: 1 });
+    const r = await s.json("GET", `/api/projects/${project}/proofs`);
+    expect(r.body).toEqual({ version: 2, report: null, reason: "invalid" });
+  });
+});
+
 describe("health", () => {
   test("is public and identifies the service", async () => {
     const res = await app.request("/api/health");

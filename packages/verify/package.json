@@ -1,0 +1,10 @@
+{
+  "name": "@ddd/verify",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@ddd/core": "workspace:*",
+    "z3-solver": "5.2.0"
+  }
+}

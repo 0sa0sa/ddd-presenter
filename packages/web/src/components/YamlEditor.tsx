@@ -16,7 +16,7 @@ export interface GotoRequest {
 }
 
 /** Token colors from the design tokens, so they work in light and dark mode. */
-const highlight = HighlightStyle.define([
+export const highlight = HighlightStyle.define([
   { tag: [t.propertyName, t.definition(t.propertyName)], color: "var(--k-aggregate)" },
   { tag: [t.string, t.special(t.string)], color: "var(--ink)" },
   { tag: [t.number, t.bool, t.null], color: "var(--k-event)" },
@@ -25,7 +25,7 @@ const highlight = HighlightStyle.define([
   { tag: [t.punctuation, t.separator, t.squareBracket, t.brace], color: "var(--ink-faint)" },
 ]);
 
-const theme = EditorView.theme({
+export const theme = EditorView.theme({
   "&": { backgroundColor: "var(--surface)", color: "var(--ink)" },
   ".cm-gutters": { backgroundColor: "var(--surface)", color: "var(--ink-faint)", borderRight: "1px solid var(--line)" },
   ".cm-activeLine": { backgroundColor: "color-mix(in srgb, var(--k-aggregate) 6%, transparent)" },

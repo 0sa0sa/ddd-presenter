@@ -3,7 +3,7 @@
   "generator_version": "0.1.0",
   "schema_version": 1,
   "project": "cleaning-platform",
-  "model_sha256": "d2462ef0611f20a0a9d7024ccb1b768d6767d8b7f230214860ac0515a4094b18",
+  "model_sha256": "fbc87f1da064b2a7cb65a8ebc00a4c5230f408f8faa1acd24c9715e83efe2d68",
   "files": [
     {
       "path": "sql/cleaning_staff.sql",
@@ -278,6 +278,10 @@
       "sha256": "1c23f6f950b187e907c29fd98032e015bae22254b4ee54ff47e4259badcadc2f"
     },
     {
+      "path": "tests/generated/cleaning-staff-properties.test.ts",
+      "sha256": "af8171eb2dee23bf88bac72cd49828943f14dccab1acd6cc241049a74b2ede46"
+    },
+    {
       "path": "tests/generated/cleaning-staff-revoke-invitation.test.ts",
       "sha256": "57009a7bb9bc0fbd1b27b039e6dc99107db0ecd763c912e1c0f3e2badb230ed7"
     },
@@ -304,6 +308,10 @@
     {
       "path": "tests/generated/staffing-policies.test.ts",
       "sha256": "ddee5c19132718df2f0f91d7a7bab1902f191a858f668ff8a64a316199ec0f1a"
+    },
+    {
+      "path": "tests/generated/staffing-properties.test.ts",
+      "sha256": "a82c01d6bdcc9b811c85a6aa7d9583453ea64503439e22ce3669a1fd3c593c1e"
     },
     {
       "path": "tests/generated/staffing-register-staff.test.ts",

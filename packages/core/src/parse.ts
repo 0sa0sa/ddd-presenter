@@ -1173,7 +1173,7 @@ export function readModelData(data: unknown, bag: DiagnosticBag): ModelIR | unde
     }
     const project = r.str(root, "project", [], true) ?? "";
     const gen = root.generation === undefined ? {} : r.obj(root.generation, ["generation"], "generation") ?? {};
-    r.keys(gen, ["package", "src_dir", "tests_dir", "target", "typescript", "python"], ["generation"], "generation");
+    r.keys(gen, ["package", "src_dir", "tests_dir", "target", "typescript", "python", "property_tests"], ["generation"], "generation");
     const defaultPackage = project.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "domain";
     const target = r.str(gen, "target", ["generation"], false) ?? "python";
     if (!(GENERATION_TARGETS as readonly string[]).includes(target)) {
@@ -1203,6 +1203,7 @@ export function readModelData(data: unknown, bag: DiagnosticBag): ModelIR | unde
         target: target === "typescript" ? "typescript" : "python",
         typescript: { testRunner: testRunner === "bun" ? "bun" : "vitest", ...(api ? { api } : {}) },
         ...(py ? { python: { connect: r.bool(py, "connect", ["generation", "python"], false), basePath: pyBase } } : {}),
+        ...(r.bool(gen, "property_tests", ["generation"], false) ? { propertyTests: true } : {}),
       },
       contexts: r.list(root, "contexts", []).flatMap(({ value, path }) => readContext(r, value, path) ?? []),
       relationships: r.list(root, "relationships", []).flatMap(({ value, path }) => readRelationship(r, value, path) ?? []),

@@ -26,6 +26,8 @@
     "packages/web/test",
     "packages/lsp/src",
     "packages/lsp/test",
-    "packages/vscode/src"
+    "packages/vscode/src",
+    "packages/verify/src",
+    "packages/verify/test"
   ]
 }

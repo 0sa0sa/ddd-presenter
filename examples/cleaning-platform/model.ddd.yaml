@@ -5,6 +5,8 @@ generation:
   package: cleaning_platform
   src_dir: src
   tests_dir: tests
+  # Aggregate のプロパティテスト（docs/11 §13）: ランダムな操作の列が、宣言したエラー以外を出さないこと
+  property_tests: true
   # Connect（docs/09 §25）: generated/connect.py の WSGI アプリで Use case とクエリを protobuf の契約どおりに出す
   python: { connect: true, base_path: /api }
 

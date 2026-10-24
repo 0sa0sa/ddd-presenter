@@ -35,6 +35,9 @@ bun run ddd diff my-project/model.ddd.yaml --patch   # 生成したら何が変�
 bun run ddd generate my-project/model.ddd.yaml       # 生成（ddd.lock を作る）
 bun run ddd rules my-project/model.ddd.yaml          # ルールの適用箇所とテスト
 bun run ddd review my-project/model.ddd.yaml         # プロダクトマネージャーに答えてもらう「はい／いいえ」の質問票（docs/11 §11）
+bun run ddd review my-project/model.ddd.yaml --flows # 手順のフロー図（Mermaid つき Markdown。docs/11 §12）
+bun run ddd verify my-project/model.ddd.yaml         # Z3 で証明: 各操作がどの Invariant・制約に断られうるか（証明か反例。docs/11 §13）
+bun run ddd changes old/model.ddd.yaml my-project/model.ddd.yaml --check  # 振る舞いの変化（検査を緩める変更があれば 1）
 bun run ddd migrate my-project/model.ddd.yaml --split # .proto / .domain / .flow の複数ファイル形式に書き出す（docs/10 §12）
 bun run ddd validate my-project                      # ddd.yaml のあるフォルダは複数ファイル形式として読む
 ```
@@ -44,18 +47,20 @@ bun run ddd validate my-project                      # ddd.yaml のあるフォ�
 | `validate [model]` | `--strict`（警告も失敗扱い。未検証のルール・使われないエラー・呼ばれない Extension point も警告）、`--format json` |
 | `diff [model]` | `--patch`（unified diff）、`--check`（生成物が古ければ終了コード 1。CI用） |
 | `generate [model]` | `--dry-run`、`--force`（手編集を破棄）、`--prune`（staleファイルを削除）、`--update-lock`、`--target python\|typescript`（モデルの `generation.target` を上書き。`diff` も同じ） |
-| `review [model]` | `--key`（モデルの答えと根拠つき）、`--template`（回答を書き込む YAML）、`--answers <file>`（回答を読み、モデルを直すものを一覧にする。あれば終了コード 1）、`--format json` |
+| `review [model]` | `--key`（モデルの答えと根拠つき）、`--template`（回答を書き込む YAML）、`--answers <file>`（回答を読み、モデルを直すものを一覧にする。あれば終了コード 1）、`--flows`（フロー図の Markdown）、`--format json` |
+| `verify [model]` | `--smt2 <dir>`（各問いを SMT-LIB で書き出す）、`--depth n`（反例の手順を探す深さ）、`--lean <dir>`（上限つきの証明を Lean 4 の定理に）、`--prove`（Claude Code に証明させ Lean で確かめる）、`--strict`、`--format json` |
+| `changes <before> [model]` | `--check`（検査を緩める変更があれば終了コード 1）、`--format json` |
 | `rules [model]` | `--format json` |
 | `migrate [model]` | schema_version の移行（現行は 1 のみ） |
 | `init [dir]` / `version` | `init --target typescript`（TypeScript 用のサンプル） |
 
-終了コード: 0 = 成功、1 = 検証エラー・衝突・`--check` の差分あり、2 = 使い方の誤り・lock の不一致。CLI はネットワークに接続しない。
+終了コード: 0 = 成功、1 = 検証エラー・衝突・`--check` の差分あり、2 = 使い方の誤り・lock の不一致。CLI はネットワークに接続しない（`verify` は Z3 をプロセスの中で動かす。`verify --prove` だけは Claude Code を呼ぶ）。
 
 ### サンプルプロジェクトで生成物を動かす
 
 ```sh
 cd examples/cleaning-platform
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydantic>=2.6,<3" pytest mypy
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "pydantic>=2.6,<3" "pyjwt[crypto]>=2.8" pytest mypy ruff hypothesis
 cd ../.. && bun run verify:example   # diff --check → pytest → mypy --strict
 ```
 
@@ -266,7 +271,7 @@ bun run build:web && bun run start   # http://localhost:4870
 
 AI の予測・提案を使うには、サーバーのマシンで Claude Code（`claude`）か Codex CLI（`codex`）にログインしておくか、`ANTHROPIC_API_KEY=... bun run dev:server` で起動し、ワークスペースの「設定」タブで使う AI を選んで有効にする（既定はオフ。オフでもローカルの予測は使える。docs/11 §3）。
 
-プロジェクトの「レビュー」タブでは、モデルから作った「はい／いいえ」の文（「ある組織のユーザーは、別の組織の招待を見られる」「受諾済みの招待を取り消せる」など）にプロダクトマネージャーが答え、モデルと違う答えを直すべき所として一覧にできる（回答はプロジェクトに保存。docs/11 §11）。状態の移り変わりも網羅的に調べ、たどり着けない状態や実行できない操作を警告する（docs/10 §3）。
+プロジェクトの「レビュー」タブでは、モデルから作った「はい／いいえ」の文（「ある組織のユーザーは、別の組織の招待を見られる」「受諾済みの招待を取り消せる」など）にプロダクトマネージャーが答え、モデルと違う答えを直すべき所として一覧にできる（回答はプロジェクトに保存。docs/11 §11）。状態の移り変わりも網羅的に調べ、たどり着けない状態や実行できない操作を警告する（docs/10 §3）。同じタブの「フロー図」では、Use case・クエリごとのシーケンス図（どのサーバー・DB・イベントで何をし、どこで止まるか）とイベントのつながり図を見て「この流れで合っているか」に答え、編集者は図の横で `.flow` の手順を書き換えられる（docs/11 §12）。「証明（Z3）」では、Factory・Operation ごとに「ガードを満たしたあとで Invariant や制約に断られることがあるか」を Z3 で調べ、証明か反例（具体的な値と、Factory からそこへ行く手順）を出す。反例は「ここで断るのは正しいか」の質問になり、ボタン一つでシナリオ（回帰テスト）としてモデルに足せる（docs/11 §13）。AI の提案は、差分の上に「振る舞いの変化」（検査を緩める変更を先頭に）を出す。`generation.property_tests: true` で、ランダムな操作の列が宣言したエラー以外を出さないことを確かめるプロパティテスト（Hypothesis / fast-check）も生成する。
 
 プロジェクトの「アーキテクチャ」タブでは、モデルから導いたアーキテクチャをシステム全体・コンテナ・コンテキストの中身の3レベルで見られる（ダブルクリックで中に入る）。図の上でコンテキストを足す・つなぐ、外部システムを足す、生成ターゲットや HTTP API・RLS・レート制限を切り替える、といった操作がモデルへの編集になり（モデルを不正にする操作は適用されない）、各レベルを SVG・PNG・draw.io・Mermaid で書き出せる（docs/11 §9）。
 
@@ -410,7 +415,7 @@ accept(args: { readonly at: Instant }): Transition<CleaningStaffInvitation> {
 | [08-roadmap-risks-and-decisions.md](docs/08-roadmap-risks-and-decisions.md) | 開発段階、リスク、未決事項、意思決定ログ |
 | [09-implementation-decisions.md](docs/09-implementation-decisions.md) | 実装で確定した技術・DSL・生成契約の決定 |
 | [10-dsl-reference.md](docs/10-dsl-reference.md) | モデルDSLのリファレンス |
-| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行（AI 進行役のチャットを含む）、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し）、プロダクトマネージャーのレビュー（はい／いいえの質問） |
+| [11-discovery-and-editing.md](docs/11-discovery-and-editing.md) | ディスカバリーボード（draw.io の読み込み・書き出しを含む）、ワークショップの進行（AI 進行役のチャットを含む）、ボードとモデルの同期、エディタ補完、Tab で確定する予測と AI の提案、アーキテクチャ図（3レベル・図からの操作・書き出し）、プロダクトマネージャーのレビュー（はい／いいえの質問、フロー図と `.flow` の編集）、証明（Z3 の証明と反例、Lean、振る舞いの変化、プロパティテスト） |
 | [12-tutorial.md](docs/12-tutorial.md) | チュートリアル：DDD の基本から、画面での作成、CLI での生成・テストまで |
 
 ## 用語

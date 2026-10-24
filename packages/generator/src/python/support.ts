@@ -33,7 +33,7 @@ export class Imports {
     const std: string[] = [];
     const third: string[] = [];
     const local: string[] = [];
-    const bucket = (m: string) => (STDLIB.has(m.split(".")[0]!) ? std : m.startsWith("pydantic") || m === "pytest" || m === "jwt" || m.split(".")[0] === "cryptography" ? third : local);
+    const bucket = (m: string) => (STDLIB.has(m.split(".")[0]!) ? std : m.startsWith("pydantic") || m === "pytest" || m === "jwt" || ["cryptography", "hypothesis"].includes(m.split(".")[0]!) ? third : local);
     for (const m of [...this.plain].sort(byModule)) bucket(m).push(`import ${m}`);
     for (const m of [...this.map.keys()].sort(byModule)) {
       if (m === "__future__") continue;

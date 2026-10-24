@@ -8,8 +8,9 @@ import { computePlan, generate, generatePython, generateTypeScript, renderManife
 import { TsImports, tsString } from "../src/typescript/code.ts";
 import { formatExpression, formatSource, strWidth } from "../src/typescript/format.ts";
 import { emitExpr, type ExprContext } from "../src/typescript/expr.ts";
-import { TS_API_DEPENDENCIES, TS_DEPENDENCIES, TS_SECURITY_DEPENDENCIES } from "../src/typescript/index.ts";
+import { TS_API_DEPENDENCIES, TS_DEPENDENCIES, TS_PROPERTY_DEPENDENCIES, TS_SECURITY_DEPENDENCIES } from "../src/typescript/index.ts";
 import { TsLayout } from "../src/typescript/layout.ts";
+import { withCounterexamples } from "./counterexamples.ts";
 
 const ROOT = join(import.meta.dir, "../../..");
 const EXAMPLE = join(ROOT, "examples/cleaning-platform-ts");
@@ -28,6 +29,14 @@ const SECURE_QUERIES = fixture("secure-queries.ddd.yaml");
 
 /** Queries (read side): trigram search, keyset paging, PostgreSQL persistence (queries.test.ts runs its SQL on PGlite). */
 const QUERIES = fixture("queries.ddd.yaml");
+
+const ORDERING_CEX = await withCounterexamples(ORDERING);
+/** The model with `generation.property_tests: true` (fast-check property tests of the aggregates). */
+const withProperties = (text: string) => text.replace(/^generation:\n/m, "generation:\n  property_tests: true\n");
+
+test("Z3 finds the ordering model's rejections (the scenarios the run below adds)", () => {
+  expect(ORDERING_CEX.added).toBeGreaterThanOrEqual(10);
+});
 /** The model a team gets by reflecting the sample discovery board into an empty project. */
 const FROM_BOARD = boardToModel(
   sampleBoard(),
@@ -166,7 +175,8 @@ describe("TypeScript target: golden output", () => {
     }
     const pkg = JSON.parse(out.files.find((f) => f.path === "package.json")!.content);
     expect(pkg.dependencies).toEqual({ "decimal.js": TS_DEPENDENCIES["decimal.js"], zod: TS_DEPENDENCIES.zod });
-    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
+    // The sample sets generation.property_tests: fast-check is a dev dependency.
+    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], "fast-check": TS_PROPERTY_DEPENDENCIES["fast-check"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
   });
 
   test("generation is deterministic", () => {
@@ -201,7 +211,7 @@ describe("TypeScript target: golden output", () => {
       react: TS_API_DEPENDENCIES.react,
       zod: TS_DEPENDENCIES.zod,
     });
-    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], "@types/react": TS_API_DEPENDENCIES["@types/react"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
+    expect(pkg.devDependencies).toEqual({ "@types/node": TS_DEPENDENCIES["@types/node"], "@types/react": TS_API_DEPENDENCIES["@types/react"], "fast-check": TS_PROPERTY_DEPENDENCIES["fast-check"], typescript: TS_DEPENDENCIES.typescript, vitest: TS_DEPENDENCIES.vitest });
     expect(pkg.scripts).toEqual({ test: "vitest run", typecheck: "tsc --noEmit" });
     const tsconfig = JSON.parse(out.files.find((f) => f.path === "tsconfig.json")!.content);
     expect(tsconfig.compilerOptions).toMatchObject({ strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, verbatimModuleSyntax: true, erasableSyntaxOnly: true, noUnusedParameters: true, module: "NodeNext" });
@@ -834,7 +844,7 @@ function installDependencies(deps: Record<string, string> = { ...TS_DEPENDENCIES
   return { dir };
 }
 
-const DEPS = process.env.DDD_SKIP_TS_RUN ? { reason: "DDD_SKIP_TS_RUN is set" } : installDependencies({ ...TS_DEPENDENCIES, ...TS_API_DEPENDENCIES, ...TS_SECURITY_DEPENDENCIES });
+const DEPS = process.env.DDD_SKIP_TS_RUN ? { reason: "DDD_SKIP_TS_RUN is set" } : installDependencies({ ...TS_DEPENDENCIES, ...TS_API_DEPENDENCIES, ...TS_SECURITY_DEPENDENCIES, ...TS_PROPERTY_DEPENDENCIES });
 if (!DEPS.dir) console.warn(`skipping "generated TypeScript actually runs": ${DEPS.reason} (needs network once to install zod, decimal.js, typescript, vitest, react and @tanstack/react-query)`);
 
 /**
@@ -849,6 +859,7 @@ const LINT_DEPENDENCIES = {
   "@types/node": TS_DEPENDENCIES["@types/node"],
   ...TS_API_DEPENDENCIES,
   ...TS_SECURITY_DEPENDENCIES,
+  ...TS_PROPERTY_DEPENDENCIES,
   prettier: "^3.9.0",
   eslint: "^10.0.0",
   "typescript-eslint": "^8.71.0",
@@ -899,7 +910,8 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       expect(tsc.out).toBe("");
       expect(tsc.code).toBe(0);
       const vitest = run(["node_modules/.bin/vitest", "run"], dir);
-      expect(vitest.out).toMatch(/Tests\s+92 passed/);
+      // 92 scenario and contract tests plus one property test per context with a factory.
+      expect(vitest.out).toMatch(/Tests\s+94 passed/);
       expect(vitest.code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -923,6 +935,10 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
     ["the identities model over Connect (String and Integer identities as protobuf JSON strings)", withApi(asTypeScript(IDENTITIES, "bun"), CONNECT_API), false],
     ["the security model over Connect (401 / 403 / 429 as Connect codes)", withApi(asTypeScript(SECURITY, "bun"), CONNECT_API), false],
     ["a model reflected from the discovery board", FROM_BOARD, false],
+    ["the ordering model with every Z3 counterexample as a scenario (the generated code raises the predicted error)", ORDERING_CEX.text, false],
+    ["the ordering model with property tests (fast-check: random operations throw only declared errors)", withProperties(ORDERING), false],
+    ["the kitchen-sink model with property tests (lists, entities, decimals, dates as arbitraries)", withProperties(KITCHEN_SINK), false],
+    ["the security model with property tests (roles do not matter to aggregates)", withProperties(SECURITY), false],
     ["the sample with locally proposed scenarios added", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml, false],
   ] as [string, string, boolean][])("tsc --strict and bun test pass for %s; every derived violation test fails without the checks", (_label, source, api) => {
     // Every row has all three values: bun treats an extra declared parameter as a `done` callback.
@@ -976,6 +992,8 @@ describe.skipIf(!DEPS.dir)("generated TypeScript actually runs", () => {
       ["secure-queries", withApi(SECURE_QUERIES)],
       ["from-board", asTypeScript(FROM_BOARD)],
       ["proposed", proposeLocally(MODEL, "CleaningStaff", "CleaningStaffInvitation", "scenarios")!.yaml],
+      ["ordering-properties", asTypeScript(withProperties(ORDERING))],
+      ["kitchen-sink-properties", asTypeScript(withProperties(KITCHEN_SINK))],
     ];
     // One project at a time: typed linting loads a whole TypeScript program.
     for (const [name, text] of models) {

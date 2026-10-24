@@ -10,6 +10,12 @@ import {
   reviewFindings,
   reviewMarkdown,
   reviewQuestions,
+  flowDiagrams,
+  flowsMarkdown,
+  behaviorChanges,
+  proofDiagnostics,
+  proofsMarkdown,
+  type ProofReport,
   ruleUsage,
   SCHEMA_VERSION,
   sortDiagnostics,
@@ -23,7 +29,8 @@ import {
   type Path,
 } from "@ddd/core";
 import { computePlan, generate, GENERATOR_VERSION, unifiedDiff, type Manifest, type Plan } from "@ddd/generator";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { leanProject, proveProject, verifyModel } from "@ddd/verify";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { atomicApply, readText, safeJoin, type WriteOp } from "./fsops.ts";
 import { SAMPLE_MODEL, SAMPLE_MODEL_TS } from "./sample.ts";
@@ -501,7 +508,7 @@ export function cmdRules(io: Io, opts: CommonOpts): number {
  * Yes/no questions for a product manager (docs/11 §11): the sheet without the model's answers, the key with them,
  * an answers file to fill in, or — with `--answers` — the answers that mean the model has to change.
  */
-export function cmdReview(io: Io, opts: CommonOpts & { key: boolean; template: boolean; answers?: string }): number {
+export function cmdReview(io: Io, opts: CommonOpts & { key: boolean; template: boolean; answers?: string; flows?: boolean; proofs?: boolean }): number | Promise<number> {
   const m = loadModel(io, opts);
   if (!m) return EXIT.usage;
   if (!m.result.analysis || !m.result.ok) {
@@ -509,8 +516,21 @@ export function cmdReview(io: Io, opts: CommonOpts & { key: boolean; template: b
     io.err("✗ Fix the errors first: the questions are read from a valid model");
     return EXIT.failed;
   }
-  const questions = reviewQuestions(m.result.analysis);
-  const project = m.result.model?.project ?? "model";
+  if (opts.flows) {
+    // The flow diagrams (docs/11 §12): Mermaid in Markdown, or the diagram data as JSON.
+    const model = m.result.analysis.model;
+    io.out(opts.format === "json" ? JSON.stringify(flowDiagrams(model, m.result.analysis), (k, v: unknown) => (k === "path" ? undefined : v), 2) : flowsMarkdown(model, m.result.analysis));
+    return EXIT.ok;
+  }
+  if (opts.proofs) {
+    // With the counterexamples of the proofs (Z3, docs/09 §29) as questions.
+    const analysis = m.result.analysis;
+    return verifyModel(analysis).then((proofs) => reviewSheet(io, opts, reviewQuestions(analysis, { proofs }), m.result.model?.project ?? "model"));
+  }
+  return reviewSheet(io, opts, reviewQuestions(m.result.analysis), m.result.model?.project ?? "model");
+}
+
+function reviewSheet(io: Io, opts: CommonOpts & { key: boolean; template: boolean; answers?: string }, questions: ReturnType<typeof reviewQuestions>, project: string): number {
   let answers: Record<string, "yes" | "no"> | undefined;
   if (opts.answers !== undefined) {
     const text = readText(opts.answers);
@@ -534,4 +554,96 @@ export function cmdReview(io: Io, opts: CommonOpts & { key: boolean; template: b
   }
   // Answers that differ from the model fail like `diff --check`: the model has to change.
   return findings.length ? EXIT.failed : EXIT.ok;
+}
+
+/**
+ * `ddd verify`: proofs about the aggregates with Z3 (docs/09 §29): for every factory and operation, whether each check
+ * that can reject it can fail once its guards hold — a proof or a counterexample. Exit 1 when an operation can never
+ * succeed (a warning in the report); counterexamples alone do not fail (a rejection may be intended: the review asks).
+ */
+export async function cmdVerify(io: Io, opts: CommonOpts & { smt2?: string; depth?: number; strict?: boolean; lean?: string; prove?: boolean; leanCmd?: string }): Promise<number> {
+  const m = loadModel(io, opts);
+  if (!m) return EXIT.usage;
+  if (!m.result.analysis || !m.result.ok) {
+    printDiagnostics(io, m.result.diagnostics, m.label, m.split);
+    io.err("✗ Fix the errors first: only a valid model is verified");
+    return EXIT.failed;
+  }
+  let written = 0;
+  const dir = opts.smt2 ? resolve(opts.smt2) : undefined;
+  if (dir) mkdirSync(dir, { recursive: true });
+  const report: ProofReport = await verifyModel(m.result.analysis, {
+    ...(opts.depth !== undefined ? { traceDepth: opts.depth } : {}),
+    ...(dir
+      ? {
+          onQuery: (name: string, script: string) => {
+            writeFileSync(join(dir, `${name.replace(/[^\w.-]/g, "_")}.smt2`), script);
+            written++;
+          },
+        }
+      : {}),
+  });
+  if (opts.lean) {
+    // The results Z3 bounded or left open, as Lean theorems (lists of any length); --prove has a model prove them.
+    const lean = leanProject(m.result.analysis, report);
+    const leanDir = resolve(opts.lean);
+    if (opts.prove) {
+      const outcomes = await proveProject(lean, leanDir, { lean: (opts.leanCmd ?? "lean").split(" ").filter(Boolean), onProgress: (s) => io.err(s) });
+      for (const o of outcomes) {
+        const r = report.results.find((x) => x.id === o.id);
+        if (r) r.lean = { status: o.status, attempts: o.attempts, ...(o.error ? { error: o.error.slice(0, 500) } : {}) };
+      }
+    } else {
+      for (const [f, content] of Object.entries(lean.files)) {
+        mkdirSync(dirname(join(leanDir, f)), { recursive: true });
+        writeFileSync(join(leanDir, f), content);
+      }
+    }
+    io.err(`${lean.theorems.length} Lean theorems in ${leanDir}${lean.skipped.length ? ` (${lean.skipped.length} could not be stated)` : ""}`);
+  }
+  const project = m.result.model?.project ?? "model";
+  const warnings = proofDiagnostics(report);
+  if (opts.format === "json") io.out(JSON.stringify(report, (k, v: unknown) => (k === "path" ? undefined : v), 2));
+  else {
+    io.out(proofsMarkdown(project, report));
+    if (dir) {
+      const rel = relative(process.cwd(), dir);
+      io.err(`${written} SMT-LIB scripts in ${rel.startsWith("..") ? dir : rel || "."}`);
+    }
+  }
+  if (opts.format !== "json") printDiagnostics(io, warnings, m.label, m.split);
+  const cex = report.results.filter((r) => r.outcome === "counterexample").length;
+  if (warnings.length) return EXIT.failed;
+  return opts.strict && cex ? EXIT.failed : EXIT.ok;
+}
+
+/**
+ * `ddd changes <before> [model]`: what changes in the model's behaviour from `before` (another file or directory, e.g.
+ * the version on the main branch) to the model (docs/09 §29). Changes that loosen a check come first; with --check
+ * they fail (exit 1), so a review or CI step sees them next to the diff.
+ */
+export function cmdChanges(io: Io, opts: CommonOpts & { before: string; check: boolean }): number {
+  const b = loadModel(io, { ...opts, model: opts.before });
+  if (!b) return EXIT.usage;
+  const a = loadModel(io, opts);
+  if (!a) return EXIT.usage;
+  for (const [m, which] of [
+    [b, "before"],
+    [a, "model"],
+  ] as const) {
+    if (!m.result.ok || !m.result.analysis) {
+      printDiagnostics(io, m.result.diagnostics, m.label, m.split);
+      io.err(`✗ The ${which} model has errors: both models must be valid`);
+      return EXIT.failed;
+    }
+  }
+  const changes = behaviorChanges(b.result.analysis!, a.result.analysis!);
+  const weak = changes.filter((c) => c.weakens);
+  if (opts.format === "json") io.out(JSON.stringify(changes, (k, v: unknown) => (k === "path" ? undefined : v), 2));
+  else if (!changes.length) io.out("振る舞いの変化はありません。");
+  else {
+    io.out(`振る舞いの変化 ${changes.length} 件（検査を緩める変更 ${weak.length} 件）`);
+    for (const c of changes) io.out(`${c.weakens ? paint(io, "33", "▲") : "・"} ${c.text}  [${c.element}]`);
+  }
+  return opts.check && weak.length ? EXIT.failed : EXIT.ok;
 }

@@ -6,6 +6,8 @@ generation:
   package: cleaning_platform        # TypeScript では src の下のディレクトリ名
   src_dir: src
   tests_dir: tests
+  # Aggregate のプロパティテスト（docs/11 §13）: ランダムな操作の列が、宣言したエラー以外を出さないこと
+  property_tests: true
   typescript:
     test_runner: vitest             # vitest（既定）| bun
     api: { base_path: /api, client: tanstack-query, connect: true }   # HTTP API（契約・サーバーのハンドラ・TanStack Query のクライアント）と Connect（docs/09 §25）。省略で生成しない

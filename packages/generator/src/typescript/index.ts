@@ -26,6 +26,7 @@ import { applicationQueriesFile, contextPlans, hasQueries, persistenceTestFile, 
 import { contextSqlFile } from "../sql.ts";
 import TESTING_TS from "./templates/testing.ts.txt" with { type: "text" };
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./tests.ts";
+import { propertyTestFile } from "./properties.ts";
 import { tsType } from "./types.ts";
 import { readAccessFile, securityFile, usesJwt } from "./security.ts";
 import { rbacTestFile, securityTestFile } from "./security-tests.ts";
@@ -52,6 +53,11 @@ export const TS_API_DEPENDENCIES = {
   "@tanstack/react-query": "^5.102.0",
   react: "^19.0.0",
   "@types/react": "^19.0.0",
+} as const;
+
+/** Added to the scaffolded package.json (devDependencies) when `generation.property_tests` is set. */
+export const TS_PROPERTY_DEPENDENCIES = {
+  "fast-check": "^4.10.0",
 } as const;
 
 /** Added to the scaffolded package.json when the HTTP API authenticates bearer JWTs (`security.authentication`). */
@@ -139,6 +145,8 @@ export function generateTypeScript(analysis: Analysis, modelText: string): Gener
     }
     const invariants = invariantTestFile(L);
     if (invariants) gen(invariants.path, invariants.content);
+    const properties = propertyTestFile(L);
+    if (properties) gen(properties.path, properties.content);
     if (policies) gen(policies.path, policies.content);
     const policyTests = policyTestFile(L, analysis);
     if (policyTests) gen(policyTests.path, policyTests.content);
@@ -299,6 +307,7 @@ function packageJson(model: ModelIR): string {
     devDependencies: {
       ...(bun ? { "@types/bun": TS_DEPENDENCIES["@types/bun"] } : { "@types/node": TS_DEPENDENCIES["@types/node"] }),
       ...(api ? { "@types/react": TS_API_DEPENDENCIES["@types/react"] } : {}),
+      ...(model.generation.propertyTests ? { "fast-check": TS_PROPERTY_DEPENDENCIES["fast-check"] } : {}),
       typescript: TS_DEPENDENCIES.typescript,
       ...(bun ? {} : { vitest: TS_DEPENDENCIES.vitest }),
     },

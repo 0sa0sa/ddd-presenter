@@ -295,7 +295,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
           YAMLをエクスポート
         </a>
       </TopBar>
-      <div className={`workbench${tab === "preview" || tab === "history" ? " no-inspector" : ""}${tab === "discovery" || tab === "architecture" ? " is-board" : ""}`}>
+      <div className={`workbench${tab === "preview" || tab === "history" || tab === "review" ? " no-inspector" : ""}${tab === "discovery" || tab === "architecture" ? " is-board" : ""}`}>
         <Outline nodes={outline} selected={selectedId} onSelect={(n) => {
           setSelectedId(n.id);
           if (tab === "model") gotoPath(n.path);
@@ -459,7 +459,22 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             {tab === "rules" && <RulesView rules={rules} onGoto={gotoPath} onSelect={setSelectedId} />}
             {tab === "scenarios" && model && <ScenariosView model={model} onGoto={gotoPath} />}
             {tab === "review" && (
-              <ReviewView projectId={id} projectName={project?.name ?? "model"} savedYaml={saved.yaml} savedVersion={saved.version} dirty={dirty} canEdit={canEdit} onGoto={gotoPath} />
+              <ReviewView
+                projectId={id}
+                projectName={project?.name ?? "model"}
+                savedYaml={saved.yaml}
+                savedVersion={saved.version}
+                dirty={dirty}
+                canEdit={canEdit}
+                onGoto={gotoPath}
+                text={text}
+                model={result.ok ? model : undefined}
+                analysis={result.ok ? result.analysis : undefined}
+                onApply={(yaml, msg) => {
+                  setText(yaml);
+                  setStatus(msg);
+                }}
+              />
             )}
             {tab === "preview" && <PreviewView projectId={id} version={saved.version} dirty={dirty} focusPath={previewFocus} />}
             {tab === "history" && (
@@ -502,7 +517,7 @@ export function ProjectPage({ me, id, tab: tabParam, onLogout }: { me: Me; id: s
             )}
           </footer>
         </section>
-        {tab !== "preview" && tab !== "history" && tab !== "discovery" && tab !== "architecture" && (
+        {tab !== "preview" && tab !== "history" && tab !== "discovery" && tab !== "architecture" && tab !== "review" && (
           <Inspector node={selected} model={model} analysis={result.analysis} rules={rules} diagnostics={diagnostics} canEdit={canEdit} onEdit={onEdit} onGoto={gotoPath} onSelectId={setSelectedId} onPropose={(context, aggregate, kind) => setPropose({ context, aggregate, kind })} />
         )}
       </div>

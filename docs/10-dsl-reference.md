@@ -12,6 +12,7 @@ generation:
   src_dir: src                      # 既定 src
   tests_dir: tests                  # 既定 tests
   target: python                    # python（既定）| typescript（§1.1）
+  property_tests: true              # 任意。Aggregate のプロパティテスト（Hypothesis / fast-check）を生成する（docs/11 §13）
   typescript:                       # target: typescript のときの設定
     test_runner: vitest             # vitest（既定）| bun
     api: { base_path: /api }        # 任意。HTTP API と TanStack Query のクライアントを生成する（§1.2）
@@ -227,6 +228,8 @@ Aggregate の enum のフィールドで、Factory の `fields` か Operation �
 | `never-enabled-operation`（警告） | 操作の `require` が、たどり着ける状態のどれでも成り立たない（その操作は実行できない） |
 
 Factory のない Aggregate は、どの状態でも外から来うるので、たどり着けるかは調べない。どの状態からどの操作ができるか、終わりの状態（どの操作でも変わらない状態）は `ddd review` の質問（docs/11 §11）になる。
+
+状態だけでなく値まで見る検査は `ddd verify`（Z3、docs/11 §13）が行う。Factory・Operation ごとに、`require` を満たしたあとで Invariant・制約・組み立てる値オブジェクトに断られることがあるかを、証明か反例（具体的な値）で返す。どんな値でも成功しない操作は警告 `never-succeeds` になる。
 
 ## 4. Rule式
 
@@ -1049,6 +1052,8 @@ policy register_staff_on_acceptance on CleaningStaff.InvitationAccepted {
   run register_staff(invitation_id: event.id, joined_at: event.at)
 }
 ```
+
+YAML のモデルでも、Web の「レビュー」タブ → 「フロー図」で Use case・クエリ・ポリシーを 1 ブロックずつこの書き方で書き換えられる（docs/11 §12）。
 
 `where` の右辺は `:パラメータ`、`principal.<メンバー>`、リテラル（YAML の書き方）のどれか。`where a == :x and b > :y` と1行にも書ける。`search <パラメータ> on <フィールド>, ... <trigram|prefix|exact> [>= 類似度]`、`order by` の向きは `relevance` が `desc`、それ以外が `asc` のとき省略できる。`page` を書かなければ 20 件・最大 100 件。
 

@@ -8,6 +8,7 @@
  * Deterministic and derived from the model only; ids are built from element names, so answers keep their question
  * when the model is edited elsewhere.
  */
+import { proofQuestions, type ProofReport } from "./proofs.ts";
 import { parse as yamlParse } from "yaml";
 import { referencedFields, type TExpr } from "./checker.ts";
 import type { Path } from "./diagnostics.ts";
@@ -15,6 +16,8 @@ import { formatPath } from "./diagnostics.ts";
 import type { AggregateIR, AuthorizeIR, ContextIR, EntityIR, FieldIR, ModelIR, SecurityIR, UseCaseIR } from "./ir.ts";
 import type { QueryIR } from "./queries.ts";
 import { aggregateScope, isTenantScoped, leadingLoads, makePrincipal, roleIncludes, rolePermissions, satisfies, useCaseScope, type AccessScope } from "./security.ts";
+import { conditionText, describeCondition, plainName, words, type Names } from "./conditions.ts";
+import { flowDiagrams, flowReviewTargets } from "./flows.ts";
 import { stateMachines, type StateMachine } from "./statemachine.ts";
 import type { Analysis, ContextAnalysis } from "./validate.ts";
 
@@ -24,8 +27,10 @@ export const REVIEW_CATEGORIES = {
   lifecycle: "状態の移り変わり",
   relations: "つながり（エンティティ・値・参照）",
   rules: "守るべきルール",
+  proofs: "断られる場合（Z3 の反例）",
   data: "入力する情報",
   automation: "自動で起きること",
+  flows: "手順の流れ（フロー図）",
 } as const;
 export type ReviewCategory = keyof typeof REVIEW_CATEGORIES;
 
@@ -49,7 +54,7 @@ export interface ReviewQuestion {
   path: Path;
 }
 
-export function reviewQuestions(analysis: Analysis): ReviewQuestion[] {
+export function reviewQuestions(analysis: Analysis, opts: { proofs?: ProofReport } = {}): ReviewQuestion[] {
   const model = analysis.model;
   const out: ReviewQuestion[] = [];
   const seen = new Set<string>();
@@ -68,6 +73,9 @@ export function reviewQuestions(analysis: Analysis): ReviewQuestion[] {
     dataQuestions(ca, add);
     automationQuestions(model, ca, add);
   }
+  flowQuestions(analysis, add);
+  // Counterexamples of the proofs (docs/09 §29): asked only when a report was computed (it needs the solver).
+  if (opts.proofs) for (const q of proofQuestions(analysis, opts.proofs)) add({ ...q, category: "proofs" });
   const order = Object.keys(REVIEW_CATEGORIES);
   return out.map((q, i) => ({ q, i })).sort((a, b) => order.indexOf(a.q.category) - order.indexOf(b.q.category) || a.i - b.i).map((x) => x.q);
 }
@@ -84,10 +92,6 @@ const spaced = (text: string) =>
 const called = (x: { name: string; description?: string }) => {
   const d = x.description?.trim().split("\n")[0]?.replace(/[。.]$/, "");
   return d && d.length <= 30 ? `${d}（${x.name}）` : x.name;
-};
-const plainName = (x: { name: string; description?: string }) => {
-  const d = x.description?.trim().split("\n")[0]?.replace(/[。.]$/, "");
-  return d && d.length <= 30 ? d : x.name;
 };
 const fieldCalled = (f: FieldIR) => (f.description && f.description.length <= 30 ? `${f.description.replace(/[。.]$/, "")}（${f.name}）` : f.name);
 /** `「description」（name）`, or `「name」` without a description. */
@@ -432,121 +436,6 @@ function partial(e: TExpr, security: SecurityIR, role: RoleRef): TExpr | boolean
     default:
       return e;
   }
-}
-
-interface Names {
-  self?: string;
-  locals?: Record<string, string>;
-}
-
-/** Words joined with a space only where one side is Latin (「本人の email が招待の email と同じ」). */
-const words = (...parts: string[]) =>
-  parts.reduce((acc, w) => (!acc ? w : /[\x21-\x7e]$/.test(acc) || /^[\x21-\x7e]/.test(w) ? `${acc} ${w}` : `${acc}${w}`), "");
-
-/**
- * A condition in words (Japanese); null checks before a comparison of the same value are left out. `self` names the
- * object whose fields are read by name (an aggregate's own `allow_if`), `locals` what a use case's variables hold.
- */
-function describeCondition(e: TExpr, names: Names = {}): string {
-  switch (e.t) {
-    case "binary": {
-      if (e.op === "and") {
-        const drop = (x: TExpr, other: TExpr) => {
-          const checked = notNullOf(x);
-          return !!checked && mentions(other, checked);
-        };
-        if (drop(e.left, e.right)) return describeCondition(e.right, names);
-        if (drop(e.right, e.left)) return describeCondition(e.left, names);
-        return `${describeCondition(e.left, names)}、かつ${describeCondition(e.right, names)}`;
-      }
-      if (e.op === "or") return `${describeCondition(e.left, names)}、または${describeCondition(e.right, names)}`;
-      const l = value(e.left, names);
-      const r = value(e.right, names);
-      if (e.right.t === "lit" && e.right.kind === "null" && (e.op === "==" || e.op === "!=")) return words(l, `が${e.op === "!=" ? "ある" : "ない"}`);
-      if (e.op === "==") return e.right.t === "enumValue" ? words(l, "が", r) : words(l, "が", r, "と同じ");
-      if (e.op === "!=") return words(l, "が", r, "と違う");
-      if (["<", "<=", ">", ">="].includes(e.op)) return `${l} ${e.op} ${r}`;
-      throw new Unsupported();
-    }
-    case "isNull":
-      return words(value(e.operand, names), `が${e.negate ? "ある" : "ない"}`);
-    case "not":
-      return `「${describeCondition(e.operand, names)}」ではない`;
-    case "hasRole":
-      return `${e.role} のロールを持つ`;
-    case "hasPermission":
-      return `${e.permission} の権限を持つ`;
-    case "guard":
-      return words(e.receiver ? words(value(e.receiver, names), "が") : "", e.guard, "を満たす");
-    default:
-      return value(e, names);
-  }
-}
-
-function value(e: TExpr, names: Names = {}): string {
-  switch (e.t) {
-    case "principal":
-      return e.member === "id" ? "本人の ID" : `本人の ${e.member}`;
-    case "field":
-      // A one-field value object reads as itself (`email.value` is the email).
-      if (e.owner && e.name === "value") return value(e.owner, names);
-      if (!e.owner) return names.self ? words(`${names.self}の`, e.name) : e.name;
-      return words(`${value(e.owner, names)}の`, e.name);
-    case "local":
-      return names.locals?.[e.name] ?? e.name;
-    case "param":
-      return e.name;
-    case "enumValue":
-      return e.value;
-    case "lit":
-      return e.kind === "string" ? `"${e.value}"` : String(e.value);
-    case "port":
-      return e.port === "clock" ? "いまの時刻" : "新しい ID";
-    case "binary":
-    case "not":
-    case "isNull":
-    case "hasRole":
-    case "hasPermission":
-    case "guard":
-      return describeCondition(e, names);
-    default:
-      // Arithmetic, collections, extension points, …: the caller shows the expression as written.
-      throw new Unsupported();
-  }
-}
-
-class Unsupported extends Error {}
-
-/** The condition in words, or as written when it uses something not put into words. */
-function conditionText(e: TExpr, names: Names | undefined, source: string): string {
-  try {
-    return describeCondition(e, names);
-  } catch (err) {
-    if (err instanceof Unsupported) return `「${source}」`;
-    throw err;
-  }
-}
-
-/** The same field / principal member / variable (types aside: one side may be the optional form). */
-function sameValue(a: TExpr, b: TExpr): boolean {
-  if (a.t === "principal" && b.t === "principal") return a.member === b.member;
-  if ((a.t === "local" || a.t === "param") && a.t === b.t) return a.name === b.name;
-  if (a.t === "field" && b.t === "field") return a.name === b.name && (!a.owner || !b.owner ? !a.owner && !b.owner : sameValue(a.owner, b.owner));
-  return false;
-}
-
-/** The value a `x != null` (or `x is not null`) check is about. */
-function notNullOf(e: TExpr): TExpr | undefined {
-  if (e.t === "isNull" && e.negate) return e.operand;
-  if (e.t === "binary" && e.op === "!=" && e.right.t === "lit" && e.right.kind === "null") return e.left;
-  return undefined;
-}
-
-function mentions(e: TExpr, target: TExpr): boolean {
-  if (sameValue(e, target)) return true;
-  if (e.t === "binary") return mentions(e.left, target) || mentions(e.right, target);
-  if (e.t === "not" || e.t === "isNull") return mentions(e.operand, target);
-  return false;
 }
 
 function queryQuestions(security: SecurityIR, ca: ContextAnalysis, q: QueryIR, add: Add): void {
@@ -1011,6 +900,39 @@ function automationQuestions(model: ModelIR, ca: ContextAnalysis, add: Add): voi
         path: r.path,
       });
     }
+  }
+}
+
+// -- flows ---------------------------------------------------------------------------
+
+/** One question per flow diagram (docs/11 §12): its id carries a fingerprint, so a changed flow is asked again. */
+function flowQuestions(analysis: Analysis, add: Add): void {
+  for (const t of flowReviewTargets(analysis.model, flowDiagrams(analysis.model, analysis))) {
+    if (t.diagram === "events") {
+      add({
+        id: t.id,
+        category: "flows",
+        text: "「イベントのつながり」の図のとおり、ある処理が終わると自動で次の処理が起き、それ以外は自動では起きない。",
+        modelAnswer: "yes",
+        basis: "Use case が発行するイベントと、それに反応するポリシーから作った図。",
+        ifDifferent: "足りない・余計なつながりをメモに書き、ポリシー（.flow の policy）を足すか外す。",
+        element: t.element,
+        path: t.path,
+      });
+      continue;
+    }
+    const d = t.diagram;
+    const keyword = d.ref.kind === "query" ? "query" : "flow";
+    add({
+      id: t.id,
+      category: "flows",
+      text: `「${d.title}」の図の流れ（順番・止まる所・どこで何をするか）は、業務の手順として合っている。`,
+      modelAnswer: "yes",
+      basis: `.flow の ${keyword} ${d.ref.name} から作った図。`,
+      ifDifferent: `違う所をメモに書き、フロー図の画面で ${keyword} ${d.ref.name} を直す。`,
+      element: t.element,
+      path: t.path,
+    });
   }
 }
 

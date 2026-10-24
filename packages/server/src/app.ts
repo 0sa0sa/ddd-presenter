@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { boardGhosts, emptyBoard, facilitatorBrief, facilitatorTurn, normalizeBoard, placeSuggestions, proposeLocally, ruleUsage, validateModelText, type Board, type BoardGhost, type ProposalKind, type ValidateResult } from "@ddd/core";
+import { boardGhosts, emptyBoard, facilitatorBrief, facilitatorTurn, normalizeBoard, placeSuggestions, proposeLocally, ruleUsage, validateModelText, type Board, type BoardGhost, type ProofReport, type ProposalKind, type ValidateResult } from "@ddd/core";
+import { verifyModel } from "@ddd/verify";
 import { AiBusyError, PROVIDER_LABEL, type ModelAssistant, type ProviderId } from "./ai.ts";
 import { fitToCursor } from "./fit.ts";
 import { computePlan, generate, renderManifest, unifiedDiff, type GenerationOutput } from "@ddd/generator";
@@ -930,6 +931,43 @@ export function createApp(db: Database, options: AppOptions = {}) {
       ).run(project.id, id, answer, note, text, c.get("user").id, at);
     })();
     return c.json({ ok: true, at, by: c.get("user").username });
+  });
+
+  // -- proofs (Z3, docs/09 §29) -------------------------------------------------------
+
+  /** How long a request waits for a running proof before answering "running" (tests shorten it). */
+  const proofWaitMs = Number(process.env.DDD_PROOF_WAIT_MS ?? 8000);
+  /** Reports by project and version (a stored version never changes); the most recent 50 are kept. */
+  const proofCache = new Map<string, Promise<{ report: ProofReport | null; reason?: string }>>();
+
+  app.get("/api/projects/:projectId/proofs", async (c) => {
+    const { project } = loadProject(c);
+    const q = c.req.query("version");
+    const version = q === undefined ? latestVersion(project.id)!.version : Number(q);
+    if (!Number.isInteger(version) || version < 1) fail(400, "version must be a positive integer");
+    if (process.env.DDD_PROOFS === "off") return c.json({ version, report: null, reason: "off" });
+    const key = `${project.id}:${version}`;
+    let job = proofCache.get(key);
+    if (!job) {
+      const r = validate(versionYaml(project.id, version));
+      job =
+        r.ok && r.analysis
+          ? verifyModel(r.analysis).then(
+              (report) => ({ report }),
+              (e: Error) => {
+                console.error("verification failed:", e.message);
+                return { report: null, reason: "failed" };
+              },
+            )
+          : Promise.resolve({ report: null, reason: "invalid" });
+      proofCache.set(key, job);
+      while (proofCache.size > 50) proofCache.delete(proofCache.keys().next().value!);
+    }
+    // A first proof can take longer than a request may stay open (Bun closes idle requests after 10 s): answer
+    // "running" after a few seconds and let the client ask again; the job keeps going and is cached.
+    const done = await Promise.race([job, new Promise<undefined>((r) => setTimeout(r, proofWaitMs, undefined))]);
+    if (!done) return c.json({ version, report: null, reason: "running" }, 202);
+    return c.json({ version, ...done });
   });
 
   // -- AI assistance ---------------------------------------------------------------

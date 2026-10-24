@@ -254,6 +254,7 @@ const KEYS: Partial<Record<Container, { key: string; doc: string }[]>> = {
     K("tests_dir", "テストの出力先（既定 tests）"),
     K("target", "生成する言語: python（既定, Pydantic v2）/ typescript（Zod v4）"),
     K("typescript", "TypeScript の生成設定（test_runner・api）"),
+    K("property_tests", "Aggregate のプロパティテストを生成する（true。Hypothesis / fast-check。ランダムな Factory・Operation が宣言したエラー以外を出さないこと）"),
   ],
   "generation:typescript": [
     K("test_runner", "生成テストのランナー: vitest（既定）/ bun"),

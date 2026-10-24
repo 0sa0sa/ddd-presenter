@@ -80,7 +80,7 @@ describe("review questions: the sample model", () => {
       expect(q.path.length).toBeGreaterThan(0);
     }
     const cats = [...new Set(qs.map((q) => q.category))];
-    expect(cats).toEqual(["tenancy", "access", "lifecycle", "relations", "rules", "data", "automation"]);
+    expect(cats).toEqual(["tenancy", "access", "lifecycle", "relations", "rules", "data", "automation", "flows"]);
     // Both polarities: a reviewer cannot answer everything with yes.
     expect(qs.filter((q) => q.modelAnswer === "no").length).toBeGreaterThan(10);
   });
@@ -88,7 +88,11 @@ describe("review questions: the sample model", () => {
   test("ids survive an edit elsewhere in the model; a renamed element gets new ids", () => {
     const edited = SAMPLE_MODEL.replace("description: 招待を取り消す", "description: 招待をやめる");
     const ids = new Set(questions(edited).map((q) => q.id));
-    expect(qs.every((q) => ids.has(q.id))).toBe(true);
+    expect(qs.filter((q) => q.category !== "flows").every((q) => ids.has(q.id))).toBe(true);
+    // A flow question names what the reviewer saw: the diagram that shows the description is asked again, the others keep their answers.
+    const flows = qs.filter((q) => q.category === "flows");
+    expect(flows.filter((q) => !ids.has(q.id)).map((q) => q.id.split(":")[1])).toEqual(["CleaningStaff.revoke_invitation"]);
+    expect(flows.find((q) => q.id.startsWith("flow:CleaningStaff.accept_invitation:"))!.text).toBe("「招待を受諾する（accept_invitation）」の図の流れ（順番・止まる所・どこで何をするか）は、業務の手順として合っている。");
   });
 });
 

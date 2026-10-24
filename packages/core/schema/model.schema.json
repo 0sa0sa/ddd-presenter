@@ -38,6 +38,10 @@
         "tests_dir": {
           "type": "string"
         },
+        "property_tests": {
+          "description": "Generate property tests of the aggregates (Hypothesis / fast-check): random factories and operations raise only declared domain errors.",
+          "type": "boolean"
+        },
         "target": {
           "description": "Language of the generated code: python (Pydantic v2, default) or typescript (Zod v4).",
           "enum": [

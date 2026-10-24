@@ -13,6 +13,14 @@ function cli(args: string[]) {
   return { code, out: out.join("\n"), err: err.join("\n") };
 }
 
+async function cliAsync(args: string[]) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: Io = { out: (s) => out.push(s), err: (s) => err.push(s), color: false };
+  const code = await run(args, io);
+  return { code, out: out.join("\n"), err: err.join("\n") };
+}
+
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "ddd-cli-"));
   expect(cli(["init", dir]).code).toBe(0);
@@ -168,6 +176,50 @@ describe("ddd CLI", () => {
     expect(ok.err).toContain('Unknown question "nope"');
     expect(ok.err).toContain('"tenancy:hierarchy": answer yes or no, not "maybe"');
     expect(cli(["review", model, "--answers", join(dir, "missing.yaml")]).code).toBe(2);
+  });
+
+  test("review --flows: the diagrams as Markdown with Mermaid, or as JSON", () => {
+    const { model } = project();
+    const md = cli(["review", model, "--flows"]);
+    expect(md.code).toBe(0);
+    expect(md.out).toContain("## イベントのつながり\n\n```mermaid\nflowchart LR");
+    expect(md.out).toContain("### CleaningStaff › 招待を受諾する（accept_invitation）\n\n```mermaid\nsequenceDiagram");
+    const json = JSON.parse(cli(["review", model, "--flows", "--format", "json"]).out);
+    expect(json.useCases.map((d: { id: string }) => d.id)).toContain("CleaningStaff.accept_invitation");
+    expect(json.events.edges.length).toBeGreaterThan(0);
+  });
+
+  test("verify: proofs and counterexamples with Z3, SMT-LIB scripts on request; review --proofs asks about the counterexamples", async () => {
+    const { model, dir } = project();
+    const md = await cliAsync(["verify", model, "--smt2", join(dir, "smt")]);
+    expect(md.code).toBe(0);
+    expect(md.out).toContain("## 前提");
+    expect(md.out).toMatch(/証明 \d+・反例 \d+・不明 0/);
+    expect(md.err).toMatch(/\d+ SMT-LIB scripts in /);
+    const json = JSON.parse((await cliAsync(["verify", model, "--format", "json", "--depth", "0"])).out);
+    expect(json.results.length).toBeGreaterThan(0);
+    expect(json.results.every((r: { path?: unknown }) => r.path === undefined)).toBe(true);
+    const review = await cliAsync(["review", model, "--proofs", "--key"]);
+    expect(review.out).toContain("## 断られる場合（Z3 の反例）");
+    expect((await cliAsync(["verify", model, "--depth", "9"])).code).toBe(2);
+  }, 60_000);
+
+  test("changes: behaviour differences from another version; --check fails when a check loosens", () => {
+    const { model, dir } = project();
+    const before = join(dir, "before.ddd.yaml");
+    writeFileSync(before, readFileSync(model, "utf8"));
+    expect(cli(["changes", before, model]).out).toBe("振る舞いの変化はありません。");
+    // Revoking no longer requires the invitation to be open.
+    const text = readFileSync(model, "utf8");
+    const loosened = text.replace(/(- name: revoke\n(?:.*\n)*?\s+require: )\[is_open\]/, "$1[]");
+    expect(loosened).not.toBe(text);
+    writeFileSync(model, loosened);
+    const r = cli(["changes", before, model, "--check"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("▲ CleaningStaffInvitation.revoke の require から is_open がなくなる");
+    expect(cli(["changes", before, model]).code).toBe(0);
+    expect(JSON.parse(cli(["changes", before, model, "--format", "json"]).out)[0]).toMatchObject({ kind: "guard", weakens: true });
+    expect(cli(["changes"]).code).toBe(2);
   });
 
   test("review of an invalid model reports the errors instead", () => {

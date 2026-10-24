@@ -23,3 +23,7 @@ export * from "./split/index.ts";
 export * from "./facilitator.ts";
 export * from "./statemachine.ts";
 export * from "./review.ts";
+export * from "./flows.ts";
+export { conditionWords } from "./conditions.ts";
+export * from "./proofs.ts";
+export * from "./behavior.ts";

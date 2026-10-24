@@ -5,7 +5,8 @@
   "main": "src/index.ts",
   "dependencies": {
     "@ddd/core": "workspace:*",
-    "@ddd/generator": "workspace:*"
+    "@ddd/generator": "workspace:*",
+    "@ddd/verify": "workspace:*"
   },
   "bin": {
     "ddd": "src/main.ts"

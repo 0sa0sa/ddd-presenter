@@ -1,10 +1,32 @@
-import { formatPath, REVIEW_CATEGORIES, reviewMarkdown, reviewQuestions, validateModelText, type Path, type ReviewQuestion, type ReviewVerdict } from "@ddd/core";
+import { flowsMarkdown, formatPath, REVIEW_CATEGORIES, reviewMarkdown, reviewQuestions, validateModelText, type Analysis, type ModelIR, type Path, type ProofReport, type ReviewQuestion, type ReviewVerdict } from "@ddd/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError } from "../api.ts";
 import { downloadBlob, safeFileName } from "../lib/download.ts";
 import { answersOf, filterQuestions, reviewState, type ReviewFilter, type StoredAnswer } from "../lib/review.ts";
+import { FlowReview } from "./FlowReview.tsx";
+import { ProofView } from "./ProofView.tsx";
+
+type Mode = "questions" | "flows" | "proofs";
+const MODES: readonly Mode[] = ["questions", "flows", "proofs"];
 
 const KEY_PREF = "ddd.review.showModel";
+const KEY_MODE = "ddd.review.mode";
+const local = {
+  get: (key: string) => {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set: (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Not remembered in a private window.
+    }
+  },
+};
 const pref = {
   get: () => {
     try {
@@ -37,6 +59,10 @@ export function ReviewView({
   dirty,
   canEdit,
   onGoto,
+  text,
+  model,
+  analysis,
+  onApply,
 }: {
   projectId: string;
   projectName: string;
@@ -45,15 +71,32 @@ export function ReviewView({
   dirty: boolean;
   canEdit: boolean;
   onGoto: (p: Path) => void;
+  /** The model being edited (the flow diagrams are drawn from it, and their .flow blocks edit it). */
+  text: string;
+  model?: ModelIR;
+  analysis?: Analysis;
+  onApply: (yaml: string, message: string) => void;
 }) {
   const result = useMemo(() => validateModelText(savedYaml), [savedYaml]);
-  const questions = useMemo(() => (result.analysis && result.ok ? reviewQuestions(result.analysis) : []), [result]);
+  // Proofs of the saved version (Z3 on the server, docs/09 §29): their counterexamples are questions too.
+  const [proofs, setProofs] = useState<{ version: number; loading: boolean; report?: ProofReport | null; reason?: string; error?: string }>({ version: 0, loading: false });
+  const report = proofs.version === savedVersion ? (proofs.report ?? undefined) : undefined;
+  const questions = useMemo(() => (result.analysis && result.ok ? reviewQuestions(result.analysis, report ? { proofs: report } : {}) : []), [result, report]);
   const [stored, setStored] = useState<Record<string, StoredAnswer>>({});
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string>();
   const [filter, setFilter] = useState<ReviewFilter>("all");
   const [showModel, setShowModel] = useState(pref.get);
   const [noteOpen, setNoteOpen] = useState<string>();
+  const [mode, setModeState] = useState<Mode>(() => {
+    const m = local.get(KEY_MODE) as Mode | null;
+    return m && MODES.includes(m) ? m : "questions";
+  });
+  const [flowFocus, setFlowFocus] = useState<{ id: string; nonce: number }>();
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    local.set(KEY_MODE, m);
+  };
   const storedRef = useRef(stored);
   storedRef.current = stored;
 
@@ -73,7 +116,32 @@ export function ReviewView({
     };
   }, [projectId]);
 
+  useEffect(() => {
+    if (!result.ok) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setProofs({ version: savedVersion, loading: true });
+    // The server answers "running" while a first proof of the version is still going: ask again shortly.
+    const ask = () =>
+      api.proofs(projectId, savedVersion).then(
+        (r) => {
+          if (!live) return;
+          if (r.reason === "running") timer = setTimeout(ask, 2000);
+          else setProofs({ version: r.version, loading: false, report: r.report, ...(r.reason ? { reason: r.reason } : {}) });
+        },
+        (e) => live && setProofs({ version: savedVersion, loading: false, error: describeError(e) }),
+      );
+    void ask();
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [projectId, savedVersion, result.ok]);
+
   const state = useMemo(() => reviewState(questions, stored), [questions, stored]);
+  // Answers to proof questions are not stale while the version's proofs are loading, off or failed (the questions
+  // are simply not there yet): only a report for the saved version tells which counterexamples are gone.
+  const stale = useMemo(() => (report ? state.stale : state.stale.filter((x) => !x.id.startsWith("proof:"))), [state.stale, report]);
   const shown = useMemo(() => filterQuestions(questions, stored, filter, state.findingIds), [questions, stored, filter, state.findingIds]);
 
   const save = async (q: ReviewQuestion, answer: ReviewVerdict | null, note: string) => {
@@ -105,10 +173,84 @@ export function ReviewView({
     const md = reviewMarkdown(projectName, questions, withAnswers ? { answers: answersOf(stored) } : {});
     downloadBlob(new Blob([md], { type: "text/markdown" }), `${safeFileName(projectName)}-${withAnswers ? "review-result" : "review-sheet"}-v${savedVersion}.md`);
   };
+  const downloadFlows = () => {
+    if (!model) return;
+    downloadBlob(new Blob([flowsMarkdown(model, analysis)], { type: "text/markdown" }), `${safeFileName(projectName)}-flows${dirty ? "-unsaved" : `-v${savedVersion}`}.md`);
+  };
+
+  const modes = (
+    <div className="review-modes segmented" role="tablist" aria-label="レビューの方法">
+      {(
+        [
+          ["questions", "質問（はい／いいえ）"],
+          ["flows", "フロー図"],
+          ["proofs", "証明（Z3）"],
+        ] as const
+      ).map(([id, label]) => (
+        <button key={id} role="tab" className="small-button" aria-selected={mode === id} aria-pressed={mode === id} onClick={() => setMode(id)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (mode === "flows") {
+    return (
+      <div className="view review">
+        {modes}
+        <div className="flow-bar">
+          <p className="muted small flow-intro">モデルから作った手順の図です。順番・止まる所・どこ（サーバー・DB・イベント）で何をするかが業務どおりか、図ごとに答えてください。図は編集中のモデルから描きます。</p>
+          <div className="spacer" />
+          <button className="small-button" onClick={downloadFlows} disabled={!model} title="すべての図を Mermaid つきの Markdown で">
+            フロー図（Markdown）
+          </button>
+        </div>
+        {error && (
+          <p className="error-banner" role="alert">
+            {error}
+          </p>
+        )}
+        {!canEdit && <p className="small muted">閲覧者は回答・編集できません。</p>}
+        {model ? (
+          <FlowReview model={model} analysis={analysis} text={text} questions={questions} stored={stored} canEdit={canEdit && loaded} dirty={dirty} onAnswer={(q, a, n) => void save(q, a, n)} onApply={onApply} focus={flowFocus} />
+        ) : (
+          <p className="error-banner">モデルにエラーがあるため、図を描けません。モデルを直してください。</p>
+        )}
+      </div>
+    );
+  }
+
+  if (mode === "proofs") {
+    return (
+      <div className="view review">
+        {modes}
+        {error && (
+          <p className="error-banner" role="alert">
+            {error}
+          </p>
+        )}
+        <ProofView
+          projectName={projectName}
+          savedVersion={savedVersion}
+          proofs={proofs.version === savedVersion ? proofs : { loading: true }}
+          questions={questions}
+          stored={stored}
+          canEdit={canEdit && loaded}
+          dirty={dirty}
+          text={text}
+          model={model}
+          onAnswer={(q, a, n) => void save(q, a, n)}
+          onApply={onApply}
+          onGoto={onGoto}
+        />
+      </div>
+    );
+  }
 
   if (!result.ok || !result.analysis) {
     return (
-      <div className="view">
+      <div className="view review">
+        {modes}
         <p className="error-banner">保存されたモデル（v{savedVersion}）にエラーがあるため、質問を作れません。モデルを直して保存してください。</p>
       </div>
     );
@@ -118,6 +260,7 @@ export function ReviewView({
   const numbers = new Map(questions.map((q, i) => [q.id, i + 1]));
   return (
     <div className="view review">
+      {modes}
       <p className="muted">
         モデルから作った「はい／いいえ」の質問です。プロダクトマネージャーが、業務として正しいかを答えてください。モデルと違う答え（とモデルにまだないことへの「はい」）が、モデルを直すべき所になります。回答はこのプロジェクトのメンバーに共有されます。
       </p>
@@ -199,6 +342,22 @@ export function ReviewView({
                     {s.by}・{new Date(s.at).toLocaleString()}
                   </span>
                 )}
+                {q.category === "proofs" && (
+                  <button className="linklike small" onClick={() => setMode("proofs")}>
+                    反例を見る
+                  </button>
+                )}
+                {q.category === "flows" && (
+                  <button
+                    className="linklike small"
+                    onClick={() => {
+                      setFlowFocus({ id: q.id.split(":")[1]!, nonce: Date.now() });
+                      setMode("flows");
+                    }}
+                  >
+                    図で見る
+                  </button>
+                )}
                 <button className="linklike small" onClick={() => setNoteOpen(noteOpen === q.id ? undefined : q.id)}>
                   {s?.note ? "メモを見る" : "メモ"}
                 </button>
@@ -234,11 +393,11 @@ export function ReviewView({
         })}
       </ol>
 
-      {state.stale.length > 0 && filter === "all" && (
+      {stale.length > 0 && filter === "all" && (
         <details className="small">
-          <summary>モデルの変更で使われなくなった回答 {state.stale.length} 件</summary>
+          <summary>モデルの変更で使われなくなった回答 {stale.length} 件</summary>
           <ul>
-            {state.stale.map((x) => (
+            {stale.map((x) => (
               <li key={x.id}>
                 {x.stored.text || x.id} → {x.stored.answer === "yes" ? "はい" : "いいえ"}
                 {x.stored.by ? `（${x.stored.by}）` : ""}

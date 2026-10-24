@@ -9,6 +9,7 @@ import { policiesFile, policyTestFile, translatorScaffolds } from "./python/poli
 import { ADAPTERS_PY, RUNTIME_PY } from "./python/runtime.ts";
 import { Code, docstringLines, GENERATOR_NAME, GENERATOR_VERSION, pyType } from "./python/support.ts";
 import { aggregateTestFile, invariantTestFile, testingFile, useCaseTestFile } from "./python/tests.ts";
+import { propertyTestFile } from "./python/properties.ts";
 import { readAccessFile, securityFiles, servedOverHttp } from "./python/security.ts";
 import { securityTestFile } from "./python/security-tests.ts";
 import { modelHash, sha256, type GeneratedFile, type GenerationOutput, type Manifest } from "./output.ts";
@@ -88,6 +89,8 @@ export function generatePython(analysis: Analysis, modelText: string): Generatio
     }
     const invariants = invariantTestFile(L);
     if (invariants) gen(invariants.path, invariants.content);
+    const properties = propertyTestFile(L);
+    if (properties) gen(properties.path, properties.content);
     const policies = policiesFile(L);
     if (policies) gen(policies.path, policies.content);
     const policyTests = policyTestFile(L, analysis);

@@ -2784,3 +2784,363 @@ input[aria-invalid="true"] {
     flex-direction: column;
   }
 }
+
+/* ------------------------------------------------------------------ review: flow diagrams (docs/11 §12) */
+
+.review-modes {
+  margin-bottom: 8px;
+}
+.flow-intro {
+  margin: 0;
+  max-width: 72ch;
+}
+.flow-review {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.flow-index {
+  position: sticky;
+  top: 48px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  padding-right: 8px;
+}
+.flow-index ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.flow-index-ctx {
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-weight: 600;
+  margin: 12px 0 2px;
+}
+.flow-index-item {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-s);
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.flow-index-item:hover {
+  background: var(--sunken);
+}
+.flow-index-item[aria-current="true"] {
+  background: color-mix(in srgb, var(--k-usecase) 14%, transparent);
+  font-weight: 600;
+}
+.flow-mark {
+  flex: none;
+  width: 1em;
+  text-align: center;
+  color: var(--ink-faint);
+}
+.flow-mark-yes {
+  color: var(--ok);
+}
+.flow-mark-no,
+.flow-mark-stale {
+  color: var(--sev-warning);
+}
+.flow-main {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+.flow-main-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.flow-title {
+  font-size: 17px;
+  margin: 0;
+}
+.flow-sub {
+  margin: 2px 0 0;
+  max-width: 72ch;
+}
+.flow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.flow-canvas {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  max-height: calc(100vh - 260px);
+}
+.flow-svg {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+.flow-svg text {
+  fill: var(--ink);
+}
+.flow-life {
+  stroke: var(--line-strong);
+  stroke-dasharray: 4 4;
+}
+.flow-head-box rect {
+  stroke: color-mix(in srgb, var(--st-ink) 35%, transparent);
+}
+.flow-svg .flow-head-label {
+  fill: var(--st-ink);
+  font-weight: 700;
+  font-size: 12.5px;
+}
+.flow-svg .flow-head-sub {
+  fill: color-mix(in srgb, var(--st-ink) 70%, transparent);
+  font-size: 11px;
+}
+.flow-msg line,
+.flow-msg path {
+  stroke: var(--ink-soft);
+  stroke-width: 1.3;
+  fill: none;
+}
+.flow-msg-reply line,
+.flow-msg-reply path {
+  stroke-dasharray: 5 4;
+}
+.flow-msg-async line {
+  stroke: var(--k-event);
+}
+.flow-msg-fail line {
+  stroke: var(--sev-error);
+  stroke-dasharray: 5 4;
+}
+.flow-svg .flow-msg-fail text {
+  fill: var(--sev-error);
+}
+.flow-head {
+  fill: var(--ink-soft);
+}
+.flow-head-open {
+  fill: none;
+  stroke: var(--ink-soft);
+  stroke-width: 1.3;
+}
+.flow-head-x {
+  stroke: var(--sev-error);
+  stroke-width: 2;
+}
+.flow-note rect {
+  fill: color-mix(in srgb, var(--st-actor) 28%, var(--surface));
+  stroke: color-mix(in srgb, var(--k-rule) 40%, transparent);
+}
+.flow-frame rect {
+  fill: none;
+  stroke: var(--k-usecase);
+  stroke-width: 1.1;
+}
+.flow-frame-opt rect {
+  stroke: var(--line-strong);
+}
+.flow-frame-tab {
+  fill: none;
+  stroke: inherit;
+}
+.flow-frame-alt .flow-frame-tab {
+  stroke: var(--k-usecase);
+}
+.flow-frame-opt .flow-frame-tab {
+  stroke: var(--line-strong);
+}
+.flow-svg .flow-frame-type {
+  font-weight: 700;
+  font-size: 11px;
+  fill: var(--ink-soft);
+}
+.flow-svg .flow-frame-label {
+  fill: var(--ink-soft);
+  font-size: 11.5px;
+}
+.flow-frame-sep {
+  stroke: var(--line-strong);
+  stroke-dasharray: 4 3;
+}
+.flow-edge path {
+  fill: none;
+  stroke: var(--ink-soft);
+  stroke-width: 1.3;
+}
+.flow-edge.is-dashed path {
+  stroke-dasharray: 5 4;
+}
+.flow-svg .flow-edge-label {
+  font-size: 11px;
+  fill: var(--ink-faint);
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+}
+.flow-node rect {
+  stroke: color-mix(in srgb, var(--st-ink) 30%, transparent);
+}
+.flow-node.is-dangling rect {
+  stroke: var(--st-ink);
+  stroke-dasharray: 4 3;
+  stroke-width: 1.4;
+}
+.flow-node.is-clickable {
+  cursor: pointer;
+}
+.flow-node.is-clickable:hover rect,
+.flow-node.is-clickable:focus-visible rect {
+  stroke: var(--focus);
+  stroke-width: 2;
+}
+.flow-node:focus-visible {
+  outline: none;
+}
+.flow-svg .flow-node-ctx {
+  fill: color-mix(in srgb, var(--st-ink) 65%, transparent);
+  font-size: 10.5px;
+}
+.flow-svg .flow-node-label {
+  fill: var(--st-ink);
+  font-weight: 600;
+}
+.flow-svg .flow-node-detail {
+  fill: color-mix(in srgb, var(--st-ink) 70%, transparent);
+  font-family: var(--font-code);
+  font-size: 10.5px;
+}
+.flow-edit {
+  border: 1px solid var(--k-usecase);
+  border-radius: var(--radius-m);
+  padding: 8px 10px 10px;
+  display: grid;
+  gap: 8px;
+  background: var(--surface);
+}
+.flow-edit-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.flow-editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  font-family: var(--font-code);
+  font-size: 13px;
+  max-height: 360px;
+  overflow: auto;
+}
+.flow-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.flow-problems {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+@media (max-width: 760px) {
+  .flow-review {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .flow-index {
+    position: static;
+    max-height: 200px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+.flow-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+/* -- proofs (Z3, docs/11 §13) ------------------------------------------------ */
+.proof-assumptions {
+  margin: 6px 0 2px;
+  color: var(--ink-soft);
+}
+.proof-assumptions ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+.proof-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.proof-item {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 4px 10px;
+}
+.proof-item[data-outcome="counterexample"] {
+  border-left: 3px solid var(--k-event);
+  padding-left: 10px;
+}
+.proof-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.proof-badge {
+  flex: none;
+  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: var(--radius-s);
+  border: 1px solid currentColor;
+}
+.proof-proven {
+  color: var(--ok);
+}
+.proof-counterexample {
+  color: var(--k-event);
+}
+.proof-unknown {
+  color: var(--ink-faint);
+}
+.proof-detail {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.proof-trace {
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+.proof-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+/* -- behaviour changes of a proposal (docs/11 §13) ------------------------------ */
+.behavior-changes ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+.behavior-weakens {
+  color: var(--sev-warning);
+}

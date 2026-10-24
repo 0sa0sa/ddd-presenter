@@ -181,6 +181,11 @@ export interface GenerationSettings {
   typescript: { testRunner: TestRunner; api?: ApiSettings };
   /** Settings of the Python target (`generation.python`): the Connect protocol as a WSGI app (docs/09 §25). */
   python?: { connect: boolean; basePath: string };
+  /**
+   * Property tests of the aggregates (`property_tests: true`, docs/09 §29): Hypothesis / fast-check run random
+   * factories and operations; each call must succeed or raise a domain error the model declares for it.
+   */
+  propertyTests?: boolean;
 }
 
 interface Located {
